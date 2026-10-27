@@ -308,6 +308,13 @@
     <ClCompile Include="src\Utilities\SpawnerHelper.cpp" />
     <ClCompile Include="src\Utilities\Stream.cpp" />
   </ItemGroup>
+  <!-- Shaders, compiled by the PhobosCompileShaders target in Phobos.props -->
+  <ItemGroup>
+    <!-- src\Render\Shaders\ -->
+    <PhobosShader Include="src\Render\Shaders\Fullscreen.vs.hlsl">
+      <Profile>vs_6_0</Profile>
+    </PhobosShader>
+  </ItemGroup>
   <!-- Header files -->
   <ItemGroup>
     <!-- lib\ -->

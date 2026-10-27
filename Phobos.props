@@ -22,11 +22,18 @@
   <PropertyGroup>
     <GenerateManifest>false</GenerateManifest>
     <IntDir>$(Configuration)\IntDir\</IntDir>
-    <IncludePath>$(ExpandedIncludePath);$(MSBuildThisFileDirectory)src\;$(YRppDir);$(IntDir)Generated;$(VC_IncludePath)</IncludePath>
+    <IncludePath>$(ExpandedIncludePath);$(MSBuildThisFileDirectory)src\;$(YRppDir);$(MSBuildThisFileDirectory)lib\SDL3\include;$(IntDir)Generated;$(VC_IncludePath)</IncludePath>
+    <LibraryPath>$(MSBuildThisFileDirectory)lib\SDL3\lib\x86;$(LibraryPath)</LibraryPath>
     <LinkIncremental>false</LinkIncremental>
     <OutDir>$(Configuration)\</OutDir>
     <CoreLibraryDependencies></CoreLibraryDependencies>
-    <PhobosExtraLibs>dbghelp.lib;onecore.lib</PhobosExtraLibs>
+    <PhobosExtraLibs>dbghelp.lib;onecore.lib;SDL3.lib;delayimp.lib</PhobosExtraLibs>
+  </PropertyGroup>
+  <!-- Shaders: the Windows SDK dxc has no SPIR-V codegen, so use the Vulkan SDK one unless
+       PhobosDxc is set (as an MSBuild property or an environment variable) -->
+  <PropertyGroup>
+    <PhobosDxc Condition="'$(PhobosDxc)' == '' and '$(VULKAN_SDK)' != ''">$(VULKAN_SDK)\Bin\dxc.exe</PhobosDxc>
+    <PhobosShaderOutDir>$(IntDir)Generated\Shaders\</PhobosShaderOutDir>
   </PropertyGroup>
   <!-- Global -->
   <ItemDefinitionGroup>
@@ -58,6 +65,8 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>$(PhobosExtraLibs);%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- Loaded on first use, so a missing SDL3.dll only disables the GPU render window -->
+      <DelayLoadDLLs>SDL3.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
       <SubSystem>Windows</SubSystem>
       <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
       <ProfileGuidedDatabase>$(IntDir)$(TargetName).pgd</ProfileGuidedDatabase>
@@ -138,6 +147,28 @@
     </ItemGroup>
     <MakeDir Directories="$(IntDir)Generated" />
     <WriteLinesToFile File="$(IntDir)Generated\Phobos.Git.h" Lines="@(GitHeader)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+  </Target>
+  <!--
+    Shader compilation. Every PhobosShader item (listed in Phobos.vcxproj with its dxc Profile)
+    is compiled twice - to DXIL for the D3D12 backend and to SPIR-V for the Vulkan backend of
+    SDL_GPU - into headers under $(PhobosShaderOutDir) that hold the bytecode as
+    g_<Name>_DXIL / g_<Name>_SPIRV, where <Name> is the file name with dots replaced by
+    underscores (Fullscreen.vs.hlsl -> g_Fullscreen_vs_DXIL). PhobosShaderInclude items are
+    only listed as inputs so that editing a shared .hlsli recompiles the shaders.
+  -->
+  <Target Name="PhobosCompileShaders" BeforeTargets="ClCompile" Condition="'@(PhobosShader)' != ''"
+    Inputs="@(PhobosShader);@(PhobosShaderInclude)"
+    Outputs="@(PhobosShader->'$(PhobosShaderOutDir)%(Filename).dxil.h');@(PhobosShader->'$(PhobosShaderOutDir)%(Filename).spirv.h')">
+    <Error Condition="'$(PhobosDxc)' == '' or !Exists('$(PhobosDxc)')"
+      Text="dxc with SPIR-V support was not found (PhobosDxc = '$(PhobosDxc)'). Install the Vulkan SDK or set PhobosDxc to the path of dxc.exe." />
+    <ItemGroup>
+      <PhobosShader>
+        <VarName>g_$([System.String]::Copy('%(Filename)').Replace('.', '_'))</VarName>
+      </PhobosShader>
+    </ItemGroup>
+    <MakeDir Directories="$(PhobosShaderOutDir)" />
+    <Exec Command="&quot;$(PhobosDxc)&quot; -nologo -T %(PhobosShader.Profile) -E main -Fh &quot;$(PhobosShaderOutDir)%(PhobosShader.Filename).dxil.h&quot; -Vn %(PhobosShader.VarName)_DXIL &quot;%(PhobosShader.FullPath)&quot;" />
+    <Exec Command="&quot;$(PhobosDxc)&quot; -nologo -T %(PhobosShader.Profile) -E main -spirv -fspv-target-env=vulkan1.0 -Fh &quot;$(PhobosShaderOutDir)%(PhobosShader.Filename).spirv.h&quot; -Vn %(PhobosShader.VarName)_SPIRV &quot;%(PhobosShader.FullPath)&quot;" />
   </Target>
   <!-- BuildType -->
   <ItemDefinitionGroup Condition="'$(BuildType)' == 'NIGHTLY'">
