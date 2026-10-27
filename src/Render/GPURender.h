@@ -1,6 +1,6 @@
 #pragma once
 
-class CCINIClass;
+#include <Windows.h>
 
 // Mirrors the game screen into a secondary window rendered with SDL_GPU, as the first step
 // towards drawing the game on the GPU. SDL is only included inside src\Render, so this header
@@ -25,23 +25,36 @@ public:
 		Vulkan,
 	};
 
-	// [Phobos] GPURender.Enable / GPURender.Driver in RA2MD.INI
-	static void LoadSettings(CCINIClass& ini, const char* pSection);
 	// -NoGPURender, takes precedence over the settings
 	static void DisableByCommandLine();
+
+	// The game surfaces have been (re)created for a resolution, at startup or by Set_Video_Mode:
+	// starts the GPU render on the first call, then follows the resolution
+	static void OnVideoModeSet();
+	// Releases everything before DirectDraw goes away on exit
+	static void Shutdown();
 
 	static State GetState();
 
 private:
+	// [Phobos] GPURender.Enable / GPURender.Driver in RA2MD.INI
+	static void LoadSettings();
 	static bool ShouldStart();
 	static bool IsDisplayEnvironmentSupported();
 	static bool IsDirectDrawWrapped();
 
+	static void Initialize(int width, int height);
+	static void ReleaseResources();
+	static void Present();
+	static void CALLBACK OnTimer(HWND hWnd, UINT message, UINT_PTR idEvent, DWORD time);
+
 	static void SetState(State state);
-	static void Fail(const char* pWhat);
+	// Logs pReason, or SDL_GetError() without one, releases everything and enters Failed
+	static void Fail(const char* pWhat, const char* pReason = nullptr);
 
 	static bool Enabled;
 	static bool DisabledByCommandLine;
 	static DriverPreference Driver;
 	static State CurrentState;
+	static UINT_PTR TimerID;
 };

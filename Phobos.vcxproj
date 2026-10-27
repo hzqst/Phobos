@@ -296,7 +296,9 @@
     <ClCompile Include="src\New\Type\Affiliated\TypeConvertGroup.cpp" />
     <!-- src\Render -->
     <ClCompile Include="src\Render\GPURender.cpp" />
+    <ClCompile Include="src\Render\Hooks.cpp" />
     <ClCompile Include="src\Render\SDLLoader.cpp" />
+    <ClCompile Include="src\Render\SecondaryWindow.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
     <ClCompile Include="src\Utilities\AresAddressInit.cpp" />
@@ -451,6 +453,7 @@
     <!-- src\Render -->
     <ClInclude Include="src\Render\GPURender.h" />
     <ClInclude Include="src\Render\SDLLoader.h" />
+    <ClInclude Include="src\Render\SecondaryWindow.h" />
     <!-- src\Utilities -->
     <ClInclude Include="src\Utilities\Anchor.h" />
     <ClInclude Include="src\Utilities\AresFunctions.h" />
