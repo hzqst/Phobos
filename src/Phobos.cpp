@@ -3,6 +3,7 @@
 #include <commctrl.h>
 
 #include <Misc/ExceptionHandler.h>
+#include <Render/GPURender.h>
 
 #include <Utilities/Debug.h>
 #include <Utilities/Patch.h>
@@ -95,6 +96,10 @@ void Phobos::CmdLineParse(char** ppArgs, int nNumArgs)
 		if (_stricmp(pArg, "-FullCrashDump") == 0)
 		{
 			ExceptionHandler::GenerateFullCrashDump = true;
+		}
+		if (_stricmp(pArg, "-NoGPURender") == 0)
+		{
+			GPURender::DisableByCommandLine();
 		}
 	}
 

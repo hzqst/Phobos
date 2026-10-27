@@ -8,6 +8,7 @@
 #include <Utilities/Macro.h>
 
 #include "Misc/BlittersFix.h"
+#include "Render/GPURender.h"
 
 bool Phobos::UI::DisableEmptySpawnPositions = false;
 bool Phobos::UI::ExtendedToolTips = false;
@@ -145,6 +146,8 @@ DEFINE_HOOK(0x5FACDF, OptionsClass_LoadSettings_LoadPhobosSettings, 0x5)
 
 	Phobos::Config::ShowDesignatorRange = CCINIClass::INI_RA2MD.ReadBool(phobosSection, "ShowDesignatorRange", false);
 	Phobos::Config::ShowPowerPlantEnhancerRange = CCINIClass::INI_RA2MD.ReadBool(phobosSection, "ShowPowerPlantEnhancerRange", false);
+
+	GPURender::LoadSettings(CCINIClass::INI_RA2MD, phobosSection);
 
 	CCINIClass ini_uimd {};
 	ini_uimd.LoadFromFile(GameStrings::UIMD_INI);

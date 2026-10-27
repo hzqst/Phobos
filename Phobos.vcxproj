@@ -294,6 +294,9 @@
     <ClCompile Include="src\New\Type\Affiliated\TiberiumEaterTypeClass.cpp" />
     <ClCompile Include="src\New\Type\Affiliated\TintTypeClass.cpp" />
     <ClCompile Include="src\New\Type\Affiliated\TypeConvertGroup.cpp" />
+    <!-- src\Render -->
+    <ClCompile Include="src\Render\GPURender.cpp" />
+    <ClCompile Include="src\Render\SDLLoader.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
     <ClCompile Include="src\Utilities\AresAddressInit.cpp" />
@@ -445,6 +448,9 @@
     <ClInclude Include="src\New\Type\Affiliated\TiberiumEaterTypeClass.h" />
     <ClInclude Include="src\New\Type\Affiliated\TintTypeClass.h" />
     <ClInclude Include="src\New\Type\Affiliated\TypeConvertGroup.h" />
+    <!-- src\Render -->
+    <ClInclude Include="src\Render\GPURender.h" />
+    <ClInclude Include="src\Render\SDLLoader.h" />
     <!-- src\Utilities -->
     <ClInclude Include="src\Utilities\Anchor.h" />
     <ClInclude Include="src\Utilities\AresFunctions.h" />
