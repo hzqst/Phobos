@@ -2,6 +2,8 @@
 
 2026-10-28。接续 [CameosGPU.md](CameosGPU.md)，复用 gamemd-reverse Issue #8 / `194cd7f` 的列表、状态、层序和生命周期依据。本批实现扇形时钟、不可用暗化、FlashEndFrame 闪烁和 hover 轮廓。普通权限 Spawner 对局中用户反馈“图标countdown mask一切正常”；其他分支的动态覆盖见末节。
 
+后续文字阶段已接入数量、READY/HOLD 与超武 readiness，按原生顺序放在时钟前后；见 [SidebarTextGPU.md](SidebarTextGPU.md)。下文“文字未接入”描述本阶段当时的范围。
+
 ## 两个缺口的结论
 
 ### Countdown 是 GCLOCK2 遮罩

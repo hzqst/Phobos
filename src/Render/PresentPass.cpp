@@ -241,6 +241,7 @@ bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextu
 		uniforms.Region[3] = region.Height;
 		uniforms.Effect[0] = sprite.Effect;
 		uniforms.Effect[1] = sprite.SolidColor;
+		uniforms.Effect[2] = sprite.Opacity256;
 		if (sprite.Palette)
 		{
 			std::copy(sprite.Shift.begin(), sprite.Shift.end(), uniforms.Shift);

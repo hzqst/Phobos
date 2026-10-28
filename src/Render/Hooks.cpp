@@ -1,5 +1,6 @@
 #include "GPURender.h"
 #include "CursorTrace.h"
+#include "SidebarText.h"
 
 #include <Utilities/Macro.h>
 
@@ -158,8 +159,66 @@ DEFINE_HOOK(0x6A70AE, SidebarClass_Draw_GPURenderSnapshot, 0x5)
 DEFINE_HOOK(0x6A99C3, StripClass_Draw_GPUState, 0x9)
 {
 	if (R->Stack<unsigned char>(0x16))
+	{
+		SidebarText::BeginItem(R);
 		GPURender::OnCameoState(R->Stack<int>(0x3C), (R->EBX() & 0xFF) != 0,
 			R->Stack<unsigned char>(0x12) != 0, R->Stack<unsigned char>(0x14) != 0, R->Stack<int>(0x38));
+	}
+	return 0;
+}
+
+DEFINE_HOOK(0x6AA01C, StripClass_ItemEnd_GPUText, 0x5)
+{
+	SidebarText::EndItem(R->ESP());
+	return 0;
+}
+
+DEFINE_HOOK(0x4A5EB0, SimpleText_Print_GPUText, 0x7)
+{
+	SidebarText::ObservePrint(R);
+	return 0;
+}
+
+// SimpleText has restored its stdcall arguments; saved registers/locals occupy 0x38.
+DEFINE_HOOK(0x4A5FF2, SimpleText_PrintEnd_GPUText, 0x5)
+{
+	SidebarText::EndPrint(R->ESP() + 0x38);
+	return 0;
+}
+
+DEFINE_HOOK(0x434120, BitFont_Blit_GPUText, 0x5)
+{
+	SidebarText::ObserveGlyph(R);
+	return 0;
+}
+
+// After the Ares entry clamp and native sub esp,2Ch / push ebp / push esi.
+DEFINE_HOOK(0x621B85, TextBackground_GPUText, 0x6)
+{
+	SidebarText::ObserveBackground(R);
+	return 0;
+}
+
+// ECX is the font at these instance entries, before any owned storage is freed.
+DEFINE_HOOK_AGAIN(0x434700, BitFont_Invalidating_GPUText, 0x5)
+DEFINE_HOOK_AGAIN(0x433940, BitFont_Invalidating_GPUText, 0x6)
+DEFINE_HOOK(0x434A40, BitFont_Invalidating_GPUText, 0x6)
+{
+	SidebarText::FontInvalidating(reinterpret_cast<const void*>(R->ECX()));
+	return 0;
+}
+
+// The loader takes a filename in ECX, not a font. Conservatively clear all aliases.
+DEFINE_HOOK(0x433990, BitFont_Load_GPUText, 0x5)
+{
+	SidebarText::FontInvalidating(nullptr);
+	return 0;
+}
+
+// Stacked with Phobos' CSF cleanup: both only discard their own copied strings.
+DEFINE_HOOK(0x734D30, StringTable_Unload_GPUText, 0x5)
+{
+	SidebarText::ClearRuns();
 	return 0;
 }
 

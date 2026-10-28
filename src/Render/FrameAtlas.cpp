@@ -17,7 +17,7 @@ struct FrameAtlas::Impl
 		std::uint64_t LastUse = 0;
 		bool Retiring = false, Pinned = false;
 	};
-	struct Location { Page* Owner; AtlasAllocator::Region Rect; bool Uploaded = false, Queued = false; };
+	struct Location { Page* Owner; AtlasAllocator::Region Rect; const FrameCache::Cache* Storage; bool Uploaded = false, Queued = false; };
 	struct Color
 	{
 		PaletteCache::Data Data;
@@ -50,7 +50,8 @@ struct FrameAtlas::Impl
 	std::unordered_map<std::uint64_t, Color> Colors;
 	std::array<Slot, 3> Slots;
 	std::vector<Upload> Uploads;
-	std::uint64_t Completed = 0, LastInvalidations = 0;
+	std::uint64_t Completed = 0;
+	std::unordered_map<const FrameCache::Cache*, std::uint64_t> Invalidations;
 	int ActiveSlot = -1;
 	unsigned UsedBytes = 0;
 	bool Encoded = false, Failed = false;
@@ -89,7 +90,7 @@ struct FrameAtlas::Impl
 			if (it->second.Owner == page) it = Locations.erase(it); else ++it;
 		++Stats.Evictions;
 	}
-	Location* Reserve(const FrameCache::FrameRecord& frame)
+	Location* Reserve(const FrameCache::FrameRecord& frame, const FrameCache::Cache& storage)
 	{
 		if (auto found = Locations.find(frame.ID.Value); found != Locations.end()) return &found->second;
 		const int width = frame.Geometry.Width, height = frame.Geometry.Height;
@@ -97,7 +98,7 @@ struct FrameAtlas::Impl
 		for (auto& page : Pages)
 			if (!page->Retiring)
 				if (const auto region = page->Allocator.Allocate(width, height))
-					return &Locations.emplace(frame.ID.Value, Location {page.get(), *region}).first->second;
+					return &Locations.emplace(frame.ID.Value, Location {page.get(), *region, &storage}).first->second;
 		const auto hasBudget = [&] { return Pages.size() < Config.MaxPages && (Pages.size() + 1) * PageBytes() <= Config.PageBudget; };
 		if (!hasBudget())
 		{
@@ -113,7 +114,7 @@ struct FrameAtlas::Impl
 		const auto region = page->Allocator.Allocate(width, height);
 		auto* owner = page.get();
 		Pages.push_back(std::move(page));
-		return &Locations.emplace(frame.ID.Value, Location {owner, *region}).first->second;
+		return &Locations.emplace(frame.ID.Value, Location {owner, *region, &storage}).first->second;
 	}
 	Color* GetColor(const PaletteCache::Record& palette)
 	{
@@ -212,11 +213,15 @@ FrameAtlas::BeginResult FrameAtlas::Begin(const FrameCache::Cache& cache, std::s
 	s.UsedBytes = 0; s.Uploads.clear(); s.Encoded = false;
 	for (auto& page : s.Pages) page->Pinned = false;
 	for (auto& [id, color] : s.Colors) color.Pinned = false;
-	if (s.LastInvalidations != cache.GetStats().Invalidations)
+	s.Invalidations.try_emplace(&cache, 0);
+	for (const auto& request : requests)
+		if (request.Storage) s.Invalidations.try_emplace(request.Storage, 0);
+	for (auto& [storage, revision] : s.Invalidations)
+	if (revision != storage->GetStats().Invalidations)
 	{
-		s.LastInvalidations = cache.GetStats().Invalidations;
+		revision = storage->GetStats().Invalidations;
 		for (auto it = s.Locations.begin(); it != s.Locations.end();)
-			if (!cache.Resolve(FrameCache::FrameID {it->first})) it = s.Locations.erase(it); else ++it;
+			if (it->second.Storage == storage && !storage->Resolve(FrameCache::FrameID {it->first})) it = s.Locations.erase(it); else ++it;
 		for (auto& page : s.Pages)
 			if (!page->Retiring && std::none_of(s.Locations.begin(), s.Locations.end(),
 				[&](const auto& pair) { return pair.second.Owner == page.get(); })) s.Retire(page.get());
@@ -225,20 +230,26 @@ FrameAtlas::BeginResult FrameAtlas::Begin(const FrameCache::Cache& cache, std::s
 	// Pin all current requests before considering an LRU victim, including later draws.
 	for (const auto& request : requests)
 	{
-		if (!request.Palette || !cache.Resolve(request.Frame)) continue;
+		const auto& storage = request.Storage ? *request.Storage : cache;
+		if (!request.Valid() || !storage.Resolve(request.Frame)) continue;
 		if (auto it = s.Locations.find(request.Frame.Value); it != s.Locations.end()) it->second.Owner->Pinned = true;
-		if (auto it = s.Colors.find(request.Palette->ID.Value); it != s.Colors.end()) it->second.Pinned = true;
+		if (request.Palette)
+			if (auto it = s.Colors.find(request.Palette->ID.Value); it != s.Colors.end()) it->second.Pinned = true;
 	}
 	for (const auto& request : requests)
 	{
-		const auto* frame = cache.Resolve(request.Frame);
-		if (!frame || !request.Palette) continue;
-		auto* color = s.GetColor(*request.Palette);
-		if (!color) { ++s.Stats.BudgetMisses; continue; }
-		color->Pinned = true;
-		if (!color->Uploaded && !color->Queued)
-			color->Queued = s.Queue(request.Palette->ID.Value, true, color->Texture, {0,0,256,1}, 4);
-		auto* location = s.Reserve(*frame);
+		const auto& storage = request.Storage ? *request.Storage : cache;
+		const auto* frame = storage.Resolve(request.Frame);
+		if (!frame || !request.Valid()) continue;
+		if (request.Palette)
+		{
+			auto* color = s.GetColor(*request.Palette);
+			if (!color) { ++s.Stats.BudgetMisses; continue; }
+			color->Pinned = true;
+			if (!color->Uploaded && !color->Queued)
+				color->Queued = s.Queue(request.Palette->ID.Value, true, color->Texture, {0,0,256,1}, 4);
+		}
+		auto* location = s.Reserve(*frame, storage);
 		if (!location) { ++s.Stats.BudgetMisses; continue; }
 		location->Owner->Pinned = true;
 		if (!location->Uploaded && !location->Queued)
@@ -288,9 +299,12 @@ FrameAtlas::BeginResult FrameAtlas::Begin(const FrameCache::Cache& cache, std::s
 
 FrameAtlas::View FrameAtlas::Resolve(const Request& request) const
 {
-	if (!State || State->ActiveSlot < 0 || !request.Palette) return {};
+	if (!State || State->ActiveSlot < 0 || !request.Valid()) return {};
 	const auto& s = *State;
 	const auto frame = s.Locations.find(request.Frame.Value);
+	if (frame == s.Locations.end() || (!frame->second.Uploaded && !frame->second.Queued)) return {};
+	if (request.Kind == SourceKind::Mask)
+		return {frame->second.Owner->Texture, nullptr, frame->second.Rect.X, frame->second.Rect.Y};
 	const auto color = s.Colors.find(request.Palette->ID.Value);
 	if (frame == s.Locations.end() || color == s.Colors.end() || color->second.Retiring
 		|| (!frame->second.Uploaded && !frame->second.Queued) || (!color->second.Uploaded && !color->second.Queued)) return {};

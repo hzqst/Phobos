@@ -5,6 +5,7 @@
 #include "ButtonImage.h"
 #include "ShapeFrameSource.h"
 #include "PaletteCache.h"
+#include "SidebarText.h"
 #include <ShapeButtonClass.h>
 #include <SidebarClass.h>
 #include <ScenarioClass.h>
@@ -65,6 +66,10 @@ namespace SidebarSnapshot
 		ShapeImage::Effect Effect = ShapeImage::Effect::Normal;
 		unsigned SolidColor = 0;
 		int SolidWidth = 0, SolidHeight = 0;
+		GlyphCache::GlyphID Glyph;
+		int ClipLeft = 0, ClipTop = 0;
+		unsigned Opacity256 = 256;
+		std::array<unsigned, 3> TextShift {}, TextBits {};
 	};
 	struct Frame
 	{
@@ -112,6 +117,7 @@ namespace SidebarSnapshot
 		++Generation;
 		LastTraceHash = 0;
 		for (auto& states : NativeCameoStates) states.clear();
+		SidebarText::ClearRuns();
 	}
 
 	inline void InitializeTrace()
@@ -347,6 +353,29 @@ namespace SidebarSnapshot
 		states[key] = {darken, progress && !completed && stage >= 0 && stage < INT_MAX ? stage + 1 : -1};
 	}
 
+	inline void CaptureCameoText(const BuildType& item, int tab, const ShapeImage::CameoSlot& p, bool afterClock)
+	{
+		const auto* run = SidebarText::Find(tab, item);
+		if (!run) return;
+		for (const auto& command : run->Commands)
+		{
+			if (command.AfterClock != afterClock || (command.Glyph && !SidebarText::Glyphs().Resolve(command.Glyph))) continue;
+			Placement placement {0, p.X + command.X, p.Y + command.Y};
+			placement.Effect = command.Glyph ? ShapeImage::Effect::GlyphMask : ShapeImage::Effect::Solid;
+			placement.SolidColor = command.Color;
+			placement.SolidWidth = command.Width; placement.SolidHeight = command.Height;
+			placement.Opacity256 = command.Opacity256;
+			placement.Glyph = command.Glyph;
+			placement.TextShift = command.Shift; placement.TextBits = command.Bits;
+			if (command.Glyph)
+			{
+				placement.ClipLeft = command.ClipLeft; placement.ClipTop = command.ClipTop;
+				placement.ClipWidth = p.X + command.ClipRight; placement.ClipHeight = p.Y + command.ClipBottom;
+			}
+			Current.Placements.push_back(placement);
+		}
+	}
+
 	inline void CaptureCameoEffects(const BuildType& item, int tab, int slot, const ShapeImage::CameoSlot& p)
 	{
 		using ShapeImage::Effect;
@@ -377,11 +406,13 @@ namespace SidebarSnapshot
 			if (darken) Current.Placements.push_back({DarkenBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Darken});
 			if (flash) Current.Placements.push_back({DarkenBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Translucent50});
 		}
+		CaptureCameoText(item, tab, p, false);
 		if (clockFrame >= 0 && CopyAsset(FileSystem::GCLOCK2_SHP, color, Current.Assets[ClockBegin + slot], clockFrame))
 		{
 			clockReady = true;
 			Current.Placements.push_back({ClockBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Translucent50});
 		}
+		CaptureCameoText(item, tab, p, true);
 		if (Trace && EffectTraceCount < 64)
 		{
 			const int values[] {tab, int(item.ItemType), item.ItemIndex, observed, darken, flash, hover, clockFrame, darkenReady, clockReady, int(Generation)};
@@ -466,6 +497,7 @@ namespace SidebarSnapshot
 		Current.Visible = false;
 		Current.Placements.clear();
 		CapturedColors.clear();
+		SidebarText::Refresh();
 		if (!Eligible() || !LowerButtonsReady)
 			return;
 		const auto* surface = DSurface::Sidebar;
@@ -542,7 +574,8 @@ namespace SidebarSnapshot
 			Current.Visible = std::all_of(Current.Assets.begin(), Current.Assets.begin() + BackgroundCount,
 				[](const Asset& asset) { return ShapeFrameSource::Frames.Resolve(asset.ID) != nullptr; });
 			Current.Placements.erase(std::remove_if(Current.Placements.begin(), Current.Placements.end(),
-				[](const Placement& p) { return !ShapeFrameSource::Frames.Resolve(Current.Assets[p.AssetIndex].ID); }), Current.Placements.end());
+				[](const Placement& p) { return p.Glyph ? !SidebarText::Glyphs().Resolve(p.Glyph)
+					: !ShapeFrameSource::Frames.Resolve(Current.Assets[p.AssetIndex].ID); }), Current.Placements.end());
 		}
 		++CaptureCount;
 		if (Trace && CacheTraceCount < 64 && (CaptureCount == 1 || CaptureCount % 300 == 0))

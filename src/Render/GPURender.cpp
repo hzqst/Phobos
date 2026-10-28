@@ -58,6 +58,16 @@ namespace
 	unsigned AtlasTraceCount = 0;
 	std::uint64_t LastAtlasIndexBytes = 0, LastAtlasPaletteBytes = 0, LastAtlasDecoded = 0;
 	std::vector<PresentPass::Sprite> Sprites;
+		FrameAtlas::Request SpriteRequest(const SidebarSnapshot::Placement& placement)
+		{
+			if (placement.Glyph)
+			{
+				const auto* glyph = SidebarText::Glyphs().Resolve(placement.Glyph);
+				return {glyph ? glyph->Storage : FrameCache::FrameID {}, {}, FrameAtlas::SourceKind::Mask, &SidebarText::Glyphs().Storage()};
+			}
+			const auto& asset = SidebarSnapshot::Current.Assets[placement.AssetIndex];
+			return {asset.ID, asset.Color};
+		}
 
 	FrameAtlas::BeginResult PrepareSidebar()
 	{
@@ -68,28 +78,34 @@ namespace
 		if (visible)
 			for (const auto& placement : frame.Placements)
 			{
-				const auto& asset = frame.Assets[placement.AssetIndex];
-				requests.push_back({asset.ID, asset.Color});
+				requests.push_back(SpriteRequest(placement));
 			}
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
 		if (result != FrameAtlas::BeginResult::Ready || !visible) return result;
 		for (const auto& placement : frame.Placements)
 		{
 			const auto& asset = frame.Assets[placement.AssetIndex];
-			const auto view = Atlas.Resolve({asset.ID, asset.Color});
+			const auto view = Atlas.Resolve(SpriteRequest(placement));
 			if (!view.Texture) continue;
-			const bool solid = placement.Effect == ShapeImage::Effect::Solid;
+			const bool solid = placement.Effect == ShapeImage::Effect::Solid || bool(placement.Glyph);
 			const auto x = std::int64_t(placement.X) + (solid ? 0 : asset.Left);
 			const auto y = std::int64_t(placement.Y) + (solid ? 0 : asset.Top);
 			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
-			const auto clipped = CursorImage::Clip(int(x), int(y), solid ? placement.SolidWidth : asset.Width,
+			auto clipped = CursorImage::Clip(int(x), int(y), solid ? placement.SolidWidth : asset.Width,
 				solid ? placement.SolidHeight : asset.Height,
 				std::min(frame.Width, placement.ClipWidth), std::min(frame.Height, placement.ClipHeight));
+			const int trimX = std::max(0, placement.ClipLeft - clipped.X);
+			const int trimY = std::max(0, placement.ClipTop - clipped.Y);
+			clipped.X += trimX; clipped.SourceX += trimX; clipped.Width -= trimX;
+			clipped.Y += trimY; clipped.SourceY += trimY; clipped.Height -= trimY;
 			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
 			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
 			Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,
-				view.X + clipped.SourceX, view.Y + clipped.SourceY, true, view.Palette, asset.Color->Values.Shift, asset.Color->Values.Bits,
-				unsigned(placement.Effect), placement.SolidColor});
+				view.X + clipped.SourceX, view.Y + clipped.SourceY, true,
+				view.Palette ? view.Palette : view.Texture, // Mask branch never samples the second binding.
+				placement.Glyph ? placement.TextShift : asset.Color->Values.Shift,
+				placement.Glyph ? placement.TextBits : asset.Color->Values.Bits,
+				unsigned(placement.Effect), placement.SolidColor, placement.Opacity256});
 		}
 		return result;
 	}

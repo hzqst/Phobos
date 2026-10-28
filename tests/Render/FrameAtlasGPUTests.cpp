@@ -52,7 +52,7 @@ static bool Read(SDL_GPUDevice* device, FrameAtlas::View view, int width, int he
 	return true;
 }
 
-static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected, unsigned effect = 0, unsigned solid = 0, unsigned draws = 1)
+static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected, unsigned effect = 0, unsigned solid = 0, unsigned draws = 1, unsigned opacity = 256)
 {
 	SDL_GPUShaderCreateInfo shader {}; shader.entrypoint = "main"; shader.format = SDL_GPU_SHADERFORMAT_DXIL;
 	shader.stage = SDL_GPU_SHADERSTAGE_VERTEX; shader.code = g_Fullscreen_vs_DXIL; shader.code_size = sizeof(g_Fullscreen_vs_DXIL);
@@ -79,13 +79,13 @@ static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected
 	SDL_GPUSamplerCreateInfo samplerInfo {};
 	auto* sampler = SDL_CreateGPUSampler(device, &samplerInfo); CHECK(sampler);
 	auto* commands = SDL_AcquireGPUCommandBuffer(device); CHECK(commands);
-	const unsigned uniforms[16] = {11,5,0,0,5,6,5,0,unsigned(view.X),unsigned(view.Y),2,2,effect,solid,0,0};
+	const unsigned uniforms[16] = {11,5,0,0,5,6,5,0,unsigned(view.X),unsigned(view.Y),2,2,effect,solid,opacity,0};
 	SDL_PushGPUFragmentUniformData(commands,0,uniforms,sizeof(uniforms));
 	SDL_GPUColorTargetInfo output {}; output.texture = texture; output.clear_color = {0,1,0,1};
 	output.load_op = SDL_GPU_LOADOP_CLEAR; output.store_op = SDL_GPU_STOREOP_STORE;
 	auto* pass = SDL_BeginGPURenderPass(commands,&output,1,nullptr); CHECK(pass);
 	SDL_BindGPUGraphicsPipeline(pass,pipeline);
-	const SDL_GPUTextureSamplerBinding bindings[] = {{view.Texture,sampler},{view.Palette,sampler}};
+	const SDL_GPUTextureSamplerBinding bindings[] = {{view.Texture,sampler},{view.Palette ? view.Palette : view.Texture,sampler}};
 	SDL_BindGPUFragmentSamplers(pass,0,bindings,2);
 	for (unsigned i = 0; i < draws; ++i) SDL_DrawGPUPrimitives(pass,3,1,0,0);
 	SDL_EndGPURenderPass(pass);
@@ -134,6 +134,7 @@ static bool Run(SDL_GPUDevice* device, bool r32)
 	CHECK(Draw(device,av,0xFF008080,2)); // Red half-alpha over green.
 	CHECK(Draw(device,av,0xFF004000,1,0,2)); // Two ordered darken layers compound.
 	CHECK(Draw(device,av,0xFFFF0000,3,0x001F)); // Solid hover line color.
+	CHECK(Draw(device,av,0xFF005000,3,0,1,176)); // Native text background: green * 80 / 256.
 	const auto uploaded = atlas.GetStats().IndexBytes;
 	for (int i = 0; i < 300; ++i)
 	{
@@ -186,6 +187,34 @@ static bool Run(SDL_GPUDevice* device, bool r32)
 	CHECK(Draw(device,transparentView,0xFF00FF00,1));
 	CHECK(Draw(device,transparentView,0xFF00FF00,2));
 	SDL_WaitForGPUIdle(device); atlas.Release();
+	CHECK(atlas.Create(device,options));
+	FrameCache::Cache masks;
+	const auto maskResource = masks.Register(1, {2,2,{{0,0,2,2},{0,0,2,2}}});
+	auto maskFrame = [&](unsigned index) {
+		return masks.GetOrDecode(maskResource,index,[&](const auto&, auto& pixels) {
+			pixels.assign(4, static_cast<unsigned char>(index)); return FrameCache::Status::Ready;
+		}).Frame->ID;
+	};
+	const FrameAtlas::Request zero {maskFrame(0),{},FrameAtlas::SourceKind::Mask,&masks};
+	const FrameAtlas::Request one {maskFrame(1),{},FrameAtlas::SourceKind::Mask,&masks};
+	const std::array mixed {transparent[0],zero,one};
+	CHECK(FrameAtlas::BeginResult::Ready == atlas.Begin(cache,mixed));
+	const auto zeroView = atlas.Resolve(zero), oneView = atlas.Resolve(one);
+	CHECK(oneView.Texture && !oneView.Palette && zeroView.Texture);
+	CHECK(Submit(atlas,device));
+	CHECK(1 == atlas.GetStats().PaletteUploads); // Only the SHP request owns a palette.
+	CHECK(Draw(device,zeroView,0xFF00FF00,4,0xF800));
+	CHECK(Draw(device,oneView,0xFF0000FF,4,0xF800)); // Mask value 1 is full coverage.
+	CHECK(Draw(device,oneView,0xFFFF0000,4,0x001F)); // Color is independent of residency.
+	const auto maskUploads = atlas.GetStats().FrameUploads;
+	SDL_WaitForGPUIdle(device); atlas.Poll();
+	CHECK(FrameAtlas::BeginResult::Ready == atlas.Begin(cache,mixed));
+	CHECK(!atlas.HasUploads()); atlas.CancelBatch();
+	masks.Clear();
+	CHECK(FrameAtlas::BeginResult::Ready == atlas.Begin(cache,transparent));
+	CHECK(!atlas.Resolve(one).Texture && atlas.Resolve(transparent[0]).Texture);
+	CHECK(!atlas.HasUploads() && maskUploads == atlas.GetStats().FrameUploads);
+	atlas.CancelBatch(); SDL_WaitForGPUIdle(device); atlas.Release();
 	return true;
 }
 

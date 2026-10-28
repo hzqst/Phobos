@@ -20,7 +20,16 @@ public:
 		unsigned StagingBudget = 16 * 1024 * 1024;
 		bool ForceR32 = false; // Test harness; not an INI setting.
 	};
-	struct Request { FrameCache::FrameID Frame; PaletteCache::Handle Palette; };
+	enum class SourceKind { Indexed, Mask };
+	// Explicit sources must outlive this atlas. IDs are process-wide across CPU caches.
+	struct Request
+	{
+		FrameCache::FrameID Frame;
+		PaletteCache::Handle Palette;
+		SourceKind Kind = SourceKind::Indexed;
+		const FrameCache::Cache* Storage = nullptr;
+		bool Valid() const { return Kind == SourceKind::Mask ? Storage && !Palette : bool(Palette); }
+	};
 	struct View { SDL_GPUTexture* Texture = nullptr; SDL_GPUTexture* Palette = nullptr; int X = 0, Y = 0; };
 	struct Statistics
 	{

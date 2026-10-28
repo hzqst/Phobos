@@ -298,6 +298,8 @@
     <ClCompile Include="src\Render\GPURender.cpp" />
     <ClCompile Include="src\Render\FrameCache.cpp" />
     <ClCompile Include="src\Render\FrameAtlas.cpp" />
+    <ClCompile Include="src\Render\GlyphCache.cpp" />
+    <ClCompile Include="src\Render\SidebarText.cpp" />
     <ClCompile Include="src\Render\Hooks.cpp" />
     <ClCompile Include="src\Render\PresentPass.cpp" />
     <ClCompile Include="src\Render\SDLLoader.cpp" />
@@ -462,6 +464,8 @@
     <ClInclude Include="src\New\Type\Affiliated\TypeConvertGroup.h" />
     <!-- src\Render -->
     <ClInclude Include="src\Render\GPURender.h" />
+    <ClInclude Include="src\Render\GlyphCache.h" />
+    <ClInclude Include="src\Render\SidebarText.h" />
     <ClInclude Include="src\Render\PresentPass.h" />
     <ClInclude Include="src\Render\SDLLoader.h" />
     <ClInclude Include="src\Render\SecondaryWindow.h" />
