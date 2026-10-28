@@ -3,6 +3,7 @@
 #include "SDLLoader.h"
 #include "SecondaryWindow.h"
 #include "SurfaceMirror.h"
+#include "CursorTrace.h"
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -439,6 +440,7 @@ void GPURender::OnBlit()
 
 void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 {
+	CursorTrace::Poll();
 	if (CurrentState != State::Running && CurrentState != State::Hidden)
 		return;
 
