@@ -3,6 +3,7 @@
 #include "CursorSnapshot.h"
 #include "ShapeImage.h"
 #include "ButtonImage.h"
+#include "ShapeFrameSource.h"
 #include <ShapeButtonClass.h>
 #include <SidebarClass.h>
 #include <ScenarioClass.h>
@@ -18,7 +19,6 @@ namespace SidebarSnapshot
 	constexpr size_t AssetCount = BackgroundCount + ButtonCount;
 	constexpr int MaxCanvasDimension = 4096;
 	constexpr int MaxRepeats = 128;
-	constexpr size_t MaxEncodedBytes = 16 * 1024 * 1024;
 	constexpr std::uintptr_t ResourceSlots[BackgroundCount] =
 		{0xB0FB08, 0xB0B468, 0xB0B46C, 0xB0B470, 0xB0B474, 0xB0F9E0};
 	constexpr const char* Names[BackgroundCount] =
@@ -42,6 +42,9 @@ namespace SidebarSnapshot
 		int Left = 0, Top = 0, Width = 0, Height = 0, ShapeHeight = 0;
 		unsigned Flags = 0;
 		std::uintptr_t DataIdentity = 0;
+		std::uintptr_t SourceIdentity = 0;
+		FrameCache::FrameID ID;
+		std::array<std::uint16_t, 256> Palette {};
 		std::vector<std::uint32_t> Pixels;
 	};
 	struct Placement { size_t AssetIndex; int X, Y; };
@@ -60,6 +63,8 @@ namespace SidebarSnapshot
 	inline bool LowerButtonsReady = false, RadarButtonsReady = false;
 	inline unsigned ButtonTraceCount = 0;
 	inline std::array<std::uint64_t, ButtonCount> ButtonTraceHashes {};
+	inline std::uint64_t CaptureCount = 0, LastDecoded = 0, ColorConversions = 0;
+	inline unsigned CacheTraceCount = 0;
 
 	inline bool Eligible()
 	{
@@ -95,67 +100,30 @@ namespace SidebarSnapshot
 
 	inline bool CopyAsset(const SHPStruct* source, const std::uint16_t* palette, Asset& asset, int frame = 0)
 	{
-		using CursorSnapshot::Readable;
-		asset.Pixels.clear();
-		asset.Left = asset.Top = asset.Width = asset.Height = asset.ShapeHeight = 0;
-		asset.Flags = 0;
-		asset.DataIdentity = 0;
-		if (!Readable(source, sizeof(*source)))
-			return false;
-		// Use the same header height the native SIDE2/SIDE3 placement reads.
-		asset.ShapeHeight = source->Height;
-		if (source->IsReference())
+		std::uintptr_t data = 0;
+		const auto result = ShapeFrameSource::Acquire(source, frame, data);
+		if (result.State != FrameCache::Status::Ready)
 		{
-			const auto* reference = source->AsReference();
-			if (!Readable(reference, sizeof(*reference)) || !reference->Loaded)
-				return false; // Never trigger loading or borrow the engine's scratch buffer.
-			source = reference->Data;
+			asset.Pixels.clear();
+			asset.ID = {};
+			return false;
 		}
-		if (!Readable(source, sizeof(*source)) || source->IsReference() || frame < 0 || frame >= source->Frames)
-			return false;
-		const size_t headers = sizeof(SHPStruct) + size_t(source->Frames) * sizeof(SHPFrame);
-		if (!Readable(source, headers))
-			return false;
-		const auto header = source->AsFile()->GetFrameHeader(frame);
-		if (header.Width <= 0 || header.Height <= 0 || header.Width > ShapeImage::MaxDimension
-			|| header.Height > ShapeImage::MaxDimension || header.Offset < 0 || size_t(header.Offset) < headers)
-			return false;
-		const auto base = reinterpret_cast<std::uintptr_t>(source);
-		if (size_t(header.Offset) > UINTPTR_MAX - base)
-			return false;
-		const auto* encoded = reinterpret_cast<const std::uint8_t*>(base + header.Offset);
-		size_t bound = std::min(MaxEncodedBytes, size_t(UINTPTR_MAX - reinterpret_cast<std::uintptr_t>(encoded)));
-		for (int i = 0; i < source->Frames; ++i)
+		const auto& cached = *result.Frame;
+		const auto& geometry = cached.Geometry;
+		asset.ShapeHeight = source->Height; // Native layout reads the original SHP/reference header.
+		asset.Left = geometry.Left; asset.Top = geometry.Top;
+		asset.Width = geometry.Width; asset.Height = geometry.Height; asset.Flags = geometry.Flags;
+		asset.DataIdentity = data;
+		asset.SourceIdentity = reinterpret_cast<std::uintptr_t>(source);
+		if (asset.ID != cached.ID || asset.Pixels.empty() || std::memcmp(asset.Palette.data(), palette, sizeof(asset.Palette)) != 0)
 		{
-			const int next = source->AsFile()->GetFrameHeader(i).Offset;
-			if (next > header.Offset)
-				bound = std::min(bound, size_t(next - header.Offset));
+			asset.ID = cached.ID;
+			std::memcpy(asset.Palette.data(), palette, sizeof(asset.Palette));
+			asset.Pixels.resize(cached.Indices.size());
+			for (size_t i = 0; i < cached.Indices.size(); ++i)
+				asset.Pixels[i] = CursorImage::PackPixel(cached.Indices[i], palette[cached.Indices[i]]);
+			++ColorConversions;
 		}
-		size_t bytes = size_t(header.Width) * header.Height;
-		if (header.Flags & 2)
-		{
-			bytes = 0;
-			for (int y = 0; y < header.Height; ++y)
-			{
-				if (bytes > bound || bound - bytes < 2 || !Readable(encoded + bytes, 2))
-					return false;
-				const size_t length = encoded[bytes] | (size_t(encoded[bytes + 1]) << 8);
-				if (length < 2 || length > bound - bytes || !Readable(encoded + bytes, length))
-					return false;
-				bytes += length;
-			}
-		}
-		if (bytes > bound || !Readable(encoded, bytes))
-			return false;
-		std::vector<std::uint8_t> indices;
-		if (!ShapeImage::Decode({encoded, bytes}, header.Width, header.Height, (header.Flags & 2) != 0, indices))
-			return false;
-		asset.Left = header.Left; asset.Top = header.Top;
-		asset.Width = header.Width; asset.Height = header.Height; asset.Flags = header.Flags;
-		asset.DataIdentity = base;
-		asset.Pixels.resize(indices.size());
-		for (size_t i = 0; i < indices.size(); ++i)
-			asset.Pixels[i] = CursorImage::PackPixel(indices[i], palette[indices[i]]);
 		return true;
 	}
 
@@ -164,8 +132,7 @@ namespace SidebarSnapshot
 		for (size_t i = begin; i < end; ++i)
 		{
 			auto& asset = Current.Assets[BackgroundCount + i];
-			asset.Pixels.clear();
-			if (!(i < 8 ? LowerButtonsReady : RadarButtonsReady)) continue;
+			if (!(i < 8 ? LowerButtonsReady : RadarButtonsReady)) { asset.Pixels.clear(); continue; }
 			const auto* button = reinterpret_cast<const ShapeButtonClass*>(ButtonObjects[i]);
 			const auto* drawer = button->Drawer;
 			const int frame = ButtonImage::SelectFrame(button->Disabled, button->UseFlash,
@@ -182,6 +149,7 @@ namespace SidebarSnapshot
 				std::memcpy(palette.data(), drawer->PaletteData, sizeof(palette));
 				ready = CopyAsset(button->ShapeData, palette.data(), asset, frame);
 			}
+			else asset.Pixels.clear();
 			if (ready) Current.Placements.push_back({BackgroundCount + i, x, y});
 			if (Trace && ButtonTraceCount < 64)
 			{
@@ -192,16 +160,16 @@ namespace SidebarSnapshot
 				hash = Hash(&button->ShapeData, sizeof(button->ShapeData), hash);
 				hash = Hash(&drawer, sizeof(drawer), hash);
 				hash = Hash(palette.data(), sizeof(palette), hash);
-				hash = Hash(asset.Pixels.data(), asset.Pixels.size() * sizeof(std::uint32_t), hash);
+				hash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), hash);
 				if (hash != ButtonTraceHashes[i])
 				{
 					ButtonTraceHashes[i] = hash;
 					++ButtonTraceCount;
-					Debug::Log("[SidebarButtonGPU] sample=%u generation=%u thread=%lu id=%d ready=%d supported=%d state=%d,%d,%d,%d,%d frame=%d shape=%p data=%p drawer=%p palette=%016llX pos=%d,%d offset=%d,%d size=%dx%d flags=%u origin=%d clip=%dx%d\n",
+					Debug::Log("[SidebarButtonGPU] sample=%u generation=%u thread=%lu id=%d ready=%d supported=%d state=%d,%d,%d,%d,%d frame=%d shape=%p data=%p drawer=%p palette=%016llX pos=%d,%d offset=%d,%d size=%dx%d flags=%u origin=%d clip=%dx%d frameID=%llu\n",
 						ButtonTraceCount, Generation, GetCurrentThreadId(), button->ID, ready, supported,
 						button->Disabled, button->UseFlash, button->IsToFlash, button->IsOn, button->IsPressed, frame,
 						button->ShapeData, reinterpret_cast<void*>(asset.DataIdentity), drawer, Hash(palette.data(), sizeof(palette)),
-						x, y, asset.Left, asset.Top, asset.Width, asset.Height, asset.Flags, Current.OriginX, Current.Width, Current.Height);
+						x, y, asset.Left, asset.Top, asset.Width, asset.Height, asset.Flags, Current.OriginX, Current.Width, Current.Height, asset.ID.Value);
 				}
 			}
 		}
@@ -250,7 +218,7 @@ namespace SidebarSnapshot
 				hash = Hash(&source, sizeof(source), hash);
 				const int geometry[] {asset.Left, asset.Top, asset.Width, asset.Height, asset.ShapeHeight};
 				hash = Hash(geometry, sizeof(geometry), hash);
-				hash = Hash(asset.Pixels.data(), asset.Pixels.size() * sizeof(std::uint32_t), hash);
+				hash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), hash);
 			}
 		}
 		const auto* self = reinterpret_cast<const std::uint8_t*>(&SidebarClass::Instance);
@@ -286,7 +254,21 @@ namespace SidebarSnapshot
 					Current.Placements.push_back(placement);
 				}
 			}
-			Current.Visible = true;
+			// An alias observed later in this capture may invalidate an earlier resource.
+			Current.Visible = std::all_of(Current.Assets.begin(), Current.Assets.begin() + BackgroundCount,
+				[](const Asset& asset) { return ShapeFrameSource::Frames.Resolve(asset.ID) != nullptr; });
+			Current.Placements.erase(std::remove_if(Current.Placements.begin(), Current.Placements.end(),
+				[](const Placement& p) { return !ShapeFrameSource::Frames.Resolve(Current.Assets[p.AssetIndex].ID); }), Current.Placements.end());
+		}
+		++CaptureCount;
+		if (Trace && CacheTraceCount < 64 && (CaptureCount == 1 || CaptureCount % 300 == 0))
+		{
+			const auto& stats = ShapeFrameSource::Frames.GetStats();
+			++CacheTraceCount;
+			Debug::Log("[FrameCache] captures=%llu hits=%llu misses=%llu attempts=%llu decoded=%llu decodedDelta=%llu bytes=%zu frames=%zu resources=%zu invalidations=%llu invalid=%llu budgetRejected=%llu conversions=%llu\n",
+				CaptureCount, stats.Hits, stats.Misses, stats.DecodeAttempts, stats.Decoded, stats.Decoded - LastDecoded,
+				stats.IndexBytes, stats.Frames, stats.Resources, stats.Invalidations, stats.Invalid, stats.BudgetRejected, ColorConversions);
+			LastDecoded = stats.Decoded;
 		}
 		if (Trace && hash != LastTraceHash && TraceCount < 64)
 		{

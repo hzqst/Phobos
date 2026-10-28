@@ -296,6 +296,7 @@
     <ClCompile Include="src\New\Type\Affiliated\TypeConvertGroup.cpp" />
     <!-- src\Render -->
     <ClCompile Include="src\Render\GPURender.cpp" />
+    <ClCompile Include="src\Render\FrameCache.cpp" />
     <ClCompile Include="src\Render\Hooks.cpp" />
     <ClCompile Include="src\Render\PresentPass.cpp" />
     <ClCompile Include="src\Render\SDLLoader.cpp" />

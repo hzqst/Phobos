@@ -197,6 +197,38 @@ DEFINE_HOOK(0x730100, UI_UnloadShapes_GPURenderInvalidate, 0x5)
 
 DEFINE_HOOK(0x730400, UI_UnloadPalette_GPURenderInvalidate, 0x5)
 {
-	GPURender::InvalidateSidebar(true);
+	GPURender::InvalidateSidebarPalette();
+	return 0;
+}
+
+// At each function entry ECX is this. Observe before any original release; all
+// displaced instructions run unchanged in the SyringeEx trampoline.
+DEFINE_HOOK(0x69DE00, ShapeButton_SetShape_GPUFrameCache, 0x6)
+{
+	GPURender::OnButtonShapeChanging(reinterpret_cast<const void*>(R->ECX()));
+	return 0;
+}
+
+DEFINE_HOOK(0x69DE70, ShapeButton_ClearShape_GPUFrameCache, 0x6)
+{
+	GPURender::OnButtonShapeChanging(reinterpret_cast<const void*>(R->ECX()));
+	return 0;
+}
+
+DEFINE_HOOK(0x69E100, SHP_Unload_GPUFrameCache, 0x7)
+{
+	GPURender::OnShapeInvalidating(reinterpret_cast<const void*>(R->ECX()));
+	return 0;
+}
+
+DEFINE_HOOK(0x69E500, SHP_Destructor_GPUFrameCache, 0x7)
+{
+	GPURender::OnShapeInvalidating(reinterpret_cast<const void*>(R->ECX()));
+	return 0;
+}
+
+DEFINE_HOOK(0x69E930, SHP_DeletingDestructor_GPUFrameCache, 0x7)
+{
+	GPURender::OnShapeInvalidating(reinterpret_cast<const void*>(R->ECX()));
 	return 0;
 }

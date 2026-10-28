@@ -646,6 +646,7 @@ void GPURender::InvalidateSidebar(bool resources)
 	SidebarSnapshot::Invalidate();
 	if (resources)
 	{
+		ShapeFrameSource::Clear();
 		SidebarSnapshot::LowerButtonsReady = false;
 		SidebarSnapshot::RadarButtonsReady = false;
 	}
@@ -654,7 +655,38 @@ void GPURender::InvalidateSidebar(bool resources)
 void GPURender::SetSidebarButtonsReady(bool radar, bool ready)
 {
 	SidebarSnapshot::Invalidate();
+	if (!ready)
+	{
+		const size_t begin = radar ? 8 : 0;
+		const size_t end = radar ? SidebarSnapshot::ButtonCount : 8;
+		for (size_t i = begin; i < end; ++i)
+			ShapeFrameSource::Invalidate(SidebarSnapshot::Current.Assets[SidebarSnapshot::BackgroundCount + i].SourceIdentity);
+	}
 	(radar ? SidebarSnapshot::RadarButtonsReady : SidebarSnapshot::LowerButtonsReady) = ready;
+}
+
+void GPURender::InvalidateSidebarPalette()
+{
+	// Color-table lifetime changes do not change immutable SHP indices or FrameIDs.
+	SidebarSnapshot::Invalidate();
+	SidebarSnapshot::LowerButtonsReady = false;
+	SidebarSnapshot::RadarButtonsReady = false;
+}
+
+void GPURender::OnShapeInvalidating(const void* shape)
+{
+	if (ShapeFrameSource::Invalidate(reinterpret_cast<std::uintptr_t>(shape)))
+		SidebarSnapshot::Invalidate();
+}
+
+void GPURender::OnButtonShapeChanging(const void* object)
+{
+	const auto* button = static_cast<const ShapeButtonClass*>(object);
+	// SetShape/ClearShape free owned data directly, bypassing SHP destructors.
+	if (button->IsShapeLoaded) OnShapeInvalidating(button->ShapeData);
+	if (std::find(std::begin(SidebarSnapshot::ButtonObjects), std::end(SidebarSnapshot::ButtonObjects),
+		reinterpret_cast<std::uintptr_t>(object)) != std::end(SidebarSnapshot::ButtonObjects))
+		SidebarSnapshot::Invalidate();
 }
 
 void GPURender::RequestPresent()

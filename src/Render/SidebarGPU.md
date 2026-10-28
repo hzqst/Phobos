@@ -1,5 +1,7 @@
 # Sidebar 原始素材 GPU 接入
 
+缓存设计见 [FrameAtlasDesign.md](FrameAtlasDesign.md)，阶段1实现与验证见 [FrameCache.md](FrameCache.md)。当前已按ResourceID/FrameID缓存CPU索引，稳定命中不再重复解码；仍使用独立纹理，atlas与独立GPU调色板尚未接入。下方按钮和背景章节保留此前阶段记录。
+
 ## 按钮接入（2026-10-28）
 
 依据 gamemd-reverse `f7476d9` 的 `docs/zh-CN/sidebar-buttons-gpu-handoff.md` 和 `SidebarButtons.cpp`，追加十个按钮：卖出、维修、四页签、下/上滚动、简报/外交、选项。以下背景章节保留上一阶段记录。

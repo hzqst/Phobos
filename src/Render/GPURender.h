@@ -38,6 +38,9 @@ public:
 	static void OnSidebarDraw();
 	static void InvalidateSidebar(bool resources = false);
 	static void SetSidebarButtonsReady(bool radar, bool ready);
+	static void InvalidateSidebarPalette();
+	static void OnShapeInvalidating(const void* shape);
+	static void OnButtonShapeChanging(const void* button);
 
 	static State GetState();
 
