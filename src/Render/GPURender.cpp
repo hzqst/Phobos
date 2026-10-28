@@ -5,6 +5,7 @@
 #include "SurfaceMirror.h"
 #include "CursorTrace.h"
 #include "CursorSnapshot.h"
+#include "SidebarSnapshot.h"
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -52,6 +53,95 @@ namespace
 	std::array<std::uint32_t, CursorImage::MaxDimension * CursorImage::MaxDimension> UploadedCursor {};
 	int UploadedWidth = 0, UploadedHeight = 0;
 	bool CursorDirty = false;
+	struct SidebarTexture
+	{
+		SDL_GPUTexture* Texture = nullptr;
+		SDL_GPUTransferBuffer* Transfer = nullptr;
+		int Width = 0, Height = 0;
+		bool Dirty = false;
+		std::vector<std::uint32_t> Uploaded;
+	};
+	std::array<SidebarTexture, SidebarSnapshot::AssetCount> SidebarTextures;
+	std::vector<PresentPass::Sprite> Sprites;
+
+	void ReleaseSidebarTexture(SidebarTexture& texture)
+	{
+		if (texture.Texture) SDL_ReleaseGPUTexture(Device, texture.Texture);
+		if (texture.Transfer) SDL_ReleaseGPUTransferBuffer(Device, texture.Transfer);
+		texture = {};
+	}
+
+	bool PrepareSidebar()
+	{
+		Sprites.clear();
+		const auto& frame = SidebarSnapshot::Current;
+		if (!frame.Visible || !SidebarSnapshot::Eligible())
+			return true;
+		for (size_t i = 0; i < SidebarTextures.size(); ++i)
+		{
+			auto& texture = SidebarTextures[i];
+			const auto& asset = frame.Assets[i];
+			if (texture.Width != asset.Width || texture.Height != asset.Height)
+			{
+				ReleaseSidebarTexture(texture);
+				SDL_GPUTextureCreateInfo info {};
+				info.type = SDL_GPU_TEXTURETYPE_2D;
+				info.format = SDL_GPU_TEXTUREFORMAT_R32_UINT;
+				info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+				info.width = asset.Width; info.height = asset.Height;
+				info.layer_count_or_depth = info.num_levels = 1;
+				texture.Texture = SDL_CreateGPUTexture(Device, &info);
+				SDL_GPUTransferBufferCreateInfo transfer {};
+				transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+				transfer.size = Uint32(asset.Pixels.size() * sizeof(std::uint32_t));
+				texture.Transfer = SDL_CreateGPUTransferBuffer(Device, &transfer);
+				if (!texture.Texture || !texture.Transfer) return false;
+				texture.Width = asset.Width; texture.Height = asset.Height;
+			}
+			if (texture.Uploaded != asset.Pixels)
+			{
+				auto* mapped = SDL_MapGPUTransferBuffer(Device, texture.Transfer, true);
+				if (!mapped) return false;
+				std::memcpy(mapped, asset.Pixels.data(), asset.Pixels.size() * sizeof(std::uint32_t));
+				SDL_UnmapGPUTransferBuffer(Device, texture.Transfer);
+				texture.Uploaded = asset.Pixels;
+				texture.Dirty = true;
+			}
+		}
+		for (const auto& placement : frame.Placements)
+		{
+			const auto& asset = frame.Assets[placement.AssetIndex];
+			const auto x = std::int64_t(placement.X) + asset.Left;
+			const auto y = std::int64_t(placement.Y) + asset.Top;
+			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
+			const auto clipped = CursorImage::Clip(int(x), int(y), asset.Width, asset.Height, frame.Width, frame.Height);
+			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
+			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
+			Sprites.push_back({SidebarTextures[placement.AssetIndex].Texture,
+				int(canvasX), clipped.Y, clipped.Width, clipped.Height, clipped.SourceX, clipped.SourceY});
+		}
+		return true;
+	}
+
+	bool SidebarDirty()
+	{
+		return std::any_of(SidebarTextures.begin(), SidebarTextures.end(), [](const auto& texture) {return texture.Dirty;});
+	}
+
+	void UploadSidebar(SDL_GPUCopyPass* pass)
+	{
+		for (const auto& texture : SidebarTextures)
+		{
+			if (!texture.Dirty) continue;
+			SDL_GPUTextureTransferInfo source {};
+			source.transfer_buffer = texture.Transfer;
+			source.pixels_per_row = texture.Width; source.rows_per_layer = texture.Height;
+			SDL_GPUTextureRegion destination {};
+			destination.texture = texture.Texture;
+			destination.w = texture.Width; destination.h = texture.Height; destination.d = 1;
+			SDL_UploadToGPUTexture(pass, &source, &destination, true);
+		}
+	}
 
 	void ReleaseCursorResources()
 	{
@@ -273,6 +363,7 @@ void GPURender::DisableByCommandLine()
 
 void GPURender::OnVideoModeSet()
 {
+	SidebarSnapshot::Invalidate();
 	const int width = DSurface::WindowBounds.Width;
 	const int height = DSurface::WindowBounds.Height;
 
@@ -373,7 +464,8 @@ void GPURender::Initialize(int width, int height)
 	SetState(State::Initializing);
 	char mirror[2] {};
 	MirrorMode = GetEnvironmentVariableA("PHOBOS_GPU_MIRROR", mirror, sizeof(mirror)) == 1 && mirror[0] == '1';
-	Debug::Log("[GPURender] Output: %s.\n", MirrorMode ? "diagnostic CPU mirror" : "black background + GPU cursor");
+	SidebarSnapshot::InitializeTrace();
+	Debug::Log("[GPURender] Output: %s.\n", MirrorMode ? "diagnostic CPU mirror" : "black background + GPU sidebar + GPU cursor");
 
 	if (!SDLLoader::Load())
 		return Fail("Loading SDL3.dll", "see above");
@@ -448,6 +540,8 @@ void GPURender::ReleaseResources()
 		PresentPass::Release(Device);
 		SurfaceMirror::Release(Device);
 		ReleaseCursorResources();
+		for (auto& texture : SidebarTextures) ReleaseSidebarTexture(texture);
+		SidebarSnapshot::Invalidate();
 
 		if (WindowClaimed)
 		{
@@ -475,15 +569,20 @@ void GPURender::Present()
 		if (SurfaceMirror::Capture(Device) == SurfaceMirror::CaptureResult::Failed)
 			return Fail("Capturing the game screen");
 	}
-	else if (!PrepareCursor())
-		return Fail("Preparing the GPU cursor");
+	else
+	{
+		if (!PrepareSidebar()) return Fail("Preparing the GPU sidebar");
+		if (!PrepareCursor()) return Fail("Preparing the GPU cursor");
+		if (CursorFrame.Visible)
+			Sprites.push_back({CursorTexture, CursorFrame.X, CursorFrame.Y, CursorFrame.Width, CursorFrame.Height, 0, 0});
+	}
 
 	SDL_GPUCommandBuffer* pCommandBuffer = SDL_AcquireGPUCommandBuffer(Device);
 
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
-	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : CursorDirty)
+	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || SidebarDirty()))
 	{
 		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
 		if (!pCopyPass)
@@ -494,7 +593,10 @@ void GPURender::Present()
 		if (MirrorMode)
 			SurfaceMirror::Upload(pCopyPass);
 		else
-			UploadCursor(pCopyPass);
+		{
+			UploadSidebar(pCopyPass);
+			if (CursorDirty) UploadCursor(pCopyPass);
+		}
 		SDL_EndGPUCopyPass(pCopyPass);
 	}
 
@@ -514,9 +616,8 @@ void GPURender::Present()
 		const bool drawn = MirrorMode
 			? PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
 				SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
-			: PresentPass::DrawCursor(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
-				CursorFrame.Visible ? CursorTexture : nullptr, CursorFrame.Width, CursorFrame.Height,
-				CursorFrame.X, CursorFrame.Y, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height);
+			: PresentPass::DrawSprites(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
+				DSurface::WindowBounds.Width, DSurface::WindowBounds.Height, Sprites);
 		if (!drawn)
 		{
 			SDL_CancelGPUCommandBuffer(pCommandBuffer);
@@ -527,7 +628,21 @@ void GPURender::Present()
 	if (!SDL_SubmitGPUCommandBuffer(pCommandBuffer))
 		Fail("SDL_SubmitGPUCommandBuffer");
 	else
+	{
 		CursorDirty = false;
+		for (auto& texture : SidebarTextures) texture.Dirty = false;
+	}
+}
+
+void GPURender::OnSidebarDraw()
+{
+	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
+		SidebarSnapshot::CaptureAfterDraw();
+}
+
+void GPURender::InvalidateSidebar()
+{
+	SidebarSnapshot::Invalidate();
 }
 
 void GPURender::RequestPresent()

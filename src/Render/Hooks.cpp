@@ -140,5 +140,32 @@ DEFINE_HOOK(0x7BA282, WWMouse_CursorTraceDrawn, 0x6)
 DEFINE_HOOK(0x560BF0, SetVideoMode_CursorTraceInvalidate, 0x5)
 {
 	CursorTrace::Record(R);
+	GPURender::InvalidateSidebar();
+	return 0;
+}
+
+// All native sidebar layers have finished using their resources. Copy only original
+// SHP frames, before BlitSidebar publishes the CPU surface. No engine pointers escape.
+DEFINE_HOOK(0x6A70AE, SidebarClass_Draw_GPURenderSnapshot, 0x5)
+{
+	GPURender::OnSidebarDraw();
+	return 0;
+}
+
+DEFINE_HOOK(0x6A5840, SidebarClass_InitForHouse_GPURenderInvalidate, 0x6)
+{
+	GPURender::InvalidateSidebar();
+	return 0;
+}
+
+DEFINE_HOOK(0x6A5BF0, SidebarClass_UnloadShapes_GPURenderInvalidate, 0x7)
+{
+	GPURender::InvalidateSidebar();
+	return 0;
+}
+
+DEFINE_HOOK(0x6BE1C0, Scenario_Clear_GPURenderInvalidate, 0x8)
+{
+	GPURender::InvalidateSidebar();
 	return 0;
 }

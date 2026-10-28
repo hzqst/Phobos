@@ -35,6 +35,8 @@ public:
 	static void Shutdown();
 	// The game has blitted a surface to the primary surface
 	static void OnBlit();
+	static void OnSidebarDraw();
+	static void InvalidateSidebar();
 
 	static State GetState();
 

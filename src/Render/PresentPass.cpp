@@ -186,6 +186,14 @@ bool PresentPass::DrawRegion(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextur
 	unsigned int targetHeight, SDL_GPUTexture* pSource, int sourceWidth, int sourceHeight,
 	int x, int y, int logicalWidth, int logicalHeight, bool cursor)
 {
+	const Sprite sprite {pSource, x, y, sourceWidth, sourceHeight, 0, 0, cursor};
+	return DrawSprites(pCommandBuffer, pTarget, targetWidth, targetHeight, logicalWidth, logicalHeight, {&sprite, 1});
+}
+
+bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget,
+	unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,
+	std::span<const Sprite> sprites)
+{
 	SDL_GPUColorTargetInfo target {};
 	target.texture = pTarget;
 	target.clear_color = ClearColor;
@@ -196,9 +204,11 @@ bool PresentPass::DrawRegion(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextur
 	if (!pRenderPass)
 		return false;
 
-	const auto region = CursorImage::Clip(x, y, sourceWidth, sourceHeight, logicalWidth, logicalHeight);
-	if (pSource && region.Width > 0 && region.Height > 0)
+	for (const auto& sprite : sprites)
 	{
+		const auto region = CursorImage::Clip(sprite.X, sprite.Y, sprite.Width, sprite.Height, logicalWidth, logicalHeight);
+		if (!sprite.Texture || region.Width <= 0 || region.Height <= 0)
+			continue;
 		auto viewport = GetLetterboxViewport(targetWidth, targetHeight, logicalWidth, logicalHeight);
 		const float scaleX = viewport.w / logicalWidth;
 		const float scaleY = viewport.h / logicalHeight;
@@ -207,14 +217,14 @@ bool PresentPass::DrawRegion(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextur
 		viewport.w = region.Width * scaleX;
 		viewport.h = region.Height * scaleY;
 		auto uniforms = GetDecodeUniforms();
-		uniforms.Shift[3] = cursor ? 1 : 0;
-		uniforms.Region[0] = region.SourceX;
-		uniforms.Region[1] = region.SourceY;
+		uniforms.Shift[3] = sprite.IndexedAlpha ? 1 : 0;
+		uniforms.Region[0] = sprite.SourceX + region.SourceX;
+		uniforms.Region[1] = sprite.SourceY + region.SourceY;
 		uniforms.Region[2] = region.Width;
 		uniforms.Region[3] = region.Height;
 
 		SDL_GPUTextureSamplerBinding binding {};
-		binding.texture = pSource;
+		binding.texture = sprite.Texture;
 		binding.sampler = Sampler;
 
 		SDL_BindGPUGraphicsPipeline(pRenderPass, Pipeline);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 struct SDL_GPUDevice;
 struct SDL_Window;
 struct SDL_GPUCommandBuffer;
@@ -12,6 +14,15 @@ struct SDL_GPUSampler;
 class PresentPass
 {
 public:
+	struct Sprite
+	{
+		SDL_GPUTexture* Texture;
+		int X, Y, Width, Height, SourceX, SourceY;
+		bool IndexedAlpha = true;
+	};
+	static bool DrawSprites(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target,
+		unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,
+		std::span<const Sprite> sprites);
 	static bool Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow);
 	static void Release(SDL_GPUDevice* pDevice);
 
