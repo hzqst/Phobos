@@ -36,7 +36,8 @@ public:
 	// The game has blitted a surface to the primary surface
 	static void OnBlit();
 	static void OnSidebarDraw();
-	static void InvalidateSidebar();
+	static void InvalidateSidebar(bool resources = false);
+	static void SetSidebarButtonsReady(bool radar, bool ready);
 
 	static State GetState();
 

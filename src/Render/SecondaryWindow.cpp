@@ -16,6 +16,10 @@ bool SecondaryWindow::ResizedByUser = false;
 
 namespace
 {
+	constexpr int GameWindowGap = 64;
+	RECT LastGameRect {};
+	bool PositionNeedsUpdate = false;
+
 	bool FitsInWorkArea(const RECT& rect)
 	{
 		const HMONITOR hMonitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
@@ -79,6 +83,7 @@ bool SecondaryWindow::Create(const char* pTitle, int width, int height)
 	RequestedWidth = width;
 	RequestedHeight = height;
 	ResizedByUser = false;
+	PositionNeedsUpdate = true;
 
 	Debug::Log("[GPURender] Created the window with %dx%d at (%d, %d).\n", width, height, x, y);
 	return true;
@@ -106,6 +111,7 @@ void SecondaryWindow::Hide()
 
 void SecondaryWindow::OnGameResolutionChanged(int width, int height)
 {
+	PositionNeedsUpdate = true;
 	if (!Window || ResizedByUser || (width == RequestedWidth && height == RequestedHeight))
 		return;
 
@@ -114,6 +120,26 @@ void SecondaryWindow::OnGameResolutionChanged(int width, int height)
 	SDL_SetWindowSize(Window, width, height);
 
 	Debug::Log("[GPURender] Resized the window to the new game resolution %dx%d.\n", width, height);
+}
+
+void SecondaryWindow::UpdatePosition()
+{
+	RECT game {};
+	if (!Window || !Game::hWnd || IsIconic(Game::hWnd) || !GetWindowRect(Game::hWnd, &game))
+		return;
+	// The wrapper may resize/recenter the game after Set_Video_Mode returns.
+	// Check from the message loop, and only move again when the game rectangle changes.
+	if (!PositionNeedsUpdate && EqualRect(&game, &LastGameRect))
+		return;
+	LastGameRect = game;
+	PositionNeedsUpdate = false;
+	int width = 0, height = 0, x = 0, y = 0;
+	if (!SDL_GetWindowSize(Window, &width, &height))
+		return;
+	GetInitialPosition(width, height, x, y);
+	if (SDL_SetWindowPosition(Window, x, y))
+		Debug::Log("[GPURender] Requested window position (%d, %d), game rect=(%ld,%ld)-(%ld,%ld).\n",
+			x, y, game.left, game.top, game.right, game.bottom);
 }
 
 SecondaryWindow::EventResult SecondaryWindow::HandleEvent(const SDL_Event& event)
@@ -145,8 +171,9 @@ SecondaryWindow::EventResult SecondaryWindow::HandleEvent(const SDL_Event& event
 	}
 }
 
-// Right of the game window if it fits there, else on another monitor, else at the right edge
-// of the game monitor. SDL positions and sizes the client area, the frame comes on top of it.
+// Prefer the game's right side with a gap, or another monitor if it does not fit.
+// On a single monitor, allow overflow rather than moving left over the game.
+// SDL positions and sizes the client area, the frame comes on top of it.
 void SecondaryWindow::GetInitialPosition(int width, int height, int& x, int& y)
 {
 	RECT frame { 0, 0, width, height };
@@ -170,7 +197,8 @@ void SecondaryWindow::GetInitialPosition(int width, int height, int& x, int& y)
 		return;
 	}
 
-	const RECT beside { game.right, game.top, game.right + outerWidth, game.top + outerHeight };
+	const RECT beside { game.right + GameWindowGap, game.top,
+		game.right + GameWindowGap + outerWidth, game.top + outerHeight };
 
 	if (FitsInWorkArea(beside))
 		return setOuterPosition(beside.left, beside.top);
@@ -181,11 +209,5 @@ void SecondaryWindow::GetInitialPosition(int width, int height, int& x, int& y)
 	if (FindOtherMonitorWorkArea(hGameMonitor, work))
 		return setOuterPosition(work.left, work.top);
 
-	MONITORINFO info { sizeof(info) };
-
-	if (GetMonitorInfoW(hGameMonitor, &info))
-		return setOuterPosition(info.rcWork.right - outerWidth, info.rcWork.top);
-
-	x = SDL_WINDOWPOS_CENTERED;
-	y = SDL_WINDOWPOS_CENTERED;
+	setOuterPosition(beside.left, beside.top);
 }

@@ -154,18 +154,49 @@ DEFINE_HOOK(0x6A70AE, SidebarClass_Draw_GPURenderSnapshot, 0x5)
 
 DEFINE_HOOK(0x6A5840, SidebarClass_InitForHouse_GPURenderInvalidate, 0x6)
 {
-	GPURender::InvalidateSidebar();
+	GPURender::InvalidateSidebar(true);
 	return 0;
 }
 
 DEFINE_HOOK(0x6A5BF0, SidebarClass_UnloadShapes_GPURenderInvalidate, 0x7)
 {
-	GPURender::InvalidateSidebar();
+	GPURender::InvalidateSidebar(true);
 	return 0;
 }
 
 DEFINE_HOOK(0x6BE1C0, Scenario_Clear_GPURenderInvalidate, 0x8)
 {
-	GPURender::InvalidateSidebar();
+	GPURender::InvalidateSidebar(true);
+	return 0;
+}
+
+DEFINE_HOOK(0x6A5BDB, SidebarClass_InitForHouse_GPURenderButtonsReady, 0x5)
+{
+	GPURender::SetSidebarButtonsReady(false, true);
+	return 0;
+}
+
+DEFINE_HOOK(0x6530E7, RadarClass_InitIO_GPURenderButtonsReady, 0x5)
+{
+	GPURender::SetSidebarButtonsReady(true, true);
+	return 0;
+}
+
+DEFINE_HOOK(0x652D90, RadarClass_Dispose_GPURenderButtonsInvalidate, 0x5)
+{
+	GPURender::SetSidebarButtonsReady(true, false);
+	return 0;
+}
+
+// UI resource cleanup precedes rebinding; cached non-null button aliases are unsafe here.
+DEFINE_HOOK(0x730100, UI_UnloadShapes_GPURenderInvalidate, 0x5)
+{
+	GPURender::InvalidateSidebar(true);
+	return 0;
+}
+
+DEFINE_HOOK(0x730400, UI_UnloadPalette_GPURenderInvalidate, 0x5)
+{
+	GPURender::InvalidateSidebar(true);
 	return 0;
 }

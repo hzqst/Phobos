@@ -21,6 +21,7 @@ public:
 
 	static void Hide();
 	static void OnGameResolutionChanged(int width, int height);
+	static void UpdatePosition();
 	static EventResult HandleEvent(const SDL_Event& event);
 
 private:

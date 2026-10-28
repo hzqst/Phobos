@@ -81,6 +81,7 @@ namespace
 		{
 			auto& texture = SidebarTextures[i];
 			const auto& asset = frame.Assets[i];
+			if (asset.Pixels.empty()) continue; // An unavailable button must not hide other layers.
 			if (texture.Width != asset.Width || texture.Height != asset.Height)
 			{
 				ReleaseSidebarTexture(texture);
@@ -640,9 +641,20 @@ void GPURender::OnSidebarDraw()
 		SidebarSnapshot::CaptureAfterDraw();
 }
 
-void GPURender::InvalidateSidebar()
+void GPURender::InvalidateSidebar(bool resources)
 {
 	SidebarSnapshot::Invalidate();
+	if (resources)
+	{
+		SidebarSnapshot::LowerButtonsReady = false;
+		SidebarSnapshot::RadarButtonsReady = false;
+	}
+}
+
+void GPURender::SetSidebarButtonsReady(bool radar, bool ready)
+{
+	SidebarSnapshot::Invalidate();
+	(radar ? SidebarSnapshot::RadarButtonsReady : SidebarSnapshot::LowerButtonsReady) = ready;
 }
 
 void GPURender::RequestPresent()
@@ -693,6 +705,8 @@ void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 
 	if (CurrentState != State::Running)
 		return;
+
+	SecondaryWindow::UpdatePosition();
 
 	// Refresh the independent cursor position even when the scene has not blitted.
 	if (needsPresent)
