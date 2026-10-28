@@ -1,5 +1,7 @@
 # 资源身份与 CPU 帧缓存（阶段 1）
 
+本文保留阶段1的实现和验收记录；后续atlas已替换独立sidebar纹理及CPU颜色展开，当前GPU路径见 [FrameAtlas.md](FrameAtlas.md)。
+
 依据 [完整设计](FrameAtlasDesign.md)，本阶段只接入CPU身份/索引缓存，保持现有独立GPU纹理。没有atlas、PaletteID、索引shader或GPU页淘汰；按钮切帧仍可能进行颜色映射与GPU上传，不能据本阶段宣称完整atlas优化已完成。
 
 ## 数据路径

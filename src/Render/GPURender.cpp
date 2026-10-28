@@ -6,6 +6,7 @@
 #include "CursorTrace.h"
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
+#include "FrameAtlas.h"
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -53,94 +54,54 @@ namespace
 	std::array<std::uint32_t, CursorImage::MaxDimension * CursorImage::MaxDimension> UploadedCursor {};
 	int UploadedWidth = 0, UploadedHeight = 0;
 	bool CursorDirty = false;
-	struct SidebarTexture
-	{
-		SDL_GPUTexture* Texture = nullptr;
-		SDL_GPUTransferBuffer* Transfer = nullptr;
-		int Width = 0, Height = 0;
-		bool Dirty = false;
-		std::vector<std::uint32_t> Uploaded;
-	};
-	std::array<SidebarTexture, SidebarSnapshot::AssetCount> SidebarTextures;
+	FrameAtlas Atlas;
+	unsigned AtlasTraceCount = 0;
+	std::uint64_t LastAtlasIndexBytes = 0, LastAtlasPaletteBytes = 0, LastAtlasDecoded = 0;
 	std::vector<PresentPass::Sprite> Sprites;
 
-	void ReleaseSidebarTexture(SidebarTexture& texture)
-	{
-		if (texture.Texture) SDL_ReleaseGPUTexture(Device, texture.Texture);
-		if (texture.Transfer) SDL_ReleaseGPUTransferBuffer(Device, texture.Transfer);
-		texture = {};
-	}
-
-	bool PrepareSidebar()
+	FrameAtlas::BeginResult PrepareSidebar()
 	{
 		Sprites.clear();
 		const auto& frame = SidebarSnapshot::Current;
-		if (!frame.Visible || !SidebarSnapshot::Eligible())
-			return true;
-		for (size_t i = 0; i < SidebarTextures.size(); ++i)
-		{
-			auto& texture = SidebarTextures[i];
-			const auto& asset = frame.Assets[i];
-			if (asset.Pixels.empty()) continue; // An unavailable button must not hide other layers.
-			if (texture.Width != asset.Width || texture.Height != asset.Height)
+		const bool visible = frame.Visible && SidebarSnapshot::Eligible();
+		std::vector<FrameAtlas::Request> requests;
+		if (visible)
+			for (const auto& placement : frame.Placements)
 			{
-				ReleaseSidebarTexture(texture);
-				SDL_GPUTextureCreateInfo info {};
-				info.type = SDL_GPU_TEXTURETYPE_2D;
-				info.format = SDL_GPU_TEXTUREFORMAT_R32_UINT;
-				info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-				info.width = asset.Width; info.height = asset.Height;
-				info.layer_count_or_depth = info.num_levels = 1;
-				texture.Texture = SDL_CreateGPUTexture(Device, &info);
-				SDL_GPUTransferBufferCreateInfo transfer {};
-				transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-				transfer.size = Uint32(asset.Pixels.size() * sizeof(std::uint32_t));
-				texture.Transfer = SDL_CreateGPUTransferBuffer(Device, &transfer);
-				if (!texture.Texture || !texture.Transfer) return false;
-				texture.Width = asset.Width; texture.Height = asset.Height;
+				const auto& asset = frame.Assets[placement.AssetIndex];
+				requests.push_back({asset.ID, asset.Color});
 			}
-			if (texture.Uploaded != asset.Pixels)
-			{
-				auto* mapped = SDL_MapGPUTransferBuffer(Device, texture.Transfer, true);
-				if (!mapped) return false;
-				std::memcpy(mapped, asset.Pixels.data(), asset.Pixels.size() * sizeof(std::uint32_t));
-				SDL_UnmapGPUTransferBuffer(Device, texture.Transfer);
-				texture.Uploaded = asset.Pixels;
-				texture.Dirty = true;
-			}
-		}
+		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
+		if (result != FrameAtlas::BeginResult::Ready || !visible) return result;
 		for (const auto& placement : frame.Placements)
 		{
 			const auto& asset = frame.Assets[placement.AssetIndex];
+			const auto view = Atlas.Resolve({asset.ID, asset.Color});
+			if (!view.Texture) continue;
 			const auto x = std::int64_t(placement.X) + asset.Left;
 			const auto y = std::int64_t(placement.Y) + asset.Top;
 			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
 			const auto clipped = CursorImage::Clip(int(x), int(y), asset.Width, asset.Height, frame.Width, frame.Height);
 			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
 			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
-			Sprites.push_back({SidebarTextures[placement.AssetIndex].Texture,
-				int(canvasX), clipped.Y, clipped.Width, clipped.Height, clipped.SourceX, clipped.SourceY});
+			Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,
+				view.X + clipped.SourceX, view.Y + clipped.SourceY, true, view.Palette, asset.Color->Values.Shift, asset.Color->Values.Bits});
 		}
-		return true;
+		return result;
 	}
 
-	bool SidebarDirty()
+	void TraceAtlas()
 	{
-		return std::any_of(SidebarTextures.begin(), SidebarTextures.end(), [](const auto& texture) {return texture.Dirty;});
-	}
-
-	void UploadSidebar(SDL_GPUCopyPass* pass)
-	{
-		for (const auto& texture : SidebarTextures)
+		const auto stats = Atlas.GetStats();
+		if (SidebarSnapshot::Trace && AtlasTraceCount < 64 && (stats.Submissions == 1 || stats.Submissions % 300 == 0))
 		{
-			if (!texture.Dirty) continue;
-			SDL_GPUTextureTransferInfo source {};
-			source.transfer_buffer = texture.Transfer;
-			source.pixels_per_row = texture.Width; source.rows_per_layer = texture.Height;
-			SDL_GPUTextureRegion destination {};
-			destination.texture = texture.Texture;
-			destination.w = texture.Width; destination.h = texture.Height; destination.d = 1;
-			SDL_UploadToGPUTexture(pass, &source, &destination, true);
+			++AtlasTraceCount;
+			const auto decoded = ShapeFrameSource::Frames.GetStats().Decoded;
+			Debug::Log("[FrameAtlas] submissions=%llu bpp=%u pages=%u retiring=%u pageBytes=%llu occupiedPixels=%llu palettes=%u inFlight=%u uploads=%llu paletteUploads=%llu indexBytes=%llu indexDelta=%llu paletteBytes=%llu paletteDelta=%llu transferBytes=%llu decoded=%llu decodedDelta=%llu evictions=%llu budgetMisses=%llu busy=%llu\n",
+				stats.Submissions, stats.BytesPerPixel, stats.Pages, stats.RetiringPages, stats.PageBytes, stats.OccupiedPixels, stats.Palettes, stats.InFlight,
+				stats.FrameUploads, stats.PaletteUploads, stats.IndexBytes, stats.IndexBytes - LastAtlasIndexBytes, stats.PaletteBytes,
+				stats.PaletteBytes - LastAtlasPaletteBytes, stats.TransferBytes, decoded, decoded - LastAtlasDecoded, stats.Evictions, stats.BudgetMisses, stats.Busy);
+			LastAtlasIndexBytes = stats.IndexBytes; LastAtlasPaletteBytes = stats.PaletteBytes; LastAtlasDecoded = decoded;
 		}
 	}
 
@@ -512,6 +473,10 @@ void GPURender::Initialize(int width, int height)
 
 	if (!PresentPass::Create(Device, SecondaryWindow::Get()))
 		return Fail("Creating the present pipeline");
+	if (!MirrorMode && !Atlas.Create(Device, {})) return Fail("Creating the indexed frame atlas");
+	AtlasTraceCount = 0;
+	LastAtlasIndexBytes = LastAtlasPaletteBytes = 0;
+	LastAtlasDecoded = ShapeFrameSource::Frames.GetStats().Decoded;
 
 	TimerID = SetTimer(nullptr, 0, TimerIntervalMS, OnTimer);
 
@@ -541,7 +506,7 @@ void GPURender::ReleaseResources()
 		PresentPass::Release(Device);
 		SurfaceMirror::Release(Device);
 		ReleaseCursorResources();
-		for (auto& texture : SidebarTextures) ReleaseSidebarTexture(texture);
+		Atlas.Release();
 		SidebarSnapshot::Invalidate();
 
 		if (WindowClaimed)
@@ -572,7 +537,9 @@ void GPURender::Present()
 	}
 	else
 	{
-		if (!PrepareSidebar()) return Fail("Preparing the GPU sidebar");
+		const auto prepared = PrepareSidebar();
+		if (prepared == FrameAtlas::BeginResult::Busy) return;
+		if (prepared == FrameAtlas::BeginResult::Failed) return Fail("Preparing the GPU sidebar atlas");
 		if (!PrepareCursor()) return Fail("Preparing the GPU cursor");
 		if (CursorFrame.Visible)
 			Sprites.push_back({CursorTexture, CursorFrame.X, CursorFrame.Y, CursorFrame.Width, CursorFrame.Height, 0, 0});
@@ -583,7 +550,7 @@ void GPURender::Present()
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
-	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || SidebarDirty()))
+	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || Atlas.HasUploads()))
 	{
 		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
 		if (!pCopyPass)
@@ -595,7 +562,7 @@ void GPURender::Present()
 			SurfaceMirror::Upload(pCopyPass);
 		else
 		{
-			UploadSidebar(pCopyPass);
+			Atlas.EncodeUploads(pCopyPass);
 			if (CursorDirty) UploadCursor(pCopyPass);
 		}
 		SDL_EndGPUCopyPass(pCopyPass);
@@ -612,26 +579,24 @@ void GPURender::Present()
 		return Fail("SDL_AcquireGPUSwapchainTexture");
 	}
 
+	bool drawn = true;
 	if (pSwapchainTexture)
 	{
-		const bool drawn = MirrorMode
+		drawn = MirrorMode
 			? PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
 				SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
 			: PresentPass::DrawSprites(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
 				DSurface::WindowBounds.Width, DSurface::WindowBounds.Height, Sprites);
-		if (!drawn)
-		{
-			SDL_CancelGPUCommandBuffer(pCommandBuffer);
-			return Fail("Drawing the GPU output");
-		}
 	}
 
-	if (!SDL_SubmitGPUCommandBuffer(pCommandBuffer))
+	// Acquiring a swapchain texture forbids Cancel, even if beginning the render pass failed.
+	if (!(MirrorMode ? SDL_SubmitGPUCommandBuffer(pCommandBuffer) : Atlas.Submit(pCommandBuffer)))
 		Fail("SDL_SubmitGPUCommandBuffer");
 	else
 	{
 		CursorDirty = false;
-		for (auto& texture : SidebarTextures) texture.Dirty = false;
+		if (!MirrorMode) TraceAtlas();
+		if (!drawn) Fail("Drawing the GPU output", "Could not begin the render pass");
 	}
 }
 

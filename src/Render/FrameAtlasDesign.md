@@ -1,6 +1,6 @@
 # SHP 帧按需缓存、FrameID 与多页 atlas 设计
 
-状态：阶段1资源身份与CPU帧缓存已实现，验证及限制见 [FrameCache.md](FrameCache.md)。多页atlas、PaletteID、索引shader和GPU上传/退役方案尚未实现。设计基线为 `0514cbac`，2026-10-28。首批接入现有六项 sidebar 背景与十个按钮，之后复用到 cameo。下文为完整目标契约，不代表全部性能指标或hook已验证。
+状态：阶段1资源身份与CPU帧缓存已实现，验证及限制见 [FrameCache.md](FrameCache.md)。多页atlas、PaletteID、索引shader和GPU上传/退役已接入，D3D12两局采样、稳定300次零新增解码/上传及用户画面验收已取得，自动测试及覆盖限制见 [FrameAtlas.md](FrameAtlas.md)。设计基线为 `0514cbac`，2026-10-28。首批接入现有六项 sidebar 背景与十个按钮，之后复用到 cameo。下文为完整目标契约，不代表全部性能指标或hook已验证。
 
 ## 1. 目标与边界
 

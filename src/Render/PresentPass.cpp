@@ -7,6 +7,8 @@
 
 #include <Shaders/DecodeRGB16.ps.dxil.h>
 #include <Shaders/DecodeRGB16.ps.spirv.h>
+#include <Shaders/IndexedSprite.ps.dxil.h>
+#include <Shaders/IndexedSprite.ps.spirv.h>
 #include <Shaders/Fullscreen.vs.dxil.h>
 #include <Shaders/Fullscreen.vs.spirv.h>
 
@@ -14,6 +16,7 @@
 #include <cstddef>
 
 SDL_GPUGraphicsPipeline* PresentPass::Pipeline = nullptr;
+SDL_GPUGraphicsPipeline* PresentPass::IndexedPipeline = nullptr;
 SDL_GPUSampler* PresentPass::Sampler = nullptr;
 
 namespace
@@ -106,6 +109,8 @@ bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 		MakeShaderCode(g_Fullscreen_vs_DXIL, g_Fullscreen_vs_SPIRV), SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
 	SDL_GPUShader* pFragmentShader = CreateShader(pDevice,
 		MakeShaderCode(g_DecodeRGB16_ps_DXIL, g_DecodeRGB16_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+	SDL_GPUShader* indexedShader = CreateShader(pDevice,
+		MakeShaderCode(g_IndexedSprite_ps_DXIL, g_IndexedSprite_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
 
 	if (pVertexShader && pFragmentShader)
 	{
@@ -127,6 +132,11 @@ bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 		info.target_info.num_color_targets = 1;
 
 		Pipeline = SDL_CreateGPUGraphicsPipeline(pDevice, &info);
+		if (indexedShader)
+		{
+			info.fragment_shader = indexedShader;
+			IndexedPipeline = SDL_CreateGPUGraphicsPipeline(pDevice, &info);
+		}
 	}
 
 	// The pipeline keeps what it needs from the shaders
@@ -135,8 +145,9 @@ bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 
 	if (pFragmentShader)
 		SDL_ReleaseGPUShader(pDevice, pFragmentShader);
+	if (indexedShader) SDL_ReleaseGPUShader(pDevice, indexedShader);
 
-	if (!Pipeline)
+	if (!Pipeline || !IndexedPipeline)
 		return false;
 
 	// Integer textures are only fetched, but SDL_GPU binds every sampled texture with a sampler
@@ -154,6 +165,11 @@ bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 
 void PresentPass::Release(SDL_GPUDevice* pDevice)
 {
+	if (IndexedPipeline)
+	{
+		SDL_ReleaseGPUGraphicsPipeline(pDevice, IndexedPipeline);
+		IndexedPipeline = nullptr;
+	}
 	if (Sampler)
 	{
 		SDL_ReleaseGPUSampler(pDevice, Sampler);
@@ -222,14 +238,17 @@ bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextu
 		uniforms.Region[1] = sprite.SourceY + region.SourceY;
 		uniforms.Region[2] = region.Width;
 		uniforms.Region[3] = region.Height;
+		if (sprite.Palette)
+		{
+			std::copy(sprite.Shift.begin(), sprite.Shift.end(), uniforms.Shift);
+			std::copy(sprite.Bits.begin(), sprite.Bits.end(), uniforms.Bits);
+		}
 
-		SDL_GPUTextureSamplerBinding binding {};
-		binding.texture = sprite.Texture;
-		binding.sampler = Sampler;
+		SDL_GPUTextureSamplerBinding bindings[2] {{sprite.Texture, Sampler}, {sprite.Palette, Sampler}};
 
-		SDL_BindGPUGraphicsPipeline(pRenderPass, Pipeline);
+		SDL_BindGPUGraphicsPipeline(pRenderPass, sprite.Palette ? IndexedPipeline : Pipeline);
 		SDL_SetGPUViewport(pRenderPass, &viewport);
-		SDL_BindGPUFragmentSamplers(pRenderPass, 0, &binding, 1);
+		SDL_BindGPUFragmentSamplers(pRenderPass, 0, bindings, sprite.Palette ? 2 : 1);
 		SDL_PushGPUFragmentUniformData(pCommandBuffer, 0, &uniforms, sizeof(uniforms));
 		SDL_DrawGPUPrimitives(pRenderPass, FullscreenTriangleVertexCount, 1, 0, 0);
 	}

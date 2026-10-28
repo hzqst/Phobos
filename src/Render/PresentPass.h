@@ -1,6 +1,8 @@
 #pragma once
 
 #include <span>
+#include <array>
+#include <cstdint>
 
 struct SDL_GPUDevice;
 struct SDL_Window;
@@ -19,6 +21,8 @@ public:
 		SDL_GPUTexture* Texture;
 		int X, Y, Width, Height, SourceX, SourceY;
 		bool IndexedAlpha = true;
+		SDL_GPUTexture* Palette = nullptr;
+		std::array<std::uint32_t, 3> Shift {}, Bits {};
 	};
 	static bool DrawSprites(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target,
 		unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,
@@ -38,5 +42,6 @@ private:
 		unsigned int targetHeight, SDL_GPUTexture* pSource, int sourceWidth, int sourceHeight,
 		int x, int y, int logicalWidth, int logicalHeight, bool cursor);
 	static SDL_GPUGraphicsPipeline* Pipeline;
+	static SDL_GPUGraphicsPipeline* IndexedPipeline;
 	static SDL_GPUSampler* Sampler;
 };

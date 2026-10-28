@@ -297,6 +297,7 @@
     <!-- src\Render -->
     <ClCompile Include="src\Render\GPURender.cpp" />
     <ClCompile Include="src\Render\FrameCache.cpp" />
+    <ClCompile Include="src\Render\FrameAtlas.cpp" />
     <ClCompile Include="src\Render\Hooks.cpp" />
     <ClCompile Include="src\Render\PresentPass.cpp" />
     <ClCompile Include="src\Render\SDLLoader.cpp" />
@@ -320,6 +321,9 @@
   <ItemGroup>
     <!-- src\Render\Shaders\ -->
     <PhobosShader Include="src\Render\Shaders\DecodeRGB16.ps.hlsl">
+      <Profile>ps_6_0</Profile>
+    </PhobosShader>
+    <PhobosShader Include="src\Render\Shaders\IndexedSprite.ps.hlsl">
       <Profile>ps_6_0</Profile>
     </PhobosShader>
     <PhobosShader Include="src\Render\Shaders\Fullscreen.vs.hlsl">
