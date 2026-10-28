@@ -104,7 +104,57 @@ All findings and ABI details:
   image uploads (101 SHP + 11 glyphs), one page and two palettes; no budget misses.
   Evidence: `D:/Ra2/SidebarText-evidence-20261028-38272/`.
 
-Not yet demonstrated: every localized glyph/fallback, all charge-drain/on-hold super
-states, font reload in a second game, and replacement providers. Supporting mapped Chinese glyphs
-does not establish complete Chinese font coverage. Unknown font mutation/providers
-require separate validation; pointer equality alone is not a lifetime notification.
+The follow-up below covers a missing glyph, Firestorm states and controlled native
+font release/reload. It does not establish complete localized font coverage, every
+replacement provider, or unannounced in-place font mutations.
+
+## Follow-up regression (2026-10-28)
+
+Added bounded diagnostic records for superweapon state, missing-glyph selection and
+font invalidation. Lifecycle records also go to `debug/SidebarText-lifetime-PID.log`,
+because the ordinary game log closes before final process teardown. Normal execution
+does not force font reloads or change gameplay state.
+
+The user authorized temporary `spawn.ini`/`ra2md.csf` replacements and one test map,
+followed by restoration. The map assigned Firestorm to the test shield cameo and
+provided a power plant; the CSF changed only TXT_CHARGING to `TEST` plus U+0378.
+Firestorm follows the documented [Ares Charge/Drain path](https://ares-developers.github.io/Ares-docs/new/superweapons/types/firestorm.html).
+The native bound font's U+0378 table entry was read as zero; its fallback bytes exactly
+matched the inverse X record. Font records were sampled, never surface pixels.
+
+| Check | Evidence and result |
+| --- | --- |
+| First test game, PID 51144 | Ordinary-privilege Spawner; Firestorm READY, active state 2 and power-loss HOLD captured. User reported normal display. Charging/missing glyph had not yet been observed; not counted as passed in this game. |
+| Second test game, PID 43216 | Fresh process, direct skirmish; states charging 0, ready 1, active 2 and onHold captured with known runs. User reported correct display and clearing. |
+| Actual missing glyph | U+0378 logged `fallback=verified`, GlyphID 11 reused throughout repeated calls; charging output contained the intended test string. User confirmed the native/GPU comparison. |
+| Actual font data CPU test | `GlyphCacheAssetTests.cpp` passed with the sampled 33,910-record font: mapped Chinese and inverse-X fallback, 300 reuse cycles without another decode, invalidation and same-address replacement with permanently invalid old IDs. |
+| Ordinary process exit | The independent log contained binding only, without an invalidation event. Two new processes both starting with FontID 1 are not proof of same-process resource reuse or destructor coverage. |
+| Controlled native release/reload, PID 51252 | Debug-only one-shot probe constructed GAME.FNT using 433880 and destroyed it using 433940. Both cycles reused object address 3440C0E0. FontID 2/GlyphID 1 became FontID 3/GlyphID 2; each native destructor invoked the existing pre-free hook, old IDs stopped resolving, and frames/resources became zero. Original font 10BDCFB0 was restored and rebound as FontID 4. Probe result PASS. |
+
+The controlled probe is enabled only in Debug builds with
+`PHOBOS_FONT_LIFETIME_TEST=1`. It runs on the game thread with an unlocked font,
+allocates its own object using the game allocator, retains that allocation across
+two constructor/destructor cycles, then deallocates it. It never destroys the original
+game font. The binding is restored before returning to native rendering. This proves
+native lifecycle notifications and cache identity changes; it is not a claim that
+ordinary scene transitions reload the font, nor a GPU in-flight stress test.
+
+Debug builds passed after instrumentation and after adding the controlled probe.
+The probe's short-lived test process was closed after recording PASS. There are no
+new or modified hook entries, project settings, shader logic or dependencies.
+Changes in this follow-up have not been committed.
+
+Evidence directory: `D:/Ra2/SidebarText-regression-evidence-20261028/`:
+`first-51144.log`, `second-43216.log`, `lifetime-probe-51252.log`, independent lifecycle
+log, build logs, `asset-test.log`, sampled font records and the test map. Font assets
+and machine-specific test configuration are not committed to the repository.
+
+Restoration verified byte-for-byte using SHA256:
+
+- `spawn.ini`: `BC608E481DD52A32C12845355809F63AA49545666881C794EE857C5CD32148F5`.
+- `ra2md.csf`: `D230683DA0ECD9116968CEB298D8A07DD2826DB8A7AAAAAE7D6C6C6BDD494554`.
+- `GPU-TEXT-REGRESSION.map` was removed after copying it into the evidence directory.
+- Deployed diagnostic DLL: `43198E860A81A9032B67EFBB54D10283F14376F3DC987ADDCF02112D97763494`;
+  its probe environment variable was scoped to the test launch and is disabled on
+  normal subsequent launches. Original DLL/PDB and configuration backup:
+  `D:/Ra2/SidebarText-regression-backup-20261028-205728/`.

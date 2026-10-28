@@ -32,6 +32,23 @@ namespace SidebarText
 		std::array<int, 4> Metrics {};
 		unsigned TraceCount = 0;
 		std::unordered_set<std::uint64_t> TraceHashes;
+		unsigned LifetimeTraceCount = 0, MissingTraceCount = 0, SuperTraceCount = 0;
+		GlyphCache::GlyphID LastGlyph;
+		std::unordered_set<std::uint64_t> SuperTraceHashes;
+		void TraceLifetime(const char* event, GlyphCache::FontID font, GlyphCache::GlyphID glyph, bool resolvedBefore)
+		{
+			// The game closes debug.log before its final resource teardown.
+			// Keep this bounded trace independent of that logger's lifetime.
+			char filename[96];
+			std::snprintf(filename, sizeof(filename), "debug/SidebarText-lifetime-%lu.log", GetCurrentProcessId());
+			std::FILE* file = nullptr;
+			if (fopen_s(&file, filename, "a") || !file) return;
+			const auto& stats = Cache.Storage().GetStats();
+			std::fprintf(file, "event=%s pid=%lu fontID=%llu glyphID=%llu resolvedBefore=%d resolvedNow=%d frames=%zu resources=%zu invalidations=%llu\n",
+				event, GetCurrentProcessId(), font.Value, glyph.Value, resolvedBefore, Cache.Resolve(glyph) != nullptr,
+				stats.Frames, stats.Resources, stats.Invalidations);
+			std::fclose(file);
+		}
 		bool Coordinate(int value) { return value >= -MaxCoordinate && value <= MaxCoordinate; }
 
 		bool RefreshFont()
@@ -61,12 +78,74 @@ namespace SidebarText
 					{ FontInvalidating(nullptr); return false; }
 				BoundFont = font; Binding = binding; Metrics = metrics;
 				if (SidebarSnapshot::Trace && TraceCount < 96)
+				{
+					TraceLifetime("bind", BoundID, LastGlyph, Cache.Resolve(LastGlyph) != nullptr);
 					Debug::Log("[SidebarTextGPU] font sample=%u object=%p fontID=%llu symbols=%d stride=%d height=%d recordBytes=%d\n",
 						++TraceCount, font, BoundID.Value, data.Count, data.Stride, data.FontHeight, data.SymbolDataSize);
+				}
 			}
 			else if (metrics != Metrics) { ClearRuns(); Metrics = metrics; }
 			return bool(BoundID);
 		}
+
+#ifdef DEBUG
+		void ProbeFontLifetime()
+		{
+			static bool done = false;
+			if (done || !BoundFont || BoundFont->pGraphBuffer) return;
+			char enabled[2] {};
+			if (GetEnvironmentVariableA("PHOBOS_FONT_LIFETIME_TEST", enabled, sizeof(enabled)) != 1 || enabled[0] != '1')
+				{ done = true; return; }
+			done = true;
+			// Explicit debug-only regression probe. Own this allocation and every
+			// constructed font; never destroy the game's original font. Reuse the
+			// object allocation to exercise native teardown with identical addresses.
+			auto* original = BitFont::Instance;
+			auto* probe = static_cast<BitFont*>(YRMemory::Allocate(sizeof(BitFont)));
+			if (!probe) { Debug::Log("[SidebarTextGPU] lifetimeProbe allocation failed\n"); return; }
+			using Constructor = void (__thiscall*)(BitFont*, const char*);
+			using Destructor = void (__thiscall*)(BitFont*);
+			const auto construct = reinterpret_cast<Constructor>(0x433880);
+			const auto destroy = reinterpret_cast<Destructor>(0x433940);
+			GlyphCache::FontID previousFont;
+			GlyphCache::GlyphID previousGlyph;
+			bool passed = true;
+			for (unsigned cycle = 1; cycle <= 2; ++cycle)
+			{
+				construct(probe, "GAME.FNT");
+				BitFont::Instance = probe;
+				const bool bound = RefreshFont();
+				GlyphCache::GlyphID glyph;
+				FrameCache::FrameID storage;
+				const auto font = BoundID;
+				if (bound)
+				{
+					const auto& data = *probe->InternalPTR;
+					const auto symbol = static_cast<unsigned short>(data.SymbolTable[0x58]);
+					if (symbol && symbol <= data.Count)
+					{
+						const auto* record = reinterpret_cast<const std::uint8_t*>(data.Bitmaps) + std::size_t(symbol - 1) * data.SymbolDataSize;
+						const auto acquired = Cache.Acquire(font, symbol - 1, {record, std::size_t(data.SymbolDataSize)});
+						if (acquired.State == FrameCache::Status::Ready)
+							{ glyph = acquired.Value->ID; storage = acquired.Value->Storage; LastGlyph = glyph; }
+					}
+				}
+				const bool newIdentity = font && glyph && !(font == previousFont) && !(glyph == previousGlyph)
+					&& !Cache.Resolve(previousGlyph);
+				destroy(probe); // Ordinary destructor: hooks run before native data/fallback frees.
+				BitFont::Instance = original;
+				const bool invalidated = !BoundID && !Cache.Resolve(glyph) && !Cache.Storage().Resolve(storage)
+					&& Cache.Storage().GetStats().Frames == 0 && Cache.Storage().GetStats().Resources == 0;
+				passed &= newIdentity && invalidated;
+				Debug::Log("[SidebarTextGPU] lifetimeProbe cycle=%u object=%p fontID=%llu glyphID=%llu newIdentity=%d invalidated=%d\n",
+					cycle, probe, font.Value, glyph.Value, newIdentity, invalidated);
+				previousFont = font; previousGlyph = glyph;
+			}
+			YRMemory::Deallocate(probe);
+			const bool restored = RefreshFont() && BoundFont == original && !Cache.Resolve(previousGlyph);
+			Debug::Log("[SidebarTextGPU] lifetimeProbe result=%s original=%p restored=%d\n", passed && restored ? "PASS" : "FAIL", original, restored);
+		}
+#endif
 
 		std::uint64_t Fingerprint(const BuildType& item)
 		{
@@ -147,12 +226,27 @@ namespace SidebarText
 	void FontInvalidating(const void* font)
 	{
 		if (font && font != BoundFont) return;
+		const auto oldFont = BoundID;
+		const auto oldGlyph = LastGlyph;
+		const auto before = Cache.Storage().GetStats();
+		const bool oldResolved = Cache.Resolve(oldGlyph) != nullptr;
 		ClearRuns(); Cache.Clear(); BoundFont = nullptr; BoundID = {}; Binding = {}; Metrics = {};
+		if (SidebarSnapshot::Trace && oldFont && LifetimeTraceCount < 32)
+		{
+			TraceLifetime("invalidate", oldFont, oldGlyph, oldResolved);
+			const auto& after = Cache.Storage().GetStats();
+			Debug::Log("[SidebarTextGPU] invalidate sample=%u pid=%lu requestedFont=%p oldFontID=%llu oldGlyphID=%llu resolvedBefore=%d resolvedAfter=%d framesBefore=%zu framesAfter=%zu resourcesAfter=%zu invalidations=%llu\n",
+				++LifetimeTraceCount, GetCurrentProcessId(), font, oldFont.Value, oldGlyph.Value,
+				oldResolved, Cache.Resolve(oldGlyph) != nullptr, before.Frames, after.Frames, after.Resources, after.Invalidations);
+		}
 	}
 
 	void Refresh()
 	{
 		RefreshFont();
+#ifdef DEBUG
+		ProbeFontLifetime();
+#endif
 		for (int tab = 0; tab < 4; ++tab) SyncList(tab);
 		// A draw must finish each item before publishing. Reject interrupted scopes.
 		Items.clear(); Prints.clear();
@@ -181,6 +275,21 @@ namespace SidebarText
 		while (!Prints.empty() && Prints.back().Stack < stack) Prints.pop_back();
 		scope.Pending.Fingerprint = Fingerprint(scope.Item);
 		if (!scope.Pending.Fingerprint) scope.Pending.Known = false;
+		if (SidebarSnapshot::Trace && SuperTraceCount < 64 && scope.Item.ItemType == AbstractType::Special)
+		{
+			const auto* house = HouseClass::CurrentPlayer;
+			const auto* super = house && scope.Item.ItemIndex >= 0 && scope.Item.ItemIndex < house->Supers.Count
+				? house->Supers[scope.Item.ItemIndex] : nullptr;
+			if (Readable(super, sizeof(*super)) && Readable(super->Type, sizeof(*super->Type)))
+			{
+				const unsigned state[] {unsigned(scope.Tab), unsigned(scope.Item.ItemIndex), super->Type->UseChargeDrain,
+					super->IsReady, super->IsSuspended, unsigned(super->ChargeDrainState), unsigned(scope.Pending.Texts.size()), scope.Pending.Known};
+				if (SuperTraceHashes.insert(SidebarSnapshot::Hash(state, sizeof(state))).second)
+					Debug::Log("[SidebarTextGPU] super sample=%u tab=%d index=%d chargeDrain=%d ready=%d onHold=%d drainState=%d texts=%zu commands=%zu known=%d\n",
+						++SuperTraceCount, scope.Tab, scope.Item.ItemIndex, super->Type->UseChargeDrain, super->IsReady,
+						super->IsSuspended, int(super->ChargeDrainState), scope.Pending.Texts.size(), scope.Pending.Commands.size(), scope.Pending.Known);
+			}
+		}
 		if (SidebarSnapshot::Trace && TraceCount < 96 && !scope.Pending.Texts.empty())
 		{
 			auto hash = scope.Pending.Fingerprint;
@@ -268,9 +377,19 @@ namespace SidebarText
 				}
 			}
 		}
-		if (!Readable(record, bytes)) { Items.back().Pending.Known = false; return; }
+		if (!Readable(record, bytes))
+		{
+			if (!mapped && SidebarSnapshot::Trace && MissingTraceCount < 32)
+				Debug::Log("[SidebarTextGPU] missing sample=%u unit=%04X fontID=%llu fallback=unsupported\n",
+					++MissingTraceCount, unsigned(unit), BoundID.Value);
+			Items.back().Pending.Known = false; return;
+		}
 		const auto acquired = Cache.Acquire(BoundID, mapped ? mapped - 1 : unsigned(data.Count), {record, bytes});
 		if (acquired.State != FrameCache::Status::Ready) { Items.back().Pending.Known = false; return; }
+		LastGlyph = acquired.Value->ID;
+		if (!mapped && SidebarSnapshot::Trace && MissingTraceCount < 32)
+			Debug::Log("[SidebarTextGPU] missing sample=%u unit=%04X fontID=%llu fallback=verified glyphID=%llu\n",
+				++MissingTraceCount, unsigned(unit), BoundID.Value, LastGlyph.Value);
 		Command command;
 		command.Glyph = acquired.Value->ID;
 		command.X = r->Stack<int>(8); command.Y = r->Stack<int>(12);
