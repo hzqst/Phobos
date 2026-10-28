@@ -81,7 +81,8 @@ namespace
 			const auto x = std::int64_t(placement.X) + asset.Left;
 			const auto y = std::int64_t(placement.Y) + asset.Top;
 			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
-			const auto clipped = CursorImage::Clip(int(x), int(y), asset.Width, asset.Height, frame.Width, frame.Height);
+			const auto clipped = CursorImage::Clip(int(x), int(y), asset.Width, asset.Height,
+				std::min(frame.Width, placement.ClipWidth), std::min(frame.Height, placement.ClipHeight));
 			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
 			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
 			Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,

@@ -11,13 +11,22 @@
 #include <GameOptionsClass.h>
 #include <Surface.h>
 #include <Utilities/Debug.h>
+#include <Utilities/AresHelper.h>
+#include <Utilities/AresFunctions.h>
+#include <Ext/Rules/Body.h>
+#include <UnitTypeClass.h>
+#include <InfantryTypeClass.h>
+#include <AircraftTypeClass.h>
+#include <BuildingTypeClass.h>
+#include <SuperWeaponTypeClass.h>
 
 // Only CaptureAfterDraw reads engine-owned resources. Present/timer uses owned pixels.
 namespace SidebarSnapshot
 {
 	constexpr size_t BackgroundCount = 6;
 	constexpr size_t ButtonCount = 10;
-	constexpr size_t AssetCount = BackgroundCount + ButtonCount;
+	constexpr size_t CameoBegin = BackgroundCount + ButtonCount;
+	constexpr size_t AssetCount = CameoBegin + ShapeImage::MaxCameoSlots;
 	constexpr int MaxCanvasDimension = 4096;
 	constexpr int MaxRepeats = 128;
 	constexpr std::uintptr_t ResourceSlots[BackgroundCount] =
@@ -47,7 +56,7 @@ namespace SidebarSnapshot
 		FrameCache::FrameID ID;
 		PaletteCache::Handle Color;
 	};
-	struct Placement { size_t AssetIndex; int X, Y; };
+	struct Placement { size_t AssetIndex; int X, Y; int ClipWidth = INT_MAX, ClipHeight = INT_MAX; };
 	struct Frame
 	{
 		bool Visible = false;
@@ -67,6 +76,14 @@ namespace SidebarSnapshot
 	inline unsigned CacheTraceCount = 0;
 	inline PaletteCache::Cache Colors;
 	inline std::vector<std::pair<const ConvertClass*, PaletteCache::Handle>> CapturedColors;
+	inline unsigned CameoTraceCount = 0;
+	inline std::uint64_t CameoTraceHash = 0;
+	inline unsigned CameoItemTraceCount = 0;
+	inline std::array<std::uint64_t, ShapeImage::MaxCameoSlots> CameoItemHashes {};
+	static_assert(offsetof(SidebarClass, Tabs) == 0x1544);
+	static_assert(offsetof(StripClass, Cameos) == 0x58);
+	static_assert(offsetof(TechnoTypeClass, Cameo) == 0x6F0);
+	static_assert(offsetof(TechnoTypeClass, AltCameo) == 0x710);
 
 	inline bool Eligible()
 	{
@@ -192,6 +209,167 @@ namespace SidebarSnapshot
 		}
 	}
 
+	// Only the installed, inspected Ares 3.0p1 layout is accepted. Other extensions
+	// must supply a verified provider rather than falling back to stale vanilla slots.
+	inline bool KnownAresCameos()
+	{
+		return AresHelper::CanUseAres && AresHelper::AresVersion == AresHelper::Version::Ares30p
+			&& reinterpret_cast<std::uintptr_t>(GetProcAddress(reinterpret_cast<HMODULE>(AresHelper::AresBaseAddress), "StripClass_Draw_GetCameo1"))
+				== AresHelper::AresBaseAddress + 0x2CF90
+			&& reinterpret_cast<std::uintptr_t>(GetProcAddress(reinterpret_cast<HMODULE>(AresHelper::AresBaseAddress), "StripClass_Draw_Main"))
+				== AresHelper::AresBaseAddress + 0x5F180;
+	}
+
+	template<typename T> inline T* CameoTypeAt(int index)
+	{
+		const auto& types = T::Array;
+		return index >= 0 && index < types.Count && types.Items && CursorSnapshot::Readable(types.Items + index, sizeof(T*))
+			? types.Items[index] : nullptr;
+	}
+
+	inline TechnoTypeClass* ResolveCameoType(const BuildType& item)
+	{
+		switch (item.ItemType)
+		{
+		case AbstractType::Unit: case AbstractType::UnitType: return CameoTypeAt<UnitTypeClass>(item.ItemIndex);
+		case AbstractType::Aircraft: case AbstractType::AircraftType: return CameoTypeAt<AircraftTypeClass>(item.ItemIndex);
+		case AbstractType::Building: case AbstractType::BuildingType: return CameoTypeAt<BuildingTypeClass>(item.ItemIndex);
+		case AbstractType::Infantry: case AbstractType::InfantryType: return CameoTypeAt<InfantryTypeClass>(item.ItemIndex);
+		default: return nullptr;
+		}
+	}
+
+	// 0 = native SHP, 1 = extension/PCX/custom palette, 2 = invalid or not ready.
+	inline const SHPStruct* CameoSource(const BuildType& item, bool ares, int& sourceKind)
+	{
+		using CursorSnapshot::Readable;
+		sourceKind = 2;
+		const SHPStruct* source = nullptr;
+		if (item.ItemType == AbstractType::Special)
+		{
+			const auto* type = CameoTypeAt<SuperWeaponTypeClass>(item.ItemIndex);
+			if (!Readable(type, sizeof(*type))) return nullptr;
+			if (ares)
+			{
+				// Ares' own SW extension lookup, also used elsewhere in Phobos. No load or AI.
+				const auto* ext = reinterpret_cast<const std::uint8_t*>(AresFunctions::SWTypeExtMap_Find(const_cast<SuperWeaponTypeClass*>(type)));
+				if (!Readable(ext, 0x4D4)) return nullptr;
+				if (*reinterpret_cast<void* const*>(ext + 0x494) || *reinterpret_cast<void* const*>(ext + 0x4D0))
+					{ sourceKind = 1; return nullptr; }
+			}
+			source = type->SidebarImage;
+		}
+		else
+		{
+			const auto* type = ResolveCameoType(item);
+			if (!Readable(type, sizeof(*type))) return nullptr;
+			// Unknown virtual selectors are not assumed to be pure field readers.
+			const auto* vtable = *reinterpret_cast<const std::uintptr_t* const*>(type);
+			if (!Readable(vtable, 0x9C) || vtable[0x98 / 4] != 0x712040) { sourceKind = 1; return nullptr; }
+			if (ares)
+			{
+				const auto* ext = *reinterpret_cast<const std::uint8_t* const*>(reinterpret_cast<const std::uint8_t*>(type) + 0x2FC);
+				if (!Readable(ext, 0x250)) return nullptr;
+				// Conservatively exclude either PCX binding; never show its SHP fallback.
+				if (*reinterpret_cast<void* const*>(ext + 0x120) || *reinterpret_cast<void* const*>(ext + 0x228)
+					|| *reinterpret_cast<void* const*>(ext + 0x24C)) { sourceKind = 1; return nullptr; }
+			}
+			// The verified vanilla/Ares selector preserves current infiltration/veterancy rules.
+			source = type->GetCameo();
+		}
+		if (!Readable(source, sizeof(SHPStruct))) return nullptr;
+		if (source->Type == 0xFFFF)
+		{
+			const auto* ref = reinterpret_cast<const SHPReference*>(source);
+			if (!Readable(ref, sizeof(*ref))) return nullptr;
+			const auto* rules = RulesExt::Global();
+			const auto* missing = rules ? rules->MissingCameo.data() : "";
+			const auto length = std::strlen(missing);
+			if (Readable(ref->Filename, 11) && !_strnicmp(ref->Filename, "XXICON.SHP", 11)
+				&& length >= 4 && !_stricmp(missing + length - 4, ".pcx"))
+				{ sourceKind = 1; return nullptr; }
+		}
+		sourceKind = 0;
+		return source;
+	}
+
+	inline void CaptureCameos(int rows)
+	{
+		using CursorSnapshot::Readable;
+		const auto& sidebar = SidebarClass::Instance;
+		const int tab = sidebar.ActiveTabIndex;
+		if (tab < 0 || tab >= 4 || !HouseClass::CurrentPlayer || HouseClass::IsCurrentPlayerObserver()) return;
+		const auto& strip = sidebar.Tabs[tab];
+		const bool ares = AresHelper::AresBaseAddress != 0;
+		const BuildType* items = strip.Cameos;
+		int count = strip.CameoCount;
+		bool supported = true;
+		if (ares)
+		{
+			static const bool known = KnownAresCameos(); // Module selection is fixed before gameplay.
+			supported = known;
+			if (supported)
+			{
+				const auto* list = reinterpret_cast<const DynamicVectorClass<BuildType>*>(AresHelper::AresBaseAddress + 0xC1150) + tab;
+				static_assert(sizeof(DynamicVectorClass<BuildType>) == 0x18);
+				supported = Readable(list, sizeof(*list)) && list->Count >= 0 && list->Count <= list->Capacity && list->Count <= 4096;
+				if (supported) { items = list->Items; count = list->Count; }
+			}
+		}
+		else supported = count >= 0 && count <= 75;
+		const auto color = CaptureColor(FileSystem::CAMEO_PAL);
+		const int slots = std::min(ShapeImage::MaxCameoSlots, (rows + int(strip.IsScrolling)) * 2);
+		const int state[] {int(Generation), tab, count, strip.TopRowIndex, strip.IsScrolling, strip.Slid, supported, ares};
+		auto hash = Hash(state, sizeof(state));
+		int readyCount = 0, unsupportedCount = 0, pendingCount = 0;
+		for (int slot = 0; supported && slot < slots; ++slot)
+		{
+			ShapeImage::CameoSlot placement;
+			if (!ShapeImage::PlaceCameo(slot, strip.TopRowIndex, count, strip.Location.X, strip.Location.Y,
+				SelectClass::CameoPitchX(), SelectClass::CameoPitchY(), strip.IsScrolling, strip.Slid,
+				DSurface::SidebarBounds.X, Current.Width, Current.Height, placement)) continue;
+			if (!items || !Readable(items + placement.Item, sizeof(BuildType))) { ++pendingCount; continue; }
+			const auto item = items[placement.Item];
+			int kind = 2;
+			const auto* source = CameoSource(item, ares, kind);
+			auto& asset = Current.Assets[CameoBegin + slot];
+			asset = {};
+			const bool ready = source && CopyAsset(source, color, asset);
+			if (ready)
+			{
+				++readyCount;
+				Current.Placements.push_back({CameoBegin + slot, placement.X, placement.Y, placement.ClipWidth, placement.ClipHeight});
+			}
+			else if (kind == 1) ++unsupportedCount; else ++pendingCount;
+			const int identity[] {item.ItemIndex, int(item.ItemType), kind, placement.X, placement.Y, placement.ClipWidth, placement.ClipHeight};
+			hash = Hash(identity, sizeof(identity), hash);
+			hash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), hash);
+			if (Trace && CameoItemTraceCount < 64)
+			{
+				auto itemHash = Hash(identity, sizeof(identity));
+				itemHash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), itemHash);
+				itemHash = Hash(&Generation, sizeof(Generation), itemHash);
+				if (itemHash != CameoItemHashes[slot])
+				{
+					CameoItemHashes[slot] = itemHash;
+					Debug::Log("[SidebarCameoGPU] itemSample=%u generation=%u tab=%d slot=%d type=%d index=%d sourceKind=%d ready=%d shape=%p data=%p frameID=%llu pos=%d,%d offset=%d,%d size=%dx%d clip=%dx%d\n",
+						++CameoItemTraceCount, Generation, tab, slot, int(item.ItemType), item.ItemIndex, kind, ready,
+						source, reinterpret_cast<const void*>(asset.DataIdentity), asset.ID.Value, placement.X, placement.Y,
+						asset.Left, asset.Top, asset.Width, asset.Height, placement.ClipWidth, placement.ClipHeight);
+				}
+			}
+		}
+		const auto palette = ColorHash(color);
+		hash = Hash(&palette, sizeof(palette), hash);
+		if (Trace && CameoTraceCount < 64 && hash != CameoTraceHash)
+		{
+			CameoTraceHash = hash;
+			Debug::Log("[SidebarCameoGPU] sample=%u generation=%u thread=%lu tab=%d count=%d top=%d scroll=%d slid=%d slots=%d provider=%s supported=%d ready=%d unsupported=%d pending=%d palette=%016llX\n",
+				++CameoTraceCount, Generation, GetCurrentThreadId(), tab, count, strip.TopRowIndex, strip.IsScrolling, strip.Slid,
+				slots, ares ? "ares-3.0p1" : "vanilla", supported, readyCount, unsupportedCount, pendingCount, palette);
+		}
+	}
+
 	inline void CaptureAfterDraw()
 	{
 		Current.Visible = false;
@@ -255,7 +433,7 @@ namespace SidebarSnapshot
 			Current.Placements.push_back({3, 0, y});
 			Current.Placements.push_back({4, 0, y + Current.Assets[3].ShapeHeight});
 			CaptureButtons(0, 8);
-			// Future Strip/Power layers belong here, before TOP and the Radar buttons.
+			CaptureCameos(repeats);
 			Current.Placements.push_back({5, topX, topY});
 			CaptureButtons(8, ButtonCount);
 			// Native Radar may repaint repair then sell after its contents.

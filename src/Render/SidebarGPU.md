@@ -1,5 +1,7 @@
 # Sidebar 原始素材 GPU 接入
 
+基础建造图标已接入现有索引 atlas，首轮用户画面对照正常；实现、Ares动态列表补证、释放hook与覆盖限制见 [CameosGPU.md](CameosGPU.md)。Countdown百分比及其他文字／状态层尚未接入。
+
 缓存设计见 [FrameAtlasDesign.md](FrameAtlasDesign.md)，阶段1实现与验证见 [FrameCache.md](FrameCache.md)。当前已接入FrameID多页索引atlas与独立GPU调色板，实现与验收状态见 [FrameAtlas.md](FrameAtlas.md)。下方按钮和背景章节保留此前阶段记录。
 
 ## 按钮接入（2026-10-28）

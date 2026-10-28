@@ -43,7 +43,15 @@ int main()
 	const auto replacement = Acquire(ref, 0, data);
 	CHECK(Status::Ready == replacement.State && replacement.Frame->ID != firstID);
 	CHECK(7 == replacement.Frame->Indices[0]);
-	const auto replacementID = replacement.Frame->ID;
+	const auto freedID = replacement.Frame->ID;
+	// Owned cameo free sites pass Data directly, not the reference alias.
+	CHECK(Invalidate(reinterpret_cast<std::uintptr_t>(shp)));
+	CHECK(!Frames.Resolve(freedID) && Aliases.empty());
+	file[56] = 9;
+	const auto afterFree = Acquire(ref, 0, data);
+	CHECK(Status::Ready == afterFree.State && afterFree.Frame->ID != freedID);
+	CHECK(9 == afterFree.Frame->Indices[0]);
+	const auto replacementID = afterFree.Frame->ID;
 	first.Left = 3; // observed metadata mutation creates another resource version
 	std::memcpy(file.data() + 8, &first, sizeof(first));
 	CHECK(3 == Acquire(ref, 0, data).Frame->Geometry.Left);

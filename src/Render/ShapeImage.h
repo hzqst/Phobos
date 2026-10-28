@@ -8,6 +8,24 @@
 namespace ShapeImage
 {
 	constexpr int MaxDimension = 2048;
+	constexpr int MaxCameoSlots = 60;
+	struct CameoSlot { int Item, X, Y, ClipWidth, ClipHeight; };
+	inline bool PlaceCameo(int slot, int topRow, int count, int originX, int originY,
+		int pitchX, int pitchY, bool scrolling, int slid, int sidebarX, int width, int height, CameoSlot& out)
+	{
+		if (slot < 0 || slot >= MaxCameoSlots || topRow < 0 || count < 0
+			|| width <= 0 || height <= 0 || pitchX <= 0 || pitchY <= 0) return false;
+		const auto item = std::int64_t(topRow) * 2 + slot;
+		const auto x = std::int64_t(originX) + (slot % 2) * std::int64_t(pitchX) - sidebarX;
+		const auto y = std::int64_t(originY) + (slot / 2) * std::int64_t(pitchY) + 1
+			+ (scrolling ? std::int64_t(slid) - pitchY : 0);
+		// Native bounds start at the surface origin, NOT at the cell's left/top.
+		if (item >= count || x < INT32_MIN || x > INT32_MAX - 60 || y < INT32_MIN || y > INT32_MAX - 48
+			|| x + 60 <= 0 || y + 48 <= 0) return false;
+		out = {int(item), int(x), int(y), int(std::min<std::int64_t>(width, x + 60)),
+			int(std::min<std::int64_t>(height, y + 48))};
+		return true;
+	}
 	// SHP RLE rows include a little-endian length WORD, then literals or 0,run.
 	// The engine permits zero-length runs; the encoded byte bound guarantees progress.
 	inline bool Decode(std::span<const std::uint8_t> source, int width, int height,

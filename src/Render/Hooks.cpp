@@ -232,3 +232,11 @@ DEFINE_HOOK(0x69E930, SHP_DeletingDestructor_GPUFrameCache, 0x7)
 	GPURender::OnShapeInvalidating(reinterpret_cast<const void*>(R->ECX()));
 	return 0;
 }
+
+// EAX is the owned buffer at each direct free. Avoid Ares' destructor-entry hook.
+DEFINE_HOOK_AGAIN(0x711B3D, TechnoType_FreeCameo_GPUFrameCache, 0x6)
+DEFINE_HOOK(0x711B16, TechnoType_FreeCameo_GPUFrameCache, 0x6)
+{
+	GPURender::OnShapeInvalidating(reinterpret_cast<const void*>(R->EAX()));
+	return 0;
+}
