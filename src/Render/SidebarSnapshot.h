@@ -26,7 +26,9 @@ namespace SidebarSnapshot
 	constexpr size_t BackgroundCount = 6;
 	constexpr size_t ButtonCount = 10;
 	constexpr size_t CameoBegin = BackgroundCount + ButtonCount;
-	constexpr size_t AssetCount = CameoBegin + ShapeImage::MaxCameoSlots;
+	constexpr size_t DarkenBegin = CameoBegin + ShapeImage::MaxCameoSlots;
+	constexpr size_t ClockBegin = DarkenBegin + ShapeImage::MaxCameoSlots;
+	constexpr size_t AssetCount = ClockBegin + ShapeImage::MaxCameoSlots;
 	constexpr int MaxCanvasDimension = 4096;
 	constexpr int MaxRepeats = 128;
 	constexpr std::uintptr_t ResourceSlots[BackgroundCount] =
@@ -56,7 +58,14 @@ namespace SidebarSnapshot
 		FrameCache::FrameID ID;
 		PaletteCache::Handle Color;
 	};
-	struct Placement { size_t AssetIndex; int X, Y; int ClipWidth = INT_MAX, ClipHeight = INT_MAX; };
+	struct Placement
+	{
+		size_t AssetIndex; int X, Y;
+		int ClipWidth = INT_MAX, ClipHeight = INT_MAX;
+		ShapeImage::Effect Effect = ShapeImage::Effect::Normal;
+		unsigned SolidColor = 0;
+		int SolidWidth = 0, SolidHeight = 0;
+	};
 	struct Frame
 	{
 		bool Visible = false;
@@ -80,6 +89,10 @@ namespace SidebarSnapshot
 	inline std::uint64_t CameoTraceHash = 0;
 	inline unsigned CameoItemTraceCount = 0;
 	inline std::array<std::uint64_t, ShapeImage::MaxCameoSlots> CameoItemHashes {};
+	struct NativeCameoState { bool Darken; int ClockFrame; };
+	inline std::array<std::unordered_map<std::uint64_t, NativeCameoState>, 4> NativeCameoStates;
+	inline unsigned EffectTraceCount = 0;
+	inline std::array<std::uint64_t, ShapeImage::MaxCameoSlots> EffectHashes {};
 	static_assert(offsetof(SidebarClass, Tabs) == 0x1544);
 	static_assert(offsetof(StripClass, Cameos) == 0x58);
 	static_assert(offsetof(TechnoTypeClass, Cameo) == 0x6F0);
@@ -98,6 +111,7 @@ namespace SidebarSnapshot
 		Current.Placements.clear();
 		++Generation;
 		LastTraceHash = 0;
+		for (auto& states : NativeCameoStates) states.clear();
 	}
 
 	inline void InitializeTrace()
@@ -293,6 +307,95 @@ namespace SidebarSnapshot
 		return source;
 	}
 
+	inline bool GetCameoList(int tab, const BuildType*& items, int& count)
+	{
+		using CursorSnapshot::Readable;
+		if (tab < 0 || tab >= 4) return false;
+		if (AresHelper::AresBaseAddress)
+		{
+			static const bool known = KnownAresCameos(); // Module selection is fixed before gameplay.
+			if (!known) return false;
+			const auto* list = reinterpret_cast<const DynamicVectorClass<BuildType>*>(AresHelper::AresBaseAddress + 0xC1150) + tab;
+			static_assert(sizeof(DynamicVectorClass<BuildType>) == 0x18);
+			if (!Readable(list, sizeof(*list)) || list->Count < 0 || list->Count > list->Capacity || list->Count > 4096) return false;
+			items = list->Items; count = list->Count;
+		}
+		else
+		{
+			const auto& strip = SidebarClass::Instance.Tabs[tab];
+			items = strip.Cameos; count = strip.CameoCount;
+			if (count < 0 || count > 75) return false;
+		}
+		return !count || (items && Readable(items, sizeof(BuildType) * count));
+	}
+
+	inline std::uint64_t CameoKey(const BuildType& item)
+	{
+		return (std::uint64_t(unsigned(item.ItemType)) << 32) | unsigned(item.ItemIndex);
+	}
+
+	inline void CaptureNativeCameoState(int index, bool darken, bool progress, bool completed, int stage)
+	{
+		if (!Eligible() || !LowerButtonsReady || HouseClass::IsCurrentPlayerObserver()) return;
+		const int tab = SidebarClass::Instance.ActiveTabIndex;
+		const BuildType* items = nullptr; int count = 0;
+		if (!GetCameoList(tab, items, count) || index < 0 || index >= count) return;
+		auto& states = NativeCameoStates[tab];
+		const auto key = CameoKey(items[index]);
+		if (states.size() >= 4096 && !states.contains(key)) return;
+		// Native stage+1, not a wall-clock estimate. Invalid frames are omitted, never clamped.
+		states[key] = {darken, progress && !completed && stage >= 0 && stage < INT_MAX ? stage + 1 : -1};
+	}
+
+	inline void CaptureCameoEffects(const BuildType& item, int tab, int slot, const ShapeImage::CameoSlot& p)
+	{
+		using ShapeImage::Effect;
+		const auto found = NativeCameoStates[tab].find(CameoKey(item));
+		const bool observed = found != NativeCameoStates[tab].end();
+		const bool darken = observed && found->second.Darken;
+		const int clockFrame = observed ? found->second.ClockFrame : -1;
+		const int currentFrame = Unsorted::CurrentFrame;
+		const bool flash = item.FlashEndFrame > currentFrame && currentFrame % 16 > 8;
+		const bool hover = (SelectClass::Array()[tab * ShapeImage::MaxCameoSlots + slot].unknown_34 & 0xFF)
+			&& !*reinterpret_cast<const unsigned char*>(0xA8ED9C);
+		if (hover)
+		{
+			const auto rgb = *reinterpret_cast<const unsigned*>(0xB0FA1C);
+			const auto& format = Current.Assets[0].Color->Values;
+			unsigned packed = 0;
+			for (int channel = 0; channel < 3; ++channel)
+				packed |= (((rgb >> (8 * channel)) & 255u) >> (8 - format.Bits[channel])) << format.Shift[channel];
+			// Four non-overlapping one-pixel edges, before darken/flash/clock.
+			for (const auto& edge : {RectangleStruct{p.X,p.Y,60,1}, {p.X,p.Y+47,60,1}, {p.X,p.Y+1,1,46}, {p.X+59,p.Y+1,1,46}})
+				Current.Placements.push_back({0, edge.X, edge.Y, p.ClipWidth, p.ClipHeight, Effect::Solid, packed, edge.Width, edge.Height});
+		}
+		const auto color = CaptureColor(FileSystem::SIDEBAR_PAL);
+		bool darkenReady = false, clockReady = false;
+		if ((darken || flash) && CopyAsset(FileSystem::DARKEN_SHP, color, Current.Assets[DarkenBegin + slot]))
+		{
+			darkenReady = true;
+			if (darken) Current.Placements.push_back({DarkenBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Darken});
+			if (flash) Current.Placements.push_back({DarkenBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Translucent50});
+		}
+		if (clockFrame >= 0 && CopyAsset(FileSystem::GCLOCK2_SHP, color, Current.Assets[ClockBegin + slot], clockFrame))
+		{
+			clockReady = true;
+			Current.Placements.push_back({ClockBegin + slot,p.X,p.Y,p.ClipWidth,p.ClipHeight,Effect::Translucent50});
+		}
+		if (Trace && EffectTraceCount < 64)
+		{
+			const int values[] {tab, int(item.ItemType), item.ItemIndex, observed, darken, flash, hover, clockFrame, darkenReady, clockReady, int(Generation)};
+			const auto hash = Hash(values, sizeof(values));
+			if (hash != EffectHashes[slot])
+			{
+				EffectHashes[slot] = hash;
+				Debug::Log("[CameoEffectGPU] sample=%u thread=%lu tab=%d slot=%d type=%d index=%d observed=%d darken=%d flash=%d hover=%d clock=%d darkenReady=%d clockReady=%d clockID=%llu\n",
+					++EffectTraceCount,GetCurrentThreadId(),tab,slot,int(item.ItemType),item.ItemIndex,observed,darken,flash,hover,clockFrame,darkenReady,clockReady,
+					clockReady ? Current.Assets[ClockBegin + slot].ID.Value : 0);
+			}
+		}
+	}
+
 	inline void CaptureCameos(int rows)
 	{
 		using CursorSnapshot::Readable;
@@ -301,22 +404,8 @@ namespace SidebarSnapshot
 		if (tab < 0 || tab >= 4 || !HouseClass::CurrentPlayer || HouseClass::IsCurrentPlayerObserver()) return;
 		const auto& strip = sidebar.Tabs[tab];
 		const bool ares = AresHelper::AresBaseAddress != 0;
-		const BuildType* items = strip.Cameos;
-		int count = strip.CameoCount;
-		bool supported = true;
-		if (ares)
-		{
-			static const bool known = KnownAresCameos(); // Module selection is fixed before gameplay.
-			supported = known;
-			if (supported)
-			{
-				const auto* list = reinterpret_cast<const DynamicVectorClass<BuildType>*>(AresHelper::AresBaseAddress + 0xC1150) + tab;
-				static_assert(sizeof(DynamicVectorClass<BuildType>) == 0x18);
-				supported = Readable(list, sizeof(*list)) && list->Count >= 0 && list->Count <= list->Capacity && list->Count <= 4096;
-				if (supported) { items = list->Items; count = list->Count; }
-			}
-		}
-		else supported = count >= 0 && count <= 75;
+		const BuildType* items = nullptr; int count = 0;
+		const bool supported = GetCameoList(tab, items, count);
 		const auto color = CaptureColor(FileSystem::CAMEO_PAL);
 		const int slots = std::min(ShapeImage::MaxCameoSlots, (rows + int(strip.IsScrolling)) * 2);
 		const int state[] {int(Generation), tab, count, strip.TopRowIndex, strip.IsScrolling, strip.Slid, supported, ares};
@@ -341,6 +430,8 @@ namespace SidebarSnapshot
 				Current.Placements.push_back({CameoBegin + slot, placement.X, placement.Y, placement.ClipWidth, placement.ClipHeight});
 			}
 			else if (kind == 1) ++unsupportedCount; else ++pendingCount;
+			// Unsupported base providers must not leave floating state masks.
+			if (ready) CaptureCameoEffects(item, tab, slot, placement);
 			const int identity[] {item.ItemIndex, int(item.ItemType), kind, placement.X, placement.Y, placement.ClipWidth, placement.ClipHeight};
 			hash = Hash(identity, sizeof(identity), hash);
 			hash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), hash);

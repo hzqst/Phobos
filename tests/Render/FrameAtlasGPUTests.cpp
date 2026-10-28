@@ -21,7 +21,7 @@ static bool Submit(FrameAtlas& atlas, SDL_GPUDevice* device)
 	return true;
 }
 
-static bool Read(SDL_GPUDevice* device, FrameAtlas::View view, int width, int height, unsigned bpp, unsigned expected)
+static bool Read(SDL_GPUDevice* device, FrameAtlas::View view, int width, int height, unsigned bpp, unsigned expected, int tolerance = 0)
 {
 	const unsigned pitch = 256;
 	SDL_GPUTransferBufferCreateInfo info {}; info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD; info.size = pitch * height;
@@ -36,12 +36,23 @@ static bool Read(SDL_GPUDevice* device, FrameAtlas::View view, int width, int he
 	const auto* pixels = static_cast<const unsigned char*>(SDL_MapGPUTransferBuffer(device, buffer, false)); CHECK(pixels);
 	for (int y = 0; y < height; ++y)
 		for (int x = 0; x < width; ++x)
-			CHECK(expected == (bpp == 1 ? pixels[y * pitch + x] : reinterpret_cast<const unsigned*>(pixels + y * pitch)[x]));
+		{
+			const unsigned actual = bpp == 1 ? pixels[y * pitch + x] : reinterpret_cast<const unsigned*>(pixels + y * pitch)[x];
+			bool matches = expected == actual;
+			if (bpp == 4 && tolerance)
+			{
+				matches = (expected >> 24) == (actual >> 24);
+				for (unsigned shift = 0; shift < 24; shift += 8)
+					matches &= std::abs(int((expected >> shift) & 255) - int((actual >> shift) & 255)) <= tolerance;
+			}
+			if (!matches) std::fprintf(stderr,"pixel expected=%08X actual=%08X\n",expected,actual);
+			CHECK(matches);
+		}
 	SDL_UnmapGPUTransferBuffer(device, buffer); SDL_ReleaseGPUFence(device, fence); SDL_ReleaseGPUTransferBuffer(device, buffer);
 	return true;
 }
 
-static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected)
+static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected, unsigned effect = 0, unsigned solid = 0, unsigned draws = 1)
 {
 	SDL_GPUShaderCreateInfo shader {}; shader.entrypoint = "main"; shader.format = SDL_GPU_SHADERFORMAT_DXIL;
 	shader.stage = SDL_GPU_SHADERSTAGE_VERTEX; shader.code = g_Fullscreen_vs_DXIL; shader.code_size = sizeof(g_Fullscreen_vs_DXIL);
@@ -68,16 +79,19 @@ static bool Draw(SDL_GPUDevice* device, FrameAtlas::View view, unsigned expected
 	SDL_GPUSamplerCreateInfo samplerInfo {};
 	auto* sampler = SDL_CreateGPUSampler(device, &samplerInfo); CHECK(sampler);
 	auto* commands = SDL_AcquireGPUCommandBuffer(device); CHECK(commands);
-	const unsigned uniforms[12] = {11,5,0,0,5,6,5,0,unsigned(view.X),unsigned(view.Y),2,2};
+	const unsigned uniforms[16] = {11,5,0,0,5,6,5,0,unsigned(view.X),unsigned(view.Y),2,2,effect,solid,0,0};
 	SDL_PushGPUFragmentUniformData(commands,0,uniforms,sizeof(uniforms));
 	SDL_GPUColorTargetInfo output {}; output.texture = texture; output.clear_color = {0,1,0,1};
 	output.load_op = SDL_GPU_LOADOP_CLEAR; output.store_op = SDL_GPU_STOREOP_STORE;
 	auto* pass = SDL_BeginGPURenderPass(commands,&output,1,nullptr); CHECK(pass);
 	SDL_BindGPUGraphicsPipeline(pass,pipeline);
 	const SDL_GPUTextureSamplerBinding bindings[] = {{view.Texture,sampler},{view.Palette,sampler}};
-	SDL_BindGPUFragmentSamplers(pass,0,bindings,2); SDL_DrawGPUPrimitives(pass,3,1,0,0); SDL_EndGPURenderPass(pass);
+	SDL_BindGPUFragmentSamplers(pass,0,bindings,2);
+	for (unsigned i = 0; i < draws; ++i) SDL_DrawGPUPrimitives(pass,3,1,0,0);
+	SDL_EndGPURenderPass(pass);
 	CHECK(SDL_SubmitGPUCommandBuffer(commands));
-	CHECK(Read(device,{texture,nullptr,0,0},2,2,4,expected));
+	// Fixed-function UNORM blending may round half to either adjacent byte.
+	CHECK(Read(device,{texture,nullptr,0,0},2,2,4,expected,(effect == 1 || effect == 2) ? 1 : 0));
 	SDL_ReleaseGPUSampler(device,sampler); SDL_ReleaseGPUTexture(device,texture);
 	SDL_ReleaseGPUGraphicsPipeline(device,pipeline); SDL_ReleaseGPUShader(device,vertex); SDL_ReleaseGPUShader(device,fragment);
 	return true;
@@ -116,6 +130,10 @@ static bool Run(SDL_GPUDevice* device, bool r32)
 	CHECK(Read(device,{av.Palette,nullptr,7,0},1,1,4,0xF800));
 	CHECK(Draw(device,av,0xFF0000FF)); // RGB565 red, actual indexed shader.
 	CHECK(Draw(device,bv,0xFF000000)); // Nonzero index with black palette remains opaque; offset region.
+	CHECK(Draw(device,av,0xFF008000,1)); // Black half-alpha ignores the red palette.
+	CHECK(Draw(device,av,0xFF008080,2)); // Red half-alpha over green.
+	CHECK(Draw(device,av,0xFF004000,1,0,2)); // Two ordered darken layers compound.
+	CHECK(Draw(device,av,0xFFFF0000,3,0x001F)); // Solid hover line color.
 	const auto uploaded = atlas.GetStats().IndexBytes;
 	for (int i = 0; i < 300; ++i)
 	{
@@ -165,6 +183,8 @@ static bool Run(SDL_GPUDevice* device, bool r32)
 	CHECK(FrameAtlas::BeginResult::Ready == atlas.Begin(cache,transparent));
 	const auto transparentView = atlas.Resolve(transparent[0]); CHECK(Submit(atlas,device));
 	CHECK(Draw(device,transparentView,0xFF00FF00));
+	CHECK(Draw(device,transparentView,0xFF00FF00,1));
+	CHECK(Draw(device,transparentView,0xFF00FF00,2));
 	SDL_WaitForGPUIdle(device); atlas.Release();
 	return true;
 }

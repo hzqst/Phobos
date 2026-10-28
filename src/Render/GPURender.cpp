@@ -78,15 +78,18 @@ namespace
 			const auto& asset = frame.Assets[placement.AssetIndex];
 			const auto view = Atlas.Resolve({asset.ID, asset.Color});
 			if (!view.Texture) continue;
-			const auto x = std::int64_t(placement.X) + asset.Left;
-			const auto y = std::int64_t(placement.Y) + asset.Top;
+			const bool solid = placement.Effect == ShapeImage::Effect::Solid;
+			const auto x = std::int64_t(placement.X) + (solid ? 0 : asset.Left);
+			const auto y = std::int64_t(placement.Y) + (solid ? 0 : asset.Top);
 			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
-			const auto clipped = CursorImage::Clip(int(x), int(y), asset.Width, asset.Height,
+			const auto clipped = CursorImage::Clip(int(x), int(y), solid ? placement.SolidWidth : asset.Width,
+				solid ? placement.SolidHeight : asset.Height,
 				std::min(frame.Width, placement.ClipWidth), std::min(frame.Height, placement.ClipHeight));
 			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
 			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
 			Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,
-				view.X + clipped.SourceX, view.Y + clipped.SourceY, true, view.Palette, asset.Color->Values.Shift, asset.Color->Values.Bits});
+				view.X + clipped.SourceX, view.Y + clipped.SourceY, true, view.Palette, asset.Color->Values.Shift, asset.Color->Values.Bits,
+				unsigned(placement.Effect), placement.SolidColor});
 		}
 		return result;
 	}
@@ -605,6 +608,12 @@ void GPURender::OnSidebarDraw()
 {
 	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
 		SidebarSnapshot::CaptureAfterDraw();
+}
+
+void GPURender::OnCameoState(int index, bool darken, bool progress, bool completed, int stage)
+{
+	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
+		SidebarSnapshot::CaptureNativeCameoState(index, darken, progress, completed, stage);
 }
 
 void GPURender::InvalidateSidebar(bool resources)

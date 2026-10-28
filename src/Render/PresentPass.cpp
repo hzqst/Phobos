@@ -30,9 +30,10 @@ namespace
 		Uint32 Shift[4];
 		Uint32 Bits[4];
 		Uint32 Region[4];
+		Uint32 Effect[4] {};
 	};
 
-	static_assert(sizeof(DecodeUniforms) == 48);
+	static_assert(sizeof(DecodeUniforms) == 64);
 
 	struct ShaderCode
 	{
@@ -238,6 +239,8 @@ bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextu
 		uniforms.Region[1] = sprite.SourceY + region.SourceY;
 		uniforms.Region[2] = region.Width;
 		uniforms.Region[3] = region.Height;
+		uniforms.Effect[0] = sprite.Effect;
+		uniforms.Effect[1] = sprite.SolidColor;
 		if (sprite.Palette)
 		{
 			std::copy(sprite.Shift.begin(), sprite.Shift.end(), uniforms.Shift);

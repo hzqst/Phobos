@@ -1,5 +1,7 @@
 # Sidebar 基础 cameo GPU 接入
 
+后续更新：用户已澄清“Countdown 百分比”指GCLOCK2扇形遮罩，不是数字文字。该遮罩及第一批状态效果已接入，用户确认显示正常；详见 [CameoEffectsGPU.md](CameoEffectsGPU.md)。下文保留基础阶段范围与当时记录。
+
 2026-10-28，依据 gamemd-reverse `194cd7f` 的 `docs/zh-CN/sidebar-cameos-gpu-handoff.md`。基础图标已实现，用户首轮反馈“已采集。图标正常显示（上面的 Countdown 百分比没有显示）”。Countdown 百分比属于尚未实现的文字／状态层，不计入本轮基础图标范围。
 
 ## 数据与绘制

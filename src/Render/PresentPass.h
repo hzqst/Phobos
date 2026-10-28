@@ -23,6 +23,7 @@ public:
 		bool IndexedAlpha = true;
 		SDL_GPUTexture* Palette = nullptr;
 		std::array<std::uint32_t, 3> Shift {}, Bits {};
+			std::uint32_t Effect = 0, SolidColor = 0;
 	};
 	static bool DrawSprites(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target,
 		unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,

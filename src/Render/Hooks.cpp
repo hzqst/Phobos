@@ -152,6 +152,17 @@ DEFINE_HOOK(0x6A70AE, SidebarClass_Draw_GPURenderSnapshot, 0x5)
 	return 0;
 }
 
+// Strip Draw has completed its native/Ares availability and progress decisions.
+// Native ESP = entry ESP - 0x48C; doDraw/+16, drawProgress/+12, completed/+14,
+// stage/+38 and absolute list index/+3C are locals. BL is the final darken flag.
+DEFINE_HOOK(0x6A99C3, StripClass_Draw_GPUState, 0x9)
+{
+	if (R->Stack<unsigned char>(0x16))
+		GPURender::OnCameoState(R->Stack<int>(0x3C), (R->EBX() & 0xFF) != 0,
+			R->Stack<unsigned char>(0x12) != 0, R->Stack<unsigned char>(0x14) != 0, R->Stack<int>(0x38));
+	return 0;
+}
+
 DEFINE_HOOK(0x6A5840, SidebarClass_InitForHouse_GPURenderInvalidate, 0x6)
 {
 	GPURender::InvalidateSidebar(true);

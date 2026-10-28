@@ -9,6 +9,9 @@ namespace ShapeImage
 {
 	constexpr int MaxDimension = 2048;
 	constexpr int MaxCameoSlots = 60;
+	// Matches Effect.x in IndexedSprite.ps.hlsl. Alpha blending is an intentional
+	// approximation of the original RGB16 integer darken/translucent blitters.
+	enum class Effect : std::uint32_t { Normal, Darken, Translucent50, Solid };
 	struct CameoSlot { int Item, X, Y, ClipWidth, ClipHeight; };
 	inline bool PlaceCameo(int slot, int topRow, int count, int originX, int originY,
 		int pitchX, int pitchY, bool scrolling, int slid, int sidebarX, int width, int height, CameoSlot& out)
@@ -61,9 +64,11 @@ namespace ShapeImage
 						result[size_t(y) * width + x++] = value;
 					else
 					{
-						if (offset == end || source[offset] > width - x)
+							if (offset == end)
 							return false;
-						x += source[offset++];
+							// Native RLE blitters stop when remaining <= 0. GCLOCK2 has
+							// terminal transparent runs past the right edge; no pixels are written there.
+							x += std::min<int>(source[offset++], width - x);
 					}
 				}
 				if (x != width)
