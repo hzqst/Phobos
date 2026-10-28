@@ -2,8 +2,8 @@
 
 #include <Windows.h>
 
-// Mirrors the game screen into a secondary window rendered with SDL_GPU, as the first step
-// towards drawing the game on the GPU. SDL is only included inside src\Render, so this header
+// Draws independent game elements on black in a secondary SDL_GPU window. The old screen
+// mirror is an opt-in diagnostic mode. SDL is only included inside src\Render, so this header
 // must stay free of SDL types.
 class GPURender
 {

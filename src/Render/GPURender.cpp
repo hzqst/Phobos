@@ -4,6 +4,7 @@
 #include "SecondaryWindow.h"
 #include "SurfaceMirror.h"
 #include "CursorTrace.h"
+#include "CursorSnapshot.h"
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -44,6 +45,81 @@ namespace
 	SDL_GPUDevice* Device = nullptr;
 	bool WindowClaimed = false;
 	Uint64 LastPresentTime = 0;
+	bool MirrorMode = false;
+	CursorSnapshot::Frame CursorFrame;
+	SDL_GPUTexture* CursorTexture = nullptr;
+	SDL_GPUTransferBuffer* CursorTransfer = nullptr;
+	std::array<std::uint32_t, CursorImage::MaxDimension * CursorImage::MaxDimension> UploadedCursor {};
+	int UploadedWidth = 0, UploadedHeight = 0;
+	bool CursorDirty = false;
+
+	void ReleaseCursorResources()
+	{
+		if (CursorTexture)
+			SDL_ReleaseGPUTexture(Device, CursorTexture);
+		if (CursorTransfer)
+			SDL_ReleaseGPUTransferBuffer(Device, CursorTransfer);
+		CursorTexture = nullptr;
+		CursorTransfer = nullptr;
+		UploadedWidth = UploadedHeight = 0;
+		CursorDirty = false;
+		CursorFrame.Visible = false;
+	}
+
+	bool PrepareCursor()
+	{
+		CursorSnapshot::Capture(CursorFrame);
+		if (!CursorFrame.Visible)
+			return true;
+		if (!CursorTexture)
+		{
+			SDL_GPUTextureCreateInfo texture {};
+			texture.type = SDL_GPU_TEXTURETYPE_2D;
+			texture.format = SDL_GPU_TEXTUREFORMAT_R32_UINT;
+			texture.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+			texture.width = texture.height = CursorImage::MaxDimension;
+			texture.layer_count_or_depth = texture.num_levels = 1;
+			CursorTexture = SDL_CreateGPUTexture(Device, &texture);
+			SDL_GPUTransferBufferCreateInfo transfer {};
+			transfer.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+			transfer.size = static_cast<Uint32>(sizeof(UploadedCursor));
+			CursorTransfer = SDL_CreateGPUTransferBuffer(Device, &transfer);
+			if (!CursorTexture || !CursorTransfer)
+				return false;
+			Debug::Log("[GPURender] Created the independent cursor texture (%dx%d first frame).\n",
+				CursorFrame.Width, CursorFrame.Height);
+		}
+
+		const size_t bytes = size_t(CursorFrame.Width) * CursorFrame.Height * sizeof(std::uint32_t);
+		if (CursorFrame.Width != UploadedWidth || CursorFrame.Height != UploadedHeight
+			|| std::memcmp(CursorFrame.Pixels.data(), UploadedCursor.data(), bytes) != 0)
+		{
+			auto* destination = SDL_MapGPUTransferBuffer(Device, CursorTransfer, true);
+			if (!destination)
+				return false;
+			std::memcpy(destination, CursorFrame.Pixels.data(), bytes);
+			SDL_UnmapGPUTransferBuffer(Device, CursorTransfer);
+			std::memcpy(UploadedCursor.data(), CursorFrame.Pixels.data(), bytes);
+			UploadedWidth = CursorFrame.Width;
+			UploadedHeight = CursorFrame.Height;
+			CursorDirty = true;
+		}
+		return true;
+	}
+
+	void UploadCursor(SDL_GPUCopyPass* pass)
+	{
+		SDL_GPUTextureTransferInfo source {};
+		source.transfer_buffer = CursorTransfer;
+		source.pixels_per_row = UploadedWidth;
+		source.rows_per_layer = UploadedHeight;
+		SDL_GPUTextureRegion destination {};
+		destination.texture = CursorTexture;
+		destination.w = UploadedWidth;
+		destination.h = UploadedHeight;
+		destination.d = 1;
+		SDL_UploadToGPUTexture(pass, &source, &destination, true);
+	}
 
 	// The names of the specific drivers are the ones SDL_CreateGPUDevice takes.
 	constexpr std::pair<GPURender::DriverPreference, const char*> DriverNames[] =
@@ -295,6 +371,9 @@ bool GPURender::IsDirectDrawWrapped()
 void GPURender::Initialize(int width, int height)
 {
 	SetState(State::Initializing);
+	char mirror[2] {};
+	MirrorMode = GetEnvironmentVariableA("PHOBOS_GPU_MIRROR", mirror, sizeof(mirror)) == 1 && mirror[0] == '1';
+	Debug::Log("[GPURender] Output: %s.\n", MirrorMode ? "diagnostic CPU mirror" : "black background + GPU cursor");
 
 	if (!SDLLoader::Load())
 		return Fail("Loading SDL3.dll", "see above");
@@ -368,6 +447,7 @@ void GPURender::ReleaseResources()
 		SDL_WaitForGPUIdle(Device);
 		PresentPass::Release(Device);
 		SurfaceMirror::Release(Device);
+		ReleaseCursorResources();
 
 		if (WindowClaimed)
 		{
@@ -390,18 +470,31 @@ void GPURender::Present()
 {
 	LastPresentTime = SDL_GetTicksNS();
 
-	if (SurfaceMirror::Capture(Device) == SurfaceMirror::CaptureResult::Failed)
-		return Fail("Capturing the game screen");
+	if (MirrorMode)
+	{
+		if (SurfaceMirror::Capture(Device) == SurfaceMirror::CaptureResult::Failed)
+			return Fail("Capturing the game screen");
+	}
+	else if (!PrepareCursor())
+		return Fail("Preparing the GPU cursor");
 
 	SDL_GPUCommandBuffer* pCommandBuffer = SDL_AcquireGPUCommandBuffer(Device);
 
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
-	if (SurfaceMirror::HasPendingUpload())
+	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : CursorDirty)
 	{
 		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
-		SurfaceMirror::Upload(pCopyPass);
+		if (!pCopyPass)
+		{
+			SDL_CancelGPUCommandBuffer(pCommandBuffer);
+			return Fail("SDL_BeginGPUCopyPass");
+		}
+		if (MirrorMode)
+			SurfaceMirror::Upload(pCopyPass);
+		else
+			UploadCursor(pCopyPass);
 		SDL_EndGPUCopyPass(pCopyPass);
 	}
 
@@ -418,12 +511,23 @@ void GPURender::Present()
 
 	if (pSwapchainTexture)
 	{
-		PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
-			SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight());
+		const bool drawn = MirrorMode
+			? PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
+				SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
+			: PresentPass::DrawCursor(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
+				CursorFrame.Visible ? CursorTexture : nullptr, CursorFrame.Width, CursorFrame.Height,
+				CursorFrame.X, CursorFrame.Y, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height);
+		if (!drawn)
+		{
+			SDL_CancelGPUCommandBuffer(pCommandBuffer);
+			return Fail("Drawing the GPU output");
+		}
 	}
 
 	if (!SDL_SubmitGPUCommandBuffer(pCommandBuffer))
 		Fail("SDL_SubmitGPUCommandBuffer");
+	else
+		CursorDirty = false;
 }
 
 void GPURender::RequestPresent()
@@ -475,7 +579,7 @@ void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 	if (CurrentState != State::Running)
 		return;
 
-	// The mouse thread moves the cursor on the primary surface between the game's blits
+	// Refresh the independent cursor position even when the scene has not blitted.
 	if (needsPresent)
 		Present();
 	else

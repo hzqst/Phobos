@@ -1,4 +1,5 @@
 #include "PresentPass.h"
+#include "CursorImage.h"
 
 #include <Unsorted.h>
 
@@ -25,9 +26,10 @@ namespace
 	{
 		Uint32 Shift[4];
 		Uint32 Bits[4];
+		Uint32 Region[4];
 	};
 
-	static_assert(sizeof(DecodeUniforms) == 32);
+	static_assert(sizeof(DecodeUniforms) == 48);
 
 	struct ShaderCode
 	{
@@ -78,6 +80,7 @@ namespace
 		{
 			{ static_cast<Uint32>(pack._R_SHL), static_cast<Uint32>(pack._G_SHL), static_cast<Uint32>(pack._B_SHL), 0 },
 			{ static_cast<Uint32>(8 - pack._R_SHR), static_cast<Uint32>(8 - pack._G_SHR), static_cast<Uint32>(8 - pack._B_SHR), 0 },
+			{ 0, 0, 0, 0 },
 		};
 	}
 
@@ -108,6 +111,13 @@ bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 	{
 		SDL_GPUColorTargetDescription colorTarget {};
 		colorTarget.format = SDL_GetGPUSwapchainTextureFormat(pDevice, pWindow);
+		colorTarget.blend_state.enable_blend = true;
+		colorTarget.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+		colorTarget.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+		colorTarget.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+		colorTarget.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+		colorTarget.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+		colorTarget.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 
 		SDL_GPUGraphicsPipelineCreateInfo info {};
 		info.vertex_shader = pVertexShader;
@@ -157,8 +167,24 @@ void PresentPass::Release(SDL_GPUDevice* pDevice)
 	}
 }
 
-void PresentPass::Draw(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget, unsigned int targetWidth,
+bool PresentPass::Draw(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget, unsigned int targetWidth,
 	unsigned int targetHeight, SDL_GPUTexture* pSource, int sourceWidth, int sourceHeight)
+{
+	return DrawRegion(pCommandBuffer, pTarget, targetWidth, targetHeight, pSource, sourceWidth, sourceHeight,
+		0, 0, sourceWidth, sourceHeight, false);
+}
+
+bool PresentPass::DrawCursor(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget, unsigned int targetWidth,
+	unsigned int targetHeight, SDL_GPUTexture* pSource, int sourceWidth, int sourceHeight,
+	int x, int y, int logicalWidth, int logicalHeight)
+{
+	return DrawRegion(pCommandBuffer, pTarget, targetWidth, targetHeight, pSource, sourceWidth, sourceHeight,
+		x, y, logicalWidth, logicalHeight, true);
+}
+
+bool PresentPass::DrawRegion(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget, unsigned int targetWidth,
+	unsigned int targetHeight, SDL_GPUTexture* pSource, int sourceWidth, int sourceHeight,
+	int x, int y, int logicalWidth, int logicalHeight, bool cursor)
 {
 	SDL_GPUColorTargetInfo target {};
 	target.texture = pTarget;
@@ -167,11 +193,25 @@ void PresentPass::Draw(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTa
 	target.store_op = SDL_GPU_STOREOP_STORE;
 
 	SDL_GPURenderPass* pRenderPass = SDL_BeginGPURenderPass(pCommandBuffer, &target, 1, nullptr);
+	if (!pRenderPass)
+		return false;
 
-	if (pSource && sourceWidth > 0 && sourceHeight > 0)
+	const auto region = CursorImage::Clip(x, y, sourceWidth, sourceHeight, logicalWidth, logicalHeight);
+	if (pSource && region.Width > 0 && region.Height > 0)
 	{
-		const SDL_GPUViewport viewport = GetLetterboxViewport(targetWidth, targetHeight, sourceWidth, sourceHeight);
-		const DecodeUniforms uniforms = GetDecodeUniforms();
+		auto viewport = GetLetterboxViewport(targetWidth, targetHeight, logicalWidth, logicalHeight);
+		const float scaleX = viewport.w / logicalWidth;
+		const float scaleY = viewport.h / logicalHeight;
+		viewport.x += region.X * scaleX;
+		viewport.y += region.Y * scaleY;
+		viewport.w = region.Width * scaleX;
+		viewport.h = region.Height * scaleY;
+		auto uniforms = GetDecodeUniforms();
+		uniforms.Shift[3] = cursor ? 1 : 0;
+		uniforms.Region[0] = region.SourceX;
+		uniforms.Region[1] = region.SourceY;
+		uniforms.Region[2] = region.Width;
+		uniforms.Region[3] = region.Height;
 
 		SDL_GPUTextureSamplerBinding binding {};
 		binding.texture = pSource;
@@ -185,4 +225,5 @@ void PresentPass::Draw(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTa
 	}
 
 	SDL_EndGPURenderPass(pRenderPass);
+	return true;
 }

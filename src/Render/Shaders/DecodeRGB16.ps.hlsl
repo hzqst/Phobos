@@ -16,6 +16,7 @@ cbuffer Decode : register(b0, space3)
 {
 	uint4 Shift; // lowest bit of red, green and blue
 	uint4 Bits;  // bit count of red, green and blue
+	uint4 Region; // texel origin and size; Shift.w enables the cursor's bit-16 alpha
 };
 
 float4 main(float4 position : SV_Position, float2 texCoord : TEXCOORD0) : SV_Target
@@ -25,11 +26,12 @@ float4 main(float4 position : SV_Position, float2 texCoord : TEXCOORD0) : SV_Tar
 	Source.GetDimensions(width, height);
 
 	const uint2 size = uint2(width, height);
-	const uint2 texel = min(uint2(texCoord * float2(size)), size - 1);
+	const uint2 texel = min(Region.xy + min(uint2(texCoord * float2(Region.zw)), Region.zw - 1), size - 1);
 	const uint value = Source.Load(int3(texel, 0));
 
 	const uint3 maximum = (1u << Bits.xyz) - 1u;
 	const uint3 channel = (value.xxx >> Shift.xyz) & maximum;
 
-	return float4(float3(channel) / float3(maximum), 1.0);
+	const float alpha = Shift.w != 0 ? float((value >> 16) & 1u) : 1.0;
+	return float4(float3(channel) / float3(maximum), alpha);
 }
