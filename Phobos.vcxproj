@@ -297,8 +297,10 @@
     <!-- src\Render -->
     <ClCompile Include="src\Render\GPURender.cpp" />
     <ClCompile Include="src\Render\Hooks.cpp" />
+    <ClCompile Include="src\Render\PresentPass.cpp" />
     <ClCompile Include="src\Render\SDLLoader.cpp" />
     <ClCompile Include="src\Render\SecondaryWindow.cpp" />
+    <ClCompile Include="src\Render\SurfaceMirror.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
     <ClCompile Include="src\Utilities\AresAddressInit.cpp" />
@@ -316,6 +318,9 @@
   <!-- Shaders, compiled by the PhobosCompileShaders target in Phobos.props -->
   <ItemGroup>
     <!-- src\Render\Shaders\ -->
+    <PhobosShader Include="src\Render\Shaders\DecodeRGB16.ps.hlsl">
+      <Profile>ps_6_0</Profile>
+    </PhobosShader>
     <PhobosShader Include="src\Render\Shaders\Fullscreen.vs.hlsl">
       <Profile>vs_6_0</Profile>
     </PhobosShader>
@@ -452,8 +457,10 @@
     <ClInclude Include="src\New\Type\Affiliated\TypeConvertGroup.h" />
     <!-- src\Render -->
     <ClInclude Include="src\Render\GPURender.h" />
+    <ClInclude Include="src\Render\PresentPass.h" />
     <ClInclude Include="src\Render\SDLLoader.h" />
     <ClInclude Include="src\Render\SecondaryWindow.h" />
+    <ClInclude Include="src\Render\SurfaceMirror.h" />
     <!-- src\Utilities -->
     <ClInclude Include="src\Utilities\Anchor.h" />
     <ClInclude Include="src\Utilities\AresFunctions.h" />

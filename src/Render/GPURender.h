@@ -33,6 +33,8 @@ public:
 	static void OnVideoModeSet();
 	// Releases everything before DirectDraw goes away on exit
 	static void Shutdown();
+	// The game has blitted a surface to the primary surface
+	static void OnBlit();
 
 	static State GetState();
 
@@ -46,6 +48,7 @@ private:
 	static void Initialize(int width, int height);
 	static void ReleaseResources();
 	static void Present();
+	static void RequestPresent();
 	static void CALLBACK OnTimer(HWND hWnd, UINT message, UINT_PTR idEvent, DWORD time);
 
 	static void SetState(State state);

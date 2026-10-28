@@ -1,6 +1,8 @@
 #include "GPURender.h"
+#include "PresentPass.h"
 #include "SDLLoader.h"
 #include "SecondaryWindow.h"
+#include "SurfaceMirror.h"
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -15,6 +17,7 @@
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
+#include <SDL3/SDL_timer.h>
 
 #include <cstdio>
 #include <cwchar>
@@ -33,10 +36,14 @@ namespace
 	// so everything stays on the main thread whatever loop the game is in.
 	constexpr UINT TimerIntervalMS = 16;
 
-	constexpr SDL_FColor ClearColor { 0.0f, 0.0f, 0.0f, 1.0f };
+	// The game blits several surfaces per frame and the timer adds frames for the cursor,
+	// presenting more often than this would only repeat the same image.
+	constexpr Uint64 MinPresentIntervalNS = SDL_NS_PER_SECOND / 120;
 
 	SDL_GPUDevice* Device = nullptr;
 	bool WindowClaimed = false;
+	Uint64 LastPresentTime = 0;
+
 	// The names of the specific drivers are the ones SDL_CreateGPUDevice takes.
 	constexpr std::pair<GPURender::DriverPreference, const char*> DriverNames[] =
 	{
@@ -330,6 +337,9 @@ void GPURender::Initialize(int width, int height)
 
 	Debug::Log("[GPURender] Presenting with %s mode.\n", GetPresentModeName(presentMode));
 
+	if (!PresentPass::Create(Device, SecondaryWindow::Get()))
+		return Fail("Creating the present pipeline");
+
 	TimerID = SetTimer(nullptr, 0, TimerIntervalMS, OnTimer);
 
 	if (!TimerID)
@@ -355,6 +365,8 @@ void GPURender::ReleaseResources()
 	if (Device)
 	{
 		SDL_WaitForGPUIdle(Device);
+		PresentPass::Release(Device);
+		SurfaceMirror::Release(Device);
 
 		if (WindowClaimed)
 		{
@@ -375,15 +387,29 @@ void GPURender::ReleaseResources()
 
 void GPURender::Present()
 {
+	LastPresentTime = SDL_GetTicksNS();
+
+	if (SurfaceMirror::Capture(Device) == SurfaceMirror::CaptureResult::Failed)
+		return Fail("Capturing the game screen");
+
 	SDL_GPUCommandBuffer* pCommandBuffer = SDL_AcquireGPUCommandBuffer(Device);
 
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
+	if (SurfaceMirror::HasPendingUpload())
+	{
+		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
+		SurfaceMirror::Upload(pCopyPass);
+		SDL_EndGPUCopyPass(pCopyPass);
+	}
+
 	// Does not wait; there is no texture while the window is minimized or too many frames are queued
 	SDL_GPUTexture* pSwapchainTexture = nullptr;
+	Uint32 swapchainWidth = 0;
+	Uint32 swapchainHeight = 0;
 
-	if (!SDL_AcquireGPUSwapchainTexture(pCommandBuffer, SecondaryWindow::Get(), &pSwapchainTexture, nullptr, nullptr))
+	if (!SDL_AcquireGPUSwapchainTexture(pCommandBuffer, SecondaryWindow::Get(), &pSwapchainTexture, &swapchainWidth, &swapchainHeight))
 	{
 		SDL_CancelGPUCommandBuffer(pCommandBuffer);
 		return Fail("SDL_AcquireGPUSwapchainTexture");
@@ -391,17 +417,24 @@ void GPURender::Present()
 
 	if (pSwapchainTexture)
 	{
-		SDL_GPUColorTargetInfo target {};
-		target.texture = pSwapchainTexture;
-		target.clear_color = ClearColor;
-		target.load_op = SDL_GPU_LOADOP_CLEAR;
-		target.store_op = SDL_GPU_STOREOP_STORE;
-
-		SDL_EndGPURenderPass(SDL_BeginGPURenderPass(pCommandBuffer, &target, 1, nullptr));
+		PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
+			SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight());
 	}
 
 	if (!SDL_SubmitGPUCommandBuffer(pCommandBuffer))
 		Fail("SDL_SubmitGPUCommandBuffer");
+}
+
+void GPURender::RequestPresent()
+{
+	if (SDL_GetTicksNS() - LastPresentTime >= MinPresentIntervalNS)
+		Present();
+}
+
+void GPURender::OnBlit()
+{
+	if (CurrentState == State::Running)
+		RequestPresent();
 }
 
 void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
@@ -437,8 +470,14 @@ void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 		}
 	}
 
-	if (needsPresent && CurrentState == State::Running)
+	if (CurrentState != State::Running)
+		return;
+
+	// The mouse thread moves the cursor on the primary surface between the game's blits
+	if (needsPresent)
 		Present();
+	else
+		RequestPresent();
 }
 
 void GPURender::SetState(State state)
