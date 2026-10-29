@@ -43,4 +43,27 @@ namespace SidebarText
 	void ClearRuns();
 	void Refresh();
 	const Run* Find(int tab, const BuildType& item);
+
+	// Credits area, printed by TabData::Draw (4A2370) before the sidebar body:
+	// the native %ld money (Fancy returns to 4A25E0), then Phobos' counters in
+	// its 4A25E0 callback. Enumerator order is the native draw order.
+	enum class Credits : unsigned { Money, Harvester, PowerDelta, Weeds, Count };
+	// Spans the 4A25E0 callback. Counters it did not print are committed as absent.
+	struct CounterBatch
+	{
+		CounterBatch();
+		~CounterBatch();
+		CounterBatch(const CounterBatch&) = delete;
+		CounterBatch& operator=(const CounterBatch&) = delete;
+	};
+	// Marks one counter's DrawText; its Fancy caller is in this DLL, not the game.
+	struct CounterScope
+	{
+		explicit CounterScope(Credits counter);
+		~CounterScope();
+		CounterScope(const CounterScope&) = delete;
+		CounterScope& operator=(const CounterScope&) = delete;
+	};
+	// Last committed print of one credits text, in sidebar surface coordinates.
+	const Run* FindCredits(Credits text);
 }

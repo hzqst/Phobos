@@ -11,6 +11,8 @@
 
 #include <New/Entity/BannerClass.h>
 
+#include <Render/SidebarText.h>
+
 #include <Utilities/Debug.h>
 
 DEFINE_HOOK(0x777C41, UI_ApplyAppIcon, 0x9)
@@ -100,6 +102,9 @@ DEFINE_HOOK(0x4A2729, CreditClass_AI_CreditsStepClamp, 0x5)
 
 DEFINE_HOOK(0x4A25E0, CreditsClass_GraphicLogic_HarvesterCounter, 0x7)
 {
+	// Lets the GPU sidebar tell each counter's glyphs apart, including skipped ones.
+	const SidebarText::CounterBatch gpuCounters;
+
 	auto const pPlayer = HouseClass::CurrentPlayer;
 	if (pPlayer->Defeated)
 		return 0;
@@ -130,6 +135,7 @@ DEFINE_HOOK(0x4A25E0, CreditsClass_GraphicLogic_HarvesterCounter, 0x7)
 			2 + pSideExt->Sidebar_HarvesterCounter_Offset.Get().Y
 		};
 
+		const SidebarText::CounterScope gpuScope(SidebarText::Credits::Harvester);
 		DSurface::Sidebar->DrawText(counter, &vRect, &vPos, Drawing::RGB_To_Int(clrToolTip), 0,
 			TextPrintType::UseGradPal | TextPrintType::Center | TextPrintType::Metal12);
 	}
@@ -169,6 +175,7 @@ DEFINE_HOOK(0x4A25E0, CreditsClass_GraphicLogic_HarvesterCounter, 0x7)
 		auto const TextFlags = static_cast<TextPrintType>(static_cast<int>(TextPrintType::UseGradPal | TextPrintType::Metal12)
 				| static_cast<int>(pSideExt->Sidebar_PowerDelta_Align.Get()));
 
+		const SidebarText::CounterScope gpuScope(SidebarText::Credits::PowerDelta);
 		DSurface::Sidebar->DrawText(counter, &vRect, &vPos, Drawing::RGB_To_Int(clrToolTip), 0, TextFlags);
 	}
 
@@ -185,6 +192,7 @@ DEFINE_HOOK(0x4A25E0, CreditsClass_GraphicLogic_HarvesterCounter, 0x7)
 			2 + pSideExt->Sidebar_WeedsCounter_Offset.Get().Y
 		};
 
+		const SidebarText::CounterScope gpuScope(SidebarText::Credits::Weeds);
 		DSurface::Sidebar->DrawText(counter, &vRect, &vPos, Drawing::RGB_To_Int(clrToolTip), 0,
 			TextPrintType::UseGradPal | TextPrintType::Center | TextPrintType::Metal12);
 	}

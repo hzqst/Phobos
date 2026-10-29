@@ -79,21 +79,6 @@ namespace
 			return {asset.ID, asset.Color};
 		}
 
-	// Tooltip commands are in target surface coordinates with half-open clips.
-	SidebarSnapshot::Placement TooltipPlacement(const SidebarText::Command& command)
-	{
-		SidebarSnapshot::Placement placement {0, command.X, command.Y};
-		placement.Effect = command.Glyph ? ShapeImage::Effect::GlyphMask : ShapeImage::Effect::Solid;
-		placement.SolidColor = command.Color;
-		placement.SolidWidth = command.Width; placement.SolidHeight = command.Height;
-		placement.Opacity256 = command.Opacity256;
-		placement.Glyph = command.Glyph;
-		placement.TextShift = command.Shift; placement.TextBits = command.Bits;
-		placement.ClipLeft = command.ClipLeft; placement.ClipTop = command.ClipTop;
-		placement.ClipWidth = command.ClipRight; placement.ClipHeight = command.ClipBottom;
-		return placement;
-	}
-
 	struct OverlayPlacement
 	{
 		SidebarSnapshot::Placement Placement;
@@ -110,7 +95,7 @@ namespace
 				if (std::any_of(draw.Commands.begin(), draw.Commands.end(), [](const SidebarText::Command& command)
 					{ return command.Glyph && !SidebarText::Glyphs().Resolve(command.Glyph); })) continue;
 				for (const auto& command : draw.Commands)
-					Overlay.push_back({TooltipPlacement(command), draw.OriginX, draw.Width, draw.Height});
+					Overlay.push_back({SidebarSnapshot::TextPlacement(command), draw.OriginX, draw.Width, draw.Height});
 			}
 	}
 

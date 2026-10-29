@@ -22,6 +22,13 @@ tags:
 - 底色：`621B85`（避开 Ares 在 `621B80` 的 hook），调用来源 `6A9D51/6A9E11/6A9F5E/6A9FF3`；黑色底色用 alpha 176/256 近似原生 `dst*80/256`。
 - 层序：数量和 readiness 在闪烁之后、GCLOCK2 之前；暂停的 HOLD 在 GCLOCK2 之后。由调用点决定，不按文字内容判断。
 
+## 资金区（`src/Render/CreditsGPU.md`）
+
+- 与 cameo 作用域分开：Simple 入口先判断资金区，`[E+428]=4A25E0` 且 `[E+47C]=6D0BC9` 为资金数字；`[E+428]=4A24E0` 为 observer 时间，四项全部清空。
+- Phobos 三个计数器的 Fancy 调用者在 DLL 内，不硬编码地址：`Hooks.UI.cpp` 的 `4A25E0` 回调用 `SidebarText::CounterBatch`（未打印的提交为不显示）和每个 DrawText 外的 `CounterScope` 标记。
+- 字形要求 `434120` 入口 ESP+B0 等于记录的 Simple 入口，并核对 `43464D/434BCF/4A5FF2` 三层返回。坐标是 Sidebar 局部坐标，直接用 `SidebarSnapshot::TextPlacement`（与 tooltip 共用）。
+- `⛏`、`⚡` 在 GAME.FNT 缺字，原生画反色 X；日志 `[SidebarCreditsGPU]` 按布局去重，不按数字去重（滚动时每次数字都不同）。
+
 ## GlyphCache
 
 - 字体和字形使用各自的强类型 ID，底层存储复用 FrameCache。原生 1bpp 记录按 MSB-first 展开为自有 0/1 mask。

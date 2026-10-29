@@ -6,6 +6,7 @@
 #include <FactoryClass.h>
 #include <SuperClass.h>
 #include <Syringe.h>
+#include <optional>
 
 namespace SidebarText
 {
@@ -36,6 +37,25 @@ namespace SidebarText
 		unsigned LifetimeTraceCount = 0, MissingTraceCount = 0, SuperTraceCount = 0;
 		GlyphCache::GlyphID LastGlyph;
 		std::unordered_set<std::uint64_t> SuperTraceHashes;
+
+		// Simple (4A5EB0) returns into Fancy after a formatted or a plain print.
+		constexpr unsigned SimpleFormatted = 0x4A6143, SimpleUnformatted = 0x4A619A;
+		// From the Simple entry: Fancy's caller, then TabData::Draw's return into
+		// Tab::Draw. The observer branch pushes 4 fewer argument bytes.
+		constexpr unsigned FancyCaller = 0x428, MoneyTabReturn = 0x47C, ObserverTabReturn = 0x478;
+		constexpr unsigned MoneyPrinted = 0x4A25E0, ObserverPrinted = 0x4A24E0, TabDrawReturn = 0x6D0BC9;
+		// From the BitFont::Blit entry: SingleLine, BitFontPrint and Simple returns, then the Simple entry.
+		constexpr unsigned GlyphLine = 0x43464D, LineParent = 0x34, LineReturn = 0x434BCF;
+		constexpr unsigned PrintParent = 0x58, PrintReturn = 0x4A5FF2, GlyphSimple = 0xB0;
+		constexpr std::size_t CreditsCount = std::size_t(Credits::Count);
+		constexpr const char* CreditsNames[CreditsCount] {"money", "harvester", "powerDelta", "weeds"};
+		struct CreditsPrint { std::uintptr_t Stack; Credits Text; Run Pending; };
+		std::array<Run, CreditsCount> CreditsRuns;
+		std::optional<CreditsPrint> CreditsScope;
+		std::optional<Credits> ActiveCounter;
+		std::array<bool, CreditsCount> CounterPrinted {};
+		unsigned CreditsTraceCount = 0;
+		std::unordered_set<std::uint64_t> CreditsTraceHashes;
 		void TraceLifetime(const char* event, GlyphCache::FontID font, GlyphCache::GlyphID glyph, bool resolvedBefore)
 		{
 			// The game closes debug.log before its final resource teardown.
@@ -206,6 +226,92 @@ namespace SidebarText
 			ColorFormat(command);
 			scope.Pending.Commands.push_back(command);
 		}
+
+		Run Absent()
+		{
+			Run run;
+			run.Known = false;
+			return run;
+		}
+
+		void CommitCredits(Credits text, Run run, const char* state)
+		{
+			auto& committed = CreditsRuns[std::size_t(text)];
+			committed = std::move(run);
+			if (!SidebarSnapshot::Trace || CreditsTraceCount >= 64) return;
+			const Command first = committed.Commands.empty() ? Command {} : committed.Commands.front();
+			const int fields[] {int(text), committed.Known, int(committed.Commands.size()), first.X, first.Y,
+				first.ClipLeft, first.ClipTop, first.ClipRight, first.ClipBottom, int(first.Color)};
+			auto hash = SidebarSnapshot::Hash(fields, sizeof(fields));
+			// Rolling money changes every print; dedupe by layout, not by digits.
+			hash = SidebarSnapshot::Hash(state, std::strlen(state), hash);
+			if (!CreditsTraceHashes.insert(hash).second) return;
+			std::string units;
+			for (const auto& string : committed.Texts)
+				for (const auto unit : string)
+				{
+					char hex[6]; std::snprintf(hex, sizeof(hex), "%04X ", unsigned(unit)); units += hex;
+				}
+			Debug::Log("[SidebarCreditsGPU] sample=%u text=%s state=%s known=%d glyphs=%zu pen=%d,%d clip=%d,%d-%d,%d color=%04X glyphDecoded=%llu utf16=%s\n",
+				++CreditsTraceCount, CreditsNames[std::size_t(text)], state, committed.Known, committed.Commands.size(),
+				first.X, first.Y, first.ClipLeft, first.ClipTop, first.ClipRight, first.ClipBottom, first.Color,
+				Cache.Storage().GetStats().Decoded, units.c_str());
+		}
+
+		// Simple entry of a credits print: classify it and copy its final text.
+		bool ObserveCreditsPrint(REGISTERS* r)
+		{
+			const auto direct = r->Stack<unsigned>(0);
+			if ((direct != SimpleFormatted && direct != SimpleUnformatted) || r->Stack<void*>(4) != DSurface::Sidebar
+				|| !Readable(r->lea_Stack<void*>(FancyCaller), MoneyTabReturn + 4 - FancyCaller)) return false;
+			const auto caller = r->Stack<unsigned>(FancyCaller);
+			Credits text;
+			if (ActiveCounter) text = *ActiveCounter;
+			else if (caller == MoneyPrinted && r->Stack<unsigned>(MoneyTabReturn) == TabDrawReturn) text = Credits::Money;
+			else if (caller == ObserverPrinted && r->Stack<unsigned>(ObserverTabReturn) == TabDrawReturn)
+			{
+				// Observers see elapsed time here, never a player's money or counters.
+				CreditsScope.reset();
+				for (std::size_t i = 0; i < CreditsCount; ++i) CommitCredits(Credits(i), Absent(), "observer");
+				return true;
+			}
+			else return false;
+			if (ActiveCounter) CounterPrinted[std::size_t(text)] = true;
+			CreditsScope.reset();
+			Run run;
+			const auto state = GPURender::GetState();
+			if ((state != GPURender::State::Running && state != GPURender::State::Hidden)
+				|| !SidebarSnapshot::Eligible() || !RefreshFont()) run.Known = false;
+			else
+			{
+				const auto* input = reinterpret_cast<const wchar_t*>(r->EDX());
+				std::wstring copy;
+				unsigned i = 0;
+				for (; i < MaxText && Readable(input + i, sizeof(wchar_t)) && input[i]; ++i) copy.push_back(input[i]);
+				if (i == MaxText || !Readable(input + i, sizeof(wchar_t))) run.Known = false;
+				run.Texts.push_back(std::move(copy));
+			}
+			CreditsScope = CreditsPrint {r->ESP(), text, std::move(run)};
+			return true;
+		}
+
+		bool ObserveCreditsGlyph(REGISTERS* r)
+		{
+			if (!CreditsScope || r->ESP() + GlyphSimple != CreditsScope->Stack) return false;
+			auto& run = CreditsScope->Pending;
+			if (r->Stack<unsigned>(0) != GlyphLine || r->Stack<unsigned>(LineParent) != LineReturn
+				|| r->Stack<unsigned>(PrintParent) != PrintReturn) run.Known = false;
+			if (!run.Known) return true;
+			Command command;
+			const auto result = CaptureGlyph(r, command);
+			if (result == GlyphResult::Failed) run.Known = false;
+			else if (result == GlyphResult::Captured)
+			{
+				if (!Coordinate(command.X) || !Coordinate(command.Y) || run.Commands.size() >= MaxCommands) run.Known = false;
+				else run.Commands.push_back(command);
+			}
+			return true;
+		}
 	}
 
 	GlyphCache::Cache& Glyphs() { return Cache; }
@@ -221,6 +327,8 @@ namespace SidebarText
 	{
 		for (auto& runs : Runs) runs.clear();
 		Items.clear(); Prints.clear();
+		for (auto& run : CreditsRuns) run = Absent();
+		CreditsScope.reset();
 		SidebarSnapshot::Current.Visible = false;
 	}
 
@@ -250,7 +358,7 @@ namespace SidebarText
 #endif
 		for (int tab = 0; tab < 4; ++tab) SyncList(tab);
 		// A draw must finish each item before publishing. Reject interrupted scopes.
-		Items.clear(); Prints.clear();
+		Items.clear(); Prints.clear(); CreditsScope.reset();
 	}
 
 	void BeginItem(REGISTERS* r)
@@ -316,7 +424,7 @@ namespace SidebarText
 
 	void ObservePrint(REGISTERS* r)
 	{
-		if (Items.empty()) return;
+		if (ObserveCreditsPrint(r) || Items.empty()) return;
 		if (Prints.size() >= MaxNesting) { Items.back().Pending.Known = false; return; }
 		Prints.push_back({r->ESP(), false, false});
 		if (r->Stack<void*>(4) != DSurface::Sidebar) return;
@@ -344,6 +452,13 @@ namespace SidebarText
 
 	void EndPrint(std::uintptr_t stack)
 	{
+		if (CreditsScope && CreditsScope->Stack == stack)
+		{
+			auto scope = std::move(*CreditsScope);
+			CreditsScope.reset();
+			const bool known = scope.Pending.Known;
+			CommitCredits(scope.Text, std::move(scope.Pending), known ? "printed" : "unknown");
+		}
 		if (!Prints.empty() && Prints.back().Stack == stack) Prints.pop_back();
 	}
 
@@ -407,7 +522,7 @@ namespace SidebarText
 
 	void ObserveGlyph(REGISTERS* r)
 	{
-		if (Items.empty() || Prints.empty() || !Prints.back().Accepted || r->Stack<unsigned>(0) != 0x43464D) return;
+		if (ObserveCreditsGlyph(r) || Items.empty() || Prints.empty() || !Prints.back().Accepted || r->Stack<unsigned>(0) != 0x43464D) return;
 		Command command;
 		const auto result = CaptureGlyph(r, command);
 		if (result == GlyphResult::Failed) Items.back().Pending.Known = false;
@@ -441,5 +556,27 @@ namespace SidebarText
 		if (found == Runs[tab].end() || !found->second.Known) return nullptr;
 		if (found->second.Fingerprint != Fingerprint(item)) { Runs[tab].erase(found); return nullptr; }
 		return &found->second;
+	}
+
+	CounterBatch::CounterBatch()
+	{
+		CreditsScope.reset(); ActiveCounter.reset(); CounterPrinted.fill(false);
+	}
+
+	CounterBatch::~CounterBatch()
+	{
+		ActiveCounter.reset();
+		for (const auto counter : {Credits::Harvester, Credits::PowerDelta, Credits::Weeds})
+			if (!CounterPrinted[std::size_t(counter)]) CommitCredits(counter, Absent(), "absent");
+	}
+
+	CounterScope::CounterScope(Credits counter) { ActiveCounter = counter; }
+
+	CounterScope::~CounterScope() { ActiveCounter.reset(); }
+
+	const Run* FindCredits(Credits text)
+	{
+		const auto& run = CreditsRuns[std::size_t(text)];
+		return run.Known ? &run : nullptr;
 	}
 }

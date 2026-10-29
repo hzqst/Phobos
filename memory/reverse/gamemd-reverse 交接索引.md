@@ -22,7 +22,8 @@ tags:
 | #9 | Sidebar 文字、字体、字形 | `sidebar-text-gpu-handoff.md` | `b63a6fe` | 首批已实现 |
 | #10 | Cameo 图标内 UIName | `sidebar-cameo-name-gpu-handoff.md` | `3b42068` | 已交付，Phobos 侧暂缓 |
 | #11 | Tooltip 触发、文本、排版、目标 surface | `tooltip-gpu-handoff.md` | `3464e14` | 已交付，Phobos 侧已实现（`883e6dd0`），见 [[Tooltip 接入要点]] |
-| #12 | 电力条 `PowerClass::Draw @63FB20`（素材、状态帧、坐标、时序） | `sidebar-power-gpu-handoff.md` | `5a75392` | 已交付，Phobos 侧已实现，见 `src/Render/PowerGPU.md` |
+| #12 | 电力条 `PowerClass::Draw @63FB20`（素材、状态帧、坐标、时序） | `sidebar-power-gpu-handoff.md` | `5a75392` | 已交付，Phobos 侧已实现（`4996d87a`），见 `src/Render/PowerGPU.md` |
+| #13 | 资金区（CreditsClass/TabData 数字、平滑滚动、Phobos 三个计数器） | `sidebar-credits-gpu-handoff.md` | `9002145` | 已交付，Phobos 侧已实现（未提交），见 `src/Render/CreditsGPU.md` |
 
 ## issue 写法
 

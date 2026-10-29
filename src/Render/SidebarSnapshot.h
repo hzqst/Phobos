@@ -369,6 +369,36 @@ namespace SidebarSnapshot
 		states[key] = {darken, progress && !completed && stage >= 0 && stage < INT_MAX ? stage + 1 : -1};
 	}
 
+	// Commands in target surface coordinates with half-open clips: tooltips and credits.
+	inline Placement TextPlacement(const SidebarText::Command& command)
+	{
+		Placement placement {0, command.X, command.Y};
+		placement.Effect = command.Glyph ? ShapeImage::Effect::GlyphMask : ShapeImage::Effect::Solid;
+		placement.SolidColor = command.Color;
+		placement.SolidWidth = command.Width; placement.SolidHeight = command.Height;
+		placement.Opacity256 = command.Opacity256;
+		placement.Glyph = command.Glyph;
+		placement.TextShift = command.Shift; placement.TextBits = command.Bits;
+		placement.ClipLeft = command.ClipLeft; placement.ClipTop = command.ClipTop;
+		placement.ClipWidth = command.ClipRight; placement.ClipHeight = command.ClipBottom;
+		return placement;
+	}
+
+	// TabData::Draw prints over CREDITS before the sidebar body draws. Native
+	// order: money, then the counters. A run with an invalidated glyph is hidden whole.
+	inline void CaptureCredits()
+	{
+		if (HouseClass::IsCurrentPlayerObserver()) return;
+		for (std::size_t i = 0; i < std::size_t(SidebarText::Credits::Count); ++i)
+		{
+			const auto* run = SidebarText::FindCredits(SidebarText::Credits(i));
+			if (!run || std::any_of(run->Commands.begin(), run->Commands.end(), [](const SidebarText::Command& command)
+				{ return command.Glyph && !SidebarText::Glyphs().Resolve(command.Glyph); })) continue;
+			for (const auto& command : run->Commands)
+				Current.Placements.push_back(TextPlacement(command));
+		}
+	}
+
 	inline void CaptureCameoText(const BuildType& item, int tab, const ShapeImage::CameoSlot& p, bool afterClock)
 	{
 		const auto* run = SidebarText::Find(tab, item);
@@ -611,6 +641,7 @@ namespace SidebarSnapshot
 			&& Current.Assets[3].ShapeHeight > 0 && Current.Assets[3].ShapeHeight <= ShapeImage::MaxDimension)
 		{
 			Current.Placements.push_back({0, 0, 0});
+			CaptureCredits();
 			Current.Placements.push_back({1, 0, bounds.Y});
 			int y = startY;
 			for (int i = 0; i < repeats; ++i, y += Current.Assets[2].ShapeHeight)
