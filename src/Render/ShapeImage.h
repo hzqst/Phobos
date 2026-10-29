@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace ShapeImage
@@ -86,5 +87,31 @@ namespace ShapeImage
 		const auto numerator = std::uint32_t(height) - std::uint32_t(startY)
 			- (side == 0 ? 26u : 18u) + std::uint32_t(sidebarY) - 7u;
 		return std::max(0, static_cast<std::int32_t>(numerator) / 50);
+	}
+
+	// PowerClass::Draw (63FB20) stacks POWERP.SHP frames downwards from SidebarBounds.Y+69.
+	enum PowerFrame : int { PowerEmpty, PowerExcess, PowerMargin, PowerDrain, PowerFlash, PowerFrameCount };
+	constexpr int PowerRowPitch = 3, PowerTopOffset = 69, PowerGDIX = 5, PowerNODX = 0;
+	constexpr int MaxPowerLayoutHeight = 4096;
+	// excess/margin/drain are the displayed cell counts (+152C/+1530/+1534), flash is +151C.
+	// Rejects counts the native loop would turn into unbounded or negative sequences.
+	inline bool PowerFrames(int layoutHeight, int excess, int margin, int drain, int flash, std::vector<int>& frames)
+	{
+		frames.clear();
+		if (layoutHeight < 0 || layoutHeight > MaxPowerLayoutHeight) return false;
+		const int total = (layoutHeight + PowerRowPitch) / PowerRowPitch;
+		for (const int count : {excess, margin, drain})
+			if (count < 0 || count > total) return false;
+		for (int i = total - drain - margin - excess; i > 0; --i) frames.push_back(PowerEmpty);
+		// The flash cell replaces the first cell of the first non-empty segment.
+		int index = 0;
+		if (flash > 0 && flash % 2 == 0) { frames.push_back(PowerFlash); index = 1; }
+		for (const auto [count, frame] : {std::pair {excess, PowerExcess}, {margin, PowerMargin}, {drain, PowerDrain}})
+		{
+			if (count <= 0) continue;
+			for (; index < count; ++index) frames.push_back(frame);
+			index = 0;
+		}
+		return true;
 	}
 }

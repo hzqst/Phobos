@@ -18,7 +18,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | A | 黑底 + 独立 GPU 光标 | 已实现，D3D12 实机验证 |
-| B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动、tooltip 已完成；资金、电力条、雷达区、命令栏未做 |
+| B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动、tooltip、电力条已完成；资金、雷达区、命令栏未做 |
 | C | 地图基础（地形、坐标变换） | 未开始 |
 | D | 场景对象（建筑、SHP、步兵、载具、Voxel） | 未开始 |
 | E | 效果与其余覆盖（阴影、粒子、迷雾、菜单、影片） | 未开始 |
@@ -42,7 +42,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 ## 仓库内权威文档
 
 - `AGENTS.md`：GPURender/Automation 开发约束（必读）
-- `src/Render/*.md`：FrameAtlasDesign、FrameAtlas、FrameCache、SidebarGPU、CameosGPU、CameoEffectsGPU、SidebarTextGPU、CursorTrace
+- `src/Render/*.md`：FrameAtlasDesign、FrameAtlas、FrameCache、SidebarGPU、CameosGPU、CameoEffectsGPU、SidebarTextGPU、TooltipGPU、PowerGPU、CursorTrace
 - `docs/Automation-MCP.md`
 - 根目录 `GPURender-Progress.md`：用户本地交接日志（未入库，按时间倒序追加，很长，优先查本 memory）
 

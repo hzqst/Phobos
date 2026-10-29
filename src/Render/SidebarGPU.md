@@ -57,7 +57,7 @@ IDA health返回Session not found，idb_list为空，故P2–P4跳过。参考�
 - `SidebarSnapshot` 只保有自有像素、位置和诊断用数值身份。GPU 定时呈现不解引用素材指针。`6A5840`、`6A5BF0`、`6BE1C0`、已有视频模式入口/完成点使快照失效。退出对局或 sidebar 不活跃时不绘制旧快照。
 - `ShapeImage` 处理 plain 和按行 RLE。RLE 的 WORD 行长包含自身，非零字节为索引，`0,run` 表示透明 run，允许 run=0；校验行边界和输出宽度。索引 0 透明，非零索引映射到黑色仍是不透明。
 - 文件头、帧表、内存可读性、下一帧偏移和有界编码长度均检查；引擎裸 SHP 指针不提供完整分配/文件长度，末帧只能验证可读内存与格式界限，不能声称具备完整文件长度校验。首版限制单帧最大 2048×2048、sidebar surface 最大 4096×4096、重复段最多 128。
-- 原布局由 SidebarBounds、ViewBounds、SidebarMode、当前 side、B0B4F8、SIDE2/SIDE3 原始头高度及 TOP 的对象坐标计算。SidebarMode 决定横向偏移，不作为可见开关。先裁剪到 sidebar surface，再变换到客户区逻辑画布并裁剪；没有加桌面坐标。
+- 原布局由 SidebarBounds、ViewBounds、SidebarMode、当前有效布局、B0B4F8、SIDE2/SIDE3 原始头高度及 TOP 的对象坐标计算。有效布局是 Phobos 的 `isNODSidebar`（`[Side] Sidebar.GDIPositions`，缺省按 side），因为 `6A51E9` 用它替换了原生 `6A5130` 的 side 判断；2026-10-29 之前误用 `PlayerSideIndex`，两者不一致时 SIDE2 片数可能与原生不同。SidebarMode 决定横向偏移，不作为可见开关。先裁剪到 sidebar surface，再变换到客户区逻辑画布并裁剪；没有加桌面坐标。
 - 六项资源全部解析成功后才发布完整快照，未就绪时保留黑底和光标。可选叠层 `+5398` 仅诊断，不代表该模式已完整兼容。
 - 六个独立 R32_UINT texture，内容变化才上传；重复 SIDE2 复用同一 texture。在单个 render pass 中按层绘制，最后是光标。CPU 资源解码与复制仍有成本，尚未做性能优化或停用原生 UI 绘制。
 

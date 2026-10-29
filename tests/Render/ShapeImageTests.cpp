@@ -42,5 +42,36 @@ int main()
 	CHECK(0 == ShapeImage::RepeatCount(0, 227, 158, 0));
 	CHECK(0 == ShapeImage::RepeatCount(100, 227, 158, 0));
 	CHECK(1 == ShapeImage::RepeatCount(150, 227, 158, 1));
-	puts("ShapeImage: plain/RLE, transparent runs, malformed input and layout passed.");
+	using namespace ShapeImage;
+	std::vector<int> frames;
+	// N = (L+3)/3 truncates rather than rounding up: 101 cells for 300, 167 for 500.
+	CHECK(PowerFrames(300, 0, 0, 0, 0, frames));
+	CHECK(101u == frames.size());
+	CHECK(PowerFrames(500, 0, 0, 0, 0, frames));
+	CHECK(167u == frames.size());
+	CHECK(PowerFrames(12, 1, 2, 1, 0, frames)); // N=5
+	CHECK((std::vector<int> {PowerEmpty, PowerExcess, PowerMargin, PowerMargin, PowerDrain} == frames));
+	CHECK(PowerFrames(12, 2, 1, 1, 10, frames));
+	CHECK((std::vector<int> {PowerEmpty, PowerFlash, PowerExcess, PowerMargin, PowerDrain} == frames));
+	// An empty segment passes the flash cell on to the next non-empty one.
+	CHECK(PowerFrames(12, 0, 2, 1, 4, frames));
+	CHECK((std::vector<int> {PowerEmpty, PowerEmpty, PowerFlash, PowerMargin, PowerDrain} == frames));
+	CHECK(PowerFrames(12, 0, 0, 1, 2, frames));
+	CHECK((std::vector<int> {PowerEmpty, PowerEmpty, PowerEmpty, PowerEmpty, PowerFlash} == frames));
+	// Odd phases draw no flash; all-empty with an even phase draws one extra cell.
+	CHECK(PowerFrames(12, 0, 0, 1, 9, frames));
+	CHECK((std::vector<int> {PowerEmpty, PowerEmpty, PowerEmpty, PowerEmpty, PowerDrain} == frames));
+	CHECK(PowerFrames(0, 0, 0, 0, 2, frames)); // N=1
+	CHECK((std::vector<int> {PowerEmpty, PowerFlash} == frames));
+	// A transient sum above N draws no empty cells, as the native signed count does.
+	CHECK(PowerFrames(6, 3, 0, 0, 0, frames)); // N=3
+	CHECK((std::vector<int> {PowerExcess, PowerExcess, PowerExcess} == frames));
+	CHECK(PowerFrames(6, 2, 0, 2, 0, frames));
+	CHECK((std::vector<int> {PowerExcess, PowerExcess, PowerDrain, PowerDrain} == frames));
+	CHECK(!PowerFrames(-1, 0, 0, 0, 0, frames) && frames.empty());
+	CHECK(!PowerFrames(MaxPowerLayoutHeight + 1, 0, 0, 0, 0, frames));
+	CHECK(!PowerFrames(12, -1, 0, 0, 0, frames));
+	CHECK(!PowerFrames(12, 0, 6, 0, 0, frames));
+	CHECK(PowerFrames(MaxPowerLayoutHeight, 0, 0, 0, 0, frames));
+	puts("ShapeImage: plain/RLE, transparent runs, malformed input, layout and power cells passed.");
 }

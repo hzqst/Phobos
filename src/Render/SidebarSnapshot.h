@@ -22,6 +22,10 @@
 #include <BuildingTypeClass.h>
 #include <SuperWeaponTypeClass.h>
 
+// Phobos' final GDI/NOD layout choice (Hooks.SidebarGDIPositions.cpp), which the
+// native sidebar, radar and power layouts read in place of PlayerSideIndex.
+extern bool isNODSidebar;
+
 // Only CaptureAfterDraw reads engine-owned resources. Present/timer uses owned pixels.
 namespace SidebarSnapshot
 {
@@ -30,13 +34,16 @@ namespace SidebarSnapshot
 	constexpr size_t CameoBegin = BackgroundCount + ButtonCount;
 	constexpr size_t DarkenBegin = CameoBegin + ShapeImage::MaxCameoSlots;
 	constexpr size_t ClockBegin = DarkenBegin + ShapeImage::MaxCameoSlots;
-	constexpr size_t AssetCount = ClockBegin + ShapeImage::MaxCameoSlots;
+	constexpr size_t PowerBegin = ClockBegin + ShapeImage::MaxCameoSlots;
+	constexpr size_t AssetCount = PowerBegin + ShapeImage::PowerFrameCount;
 	constexpr int MaxCanvasDimension = 4096;
 	constexpr int MaxRepeats = 128;
 	constexpr std::uintptr_t ResourceSlots[BackgroundCount] =
 		{0xB0FB08, 0xB0B468, 0xB0B46C, 0xB0B470, 0xB0B474, 0xB0F9E0};
 	constexpr const char* Names[BackgroundCount] =
 		{"CREDITS", "SIDE1", "SIDE2", "SIDE3", "ADDON", "TOP"};
+	// POWERP.SHP and the sidebar layout height, both written by native sidebar setup.
+	constexpr std::uintptr_t PowerResourceSlot = 0xAC4E74, PowerLayoutHeight = 0xB0B504;
 	constexpr std::uintptr_t ButtonObjects[ButtonCount] =
 		{0xB07DF8, 0xB0B3A0, 0xB07C48, 0xB07CA8, 0xB07D08, 0xB07D68, 0xB0B328, 0xB0B408, 0xB04978, 0xB04910};
 	static_assert(sizeof(ShapeButtonClass) == 0x60);
@@ -100,6 +107,13 @@ namespace SidebarSnapshot
 	inline unsigned EffectTraceCount = 0;
 	inline std::array<std::uint64_t, ShapeImage::MaxCameoSlots> EffectHashes {};
 	static_assert(offsetof(SidebarClass, Tabs) == 0x1544);
+	static_assert(offsetof(PowerClass, unknown_151C) == 0x151C);
+	static_assert(offsetof(PowerClass, unknown_152C) == 0x152C);
+	static_assert(offsetof(PowerClass, unknown_1530) == 0x1530);
+	static_assert(offsetof(PowerClass, unknown_1534) == 0x1534);
+	inline unsigned PowerTraceCount = 0;
+	inline std::uint64_t PowerTraceHash = 0;
+	inline std::vector<int> PowerSequence;
 	static_assert(offsetof(StripClass, Cameos) == 0x58);
 	static_assert(offsetof(TechnoTypeClass, Cameo) == 0x6F0);
 	static_assert(offsetof(TechnoTypeClass, AltCameo) == 0x710);
@@ -494,6 +508,51 @@ namespace SidebarSnapshot
 		}
 	}
 
+	// Rebuilds the native POWERP sequence from the displayed cell counts; the native
+	// dirty flag only gates CPU repaints. A missing frame hides the whole bar.
+	inline void CapturePower(const PaletteCache::Handle& color)
+	{
+		const PowerClass& power = SidebarClass::Instance;
+		const int excess = int(power.unknown_152C), margin = int(power.unknown_1530), drain = int(power.unknown_1534);
+		const int flash = int(power.unknown_151C);
+		const int height = *reinterpret_cast<const int*>(PowerLayoutHeight);
+		const int x = isNODSidebar ? ShapeImage::PowerNODX : ShapeImage::PowerGDIX;
+		const auto top = std::int64_t(DSurface::SidebarBounds.Y) + ShapeImage::PowerTopOffset;
+		const auto* source = *reinterpret_cast<SHPStruct* const*>(PowerResourceSlot);
+		bool ready = ShapeImage::PowerFrames(height, excess, margin, drain, flash, PowerSequence)
+			&& std::abs(top) <= MaxCanvasDimension;
+		std::array<bool, ShapeImage::PowerFrameCount> used {};
+		for (const int frame : PowerSequence) used[frame] = true;
+		for (int frame = 0; frame < ShapeImage::PowerFrameCount; ++frame)
+		{
+			auto& asset = Current.Assets[PowerBegin + frame];
+			if (ready && used[frame]) ready = CopyAsset(source, color, asset, frame);
+			else asset.ID = {};
+		}
+		if (ready)
+			for (size_t i = 0; i < PowerSequence.size(); ++i)
+				Current.Placements.push_back({PowerBegin + PowerSequence[i], x,
+					int(top + std::int64_t(i) * ShapeImage::PowerRowPitch)});
+		if (Trace && PowerTraceCount < 64)
+		{
+			const int state[] {int(Generation), ready, excess, margin, drain, flash, height, x, int(top), int(PowerSequence.size())};
+			auto hash = Hash(state, sizeof(state));
+			hash = Hash(&source, sizeof(source), hash);
+			for (int frame = 0; frame < ShapeImage::PowerFrameCount; ++frame)
+				hash = Hash(&Current.Assets[PowerBegin + frame].ID.Value, sizeof(FrameCache::FrameID::Value), hash);
+			if (hash != PowerTraceHash)
+			{
+				PowerTraceHash = hash;
+				std::string cells;
+				for (const int frame : PowerSequence) cells += char('0' + frame);
+				Debug::Log("[SidebarPowerGPU] sample=%u generation=%u ready=%d excess=%d margin=%d drain=%d flash=%d height=%d cells=%zu x=%d y0=%d shape=%p frameIDs=%llu,%llu,%llu,%llu,%llu frames=%s\n",
+					++PowerTraceCount, Generation, ready, excess, margin, drain, flash, height, PowerSequence.size(), x, int(top), source,
+					Current.Assets[PowerBegin].ID.Value, Current.Assets[PowerBegin + 1].ID.Value, Current.Assets[PowerBegin + 2].ID.Value,
+					Current.Assets[PowerBegin + 3].ID.Value, Current.Assets[PowerBegin + 4].ID.Value, cells.c_str());
+			}
+		}
+	}
+
 	inline void CaptureAfterDraw()
 	{
 		Current.Visible = false;
@@ -516,7 +575,8 @@ namespace SidebarSnapshot
 		const int side = ScenarioClass::Instance->PlayerSideIndex;
 		const int startY = *reinterpret_cast<const int*>(0xB0B4F8);
 		const auto bounds = DSurface::SidebarBounds;
-		const int repeats = ShapeImage::RepeatCount(bounds.Height, startY, bounds.Y, side);
+		// Phobos' 6A51E9 replaces the native side test with the effective layout.
+		const int repeats = ShapeImage::RepeatCount(bounds.Height, startY, bounds.Y, isNODSidebar);
 		if (repeats > MaxRepeats || std::abs(std::int64_t(startY)) > MaxCanvasDimension)
 			return;
 		bool ready = true;
@@ -559,6 +619,8 @@ namespace SidebarSnapshot
 			Current.Placements.push_back({4, 0, y + Current.Assets[3].ShapeHeight});
 			CaptureButtons(0, 8);
 			CaptureCameos(repeats);
+			// Native order: Strip, Power, then Radar draws TOP and its buttons.
+			CapturePower(color);
 			Current.Placements.push_back({5, topX, topY});
 			CaptureButtons(8, ButtonCount);
 			// Native Radar may repaint repair then sell after its contents.

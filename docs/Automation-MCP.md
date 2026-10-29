@@ -274,6 +274,9 @@ Tooltip 触发已在隔离遭遇战实机验证（2026-10-29，D3D12，ExtendedT
 立即出现「名称+价格」，右键后消失；页签 `204` 显示「Tip:Tab2+禁用」文本；地图建造厂经 1 秒
 延迟的 Timer 分支显示名称，三者均为 DDraw 原生截图。GPU 侧绘制及 D3D12/Vulkan 同帧对照见
 [TooltipGPU.md](../src/Render/TooltipGPU.md)。
+电力条的建造/放置/出售流程与同帧对照见 [PowerGPU.md](../src/Render/PowerGPU.md)。暂停只冻结逻辑帧：
+电力条追随与闪烁按墙钟推进，暂停期间仍可能重画，因此同一次暂停的两张截图可能相差一步，
+对照这类状态时按 ddraw → gpu → ddraw 截三张，确认 gpu 介于两者之间。
 拖框尚未通过。sidebar 实际滚动已在条目超过一页的隔离场景（建筑页 28 项）验证：滚轮和底部箭头
 使 TopRowIndex 逐行变化并在底部钳制，D3D12／Vulkan 的 ddraw 与 gpu 同帧截图一致；
 平滑滑动（IsScrolling）在该配置下未出现，未验证。详见 `src/Render/CameosGPU.md` 的滚动小节。
