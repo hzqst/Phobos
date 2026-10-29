@@ -343,8 +343,11 @@ void GPURender::DisableByCommandLine()
 	DisabledByCommandLine = true;
 }
 
+#include <Automation/Automation.h>
+
 void GPURender::OnVideoModeSet()
 {
+	Automation::Start();
 	SidebarSnapshot::Invalidate();
 	const int width = DSurface::WindowBounds.Width;
 	const int height = DSurface::WindowBounds.Height;
@@ -371,6 +374,7 @@ void GPURender::OnVideoModeSet()
 
 void GPURender::Shutdown()
 {
+	Automation::Stop();
 	if (CurrentState == State::Shutdown)
 		return;
 

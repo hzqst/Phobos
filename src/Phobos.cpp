@@ -4,6 +4,7 @@
 
 #include <Misc/ExceptionHandler.h>
 #include <Render/GPURender.h>
+#include <Automation/Automation.h>
 
 #include <Utilities/Debug.h>
 #include <Utilities/Patch.h>
@@ -101,6 +102,8 @@ void Phobos::CmdLineParse(char** ppArgs, int nNumArgs)
 		{
 			GPURender::DisableByCommandLine();
 		}
+		if (_stricmp(pArg, "-PhobosAutomation") == 0)
+			Automation::Enable();
 	}
 
 	if (foundInclude)
@@ -219,24 +222,17 @@ void Phobos::ExeRun()
 
 #ifdef DEBUG
 
-	if (Phobos::DetachFromDebugger())
+	const bool detached = Phobos::DetachFromDebugger();
+	if (!Automation::RequestedAtStartup())
 	{
 		MessageBoxW(NULL,
-		L"You can now attach a debugger.\n\n"
-
-		L"Press OK to continue YR execution.",
-		L"Debugger Notice", MB_OK);
-	}
-	else
-	{
-		MessageBoxW(NULL,
-		L"You can now attach a debugger.\n\n"
-
-		L"To attach a debugger find the YR process in Process Hacker "
-		L"/ Visual Studio processes window and detach debuggers from it, "
-		L"then you can attach your own debugger.\n\n"
-
-		L"Press OK to continue YR execution.",
+			detached
+				? L"You can now attach a debugger.\n\nPress OK to continue YR execution."
+				: L"You can now attach a debugger.\n\n"
+				  L"To attach a debugger find the YR process in Process Hacker "
+				  L"/ Visual Studio processes window and detach debuggers from it, "
+				  L"then you can attach your own debugger.\n\n"
+				  L"Press OK to continue YR execution.",
 		L"Debugger Notice", MB_OK);
 	}
 

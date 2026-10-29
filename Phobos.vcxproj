@@ -21,6 +21,15 @@
   <!-- Compiled files -->
   <ItemGroup>
     <!-- src/ -->
+    <ClCompile Include="src\Automation\Automation.cpp" />
+    <ClCompile Include="src\Automation\AutomationDispatcher.cpp" />
+    <ClCompile Include="src\Automation\AutomationFrameControl.cpp" />
+    <ClCompile Include="src\Automation\FrameControlEngine.cpp" />
+    <ClCompile Include="src\Automation\AutomationInput.cpp" />
+    <ClCompile Include="src\Automation\AutomationInputWin32.cpp" />
+    <ClCompile Include="src\Automation\AutomationServer.cpp" />
+    <ClCompile Include="src\Automation\MCPProtocol.cpp" />
+    <ClCompile Include="src\Automation\MCPTools.cpp" />
     <ClCompile Include="src\Phobos.COM.cpp" />
     <ClCompile Include="src\Phobos.cpp" />
     <ClCompile Include="src\Phobos.CRT.cpp" />

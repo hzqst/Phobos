@@ -1,4 +1,5 @@
 #include "FrameByFrame.h"
+#include <Automation/AutomationFrameControl.h>
 
 #include <Utilities/Debug.h>
 #include <Utilities/GeneralUtils.h>
@@ -73,9 +74,11 @@ bool FrameByFrameCommandClass::FrameStepMainLoop()
 
 DEFINE_HOOK(0x55D360, MainLoop_FrameStep_Begin, 0x5)
 {
+	Automation::FrameLogicBegin();
 	// FrameStep mode enabled but no frames to process
 	if (FrameByFrameCommandClass::FrameStep && FrameByFrameCommandClass::FrameStepCount == 0)
 	{
+		Automation::FramePauseBarrier();
 		R->EAX(FrameByFrameCommandClass::FrameStepMainLoop());
 		return 0x55DEDB;
 	}
@@ -88,8 +91,10 @@ DEFINE_HOOK_AGAIN(0x55D871, MainLoop_FrameStep_End, 0x6)
 DEFINE_HOOK_AGAIN(0x55DEC1, MainLoop_FrameStep_End, 0x6)
 DEFINE_HOOK(0x55DED5, MainLoop_FrameStep_End, 0x6)
 {
+	const bool completed = Automation::FrameLogicEnd();
 	// This frame is processed, decrease the counter
-	if (FrameByFrameCommandClass::FrameStep && FrameByFrameCommandClass::FrameStepCount > 0)
+	if (FrameByFrameCommandClass::FrameStep && FrameByFrameCommandClass::FrameStepCount > 0
+		&& (!Automation::AutomationOwnsStep() || completed))
 		--FrameByFrameCommandClass::FrameStepCount;
 
 	return 0;

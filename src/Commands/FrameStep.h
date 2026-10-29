@@ -3,6 +3,7 @@
 #include "Commands.h"
 
 #include "FrameByFrame.h"
+#include <Automation/AutomationFrameControl.h>
 #include <Utilities/Debug.h>
 
 template<size_t Frame>
@@ -47,7 +48,7 @@ inline const wchar_t* FrameStepCommandClass<Frame>::GetUIDescription() const
 template<size_t Frame>
 inline void FrameStepCommandClass<Frame>::Execute(WWKey eInput) const
 {
-	if (!FrameByFrameCommandClass::FrameStep)
+	if (!FrameByFrameCommandClass::FrameStep || Automation::AutomationOwnsStep())
 		return;
 
 	Debug::LogAndMessage("Stepping %d frames...\n", Frame);
