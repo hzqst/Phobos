@@ -21,6 +21,9 @@ public:
 
 	static CaptureResult Capture(SDL_GPUDevice* pDevice);
 	static bool CapturePixels(RenderCapture::Image& image);
+	// The tactical view of the native terrain cache (DSurface::Tile) at the position
+	// Composite shows it in the game area; everything else stays black.
+	static bool CaptureTerrainPixels(RenderCapture::Image& image);
 	static bool HasPendingUpload();
 	static void Upload(SDL_GPUCopyPass* pCopyPass);
 	static void Release(SDL_GPUDevice* pDevice);

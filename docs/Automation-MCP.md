@@ -46,7 +46,7 @@ method/name header 对照校验，限制 body、JSON 深度、连接数和排队
 | `game_pause` | 无；等待引擎到达暂停循环后确认 |
 | `game_step` | `frames: 1..10000`, `timeout_ms: 100..28000`（默认 5000） |
 | `game_resume` | 无；等待正常逻辑帧完成后确认 |
-| `game_screenshot` | `source: ddraw/gpu`, `max_edge: 0..4096`（默认 1280）, `include_metadata`（默认 true）, `timeout_ms: 100..28000`（默认 5000）, 可选 `crop: {x,y,width,height}` |
+| `game_screenshot` | `source: ddraw/gpu/native_terrain`, `max_edge: 0..4096`（默认 1280）, `include_metadata`（默认 true）, `timeout_ms: 100..28000`（默认 5000）, 可选 `crop: {x,y,width,height}` |
 
 拖动每步间隔至少 16ms。坐标为原始游戏逻辑画面坐标，越界拒绝。
 保持键有 10 秒租期，超时、引擎不可用、模式/分辨率变化及退出时释放。
@@ -102,6 +102,25 @@ Mutex 超时、放弃的 Mutex、Surface 不可用或 Lock 失败返回 `capture
 随后根据 `Unsorted::ColorPackData` 的通道位数／偏移转换 RGBA8，支持 RGB565 和 RGB555，
 不在 PNG 编码期间保留 Surface 指针。光标语义为 `surface_contents_if_drawn`：复制 Surface
 中当时实际存在的光标，不额外叠加桌面光标；实机图像已观察到游戏光标。
+
+### 原生地形 surface
+
+`source=native_terrain` 是 GPURender 阶段 C 的对照来源（依据 gamemd-reverse #16 §8.3）。
+每次重新读取 `DSurface::Tile`（`[8872FC]`；滚屏会交换 Tile／Composite 指针），检查 16-bit 和
+pitch，Lock 后只复制 `ViewBounds` 区域。地形阶段把 Tile 的 ViewBounds 复制到 Composite 的
+同一位置，因此图片尺寸与 `ddraw` 相同，该区域放在 Composite 的画布原点处，其余像素为黑。
+不在场景中（或读档中）返回 `terrain_not_in_scenario`；Surface 缺失、非 16-bit、ViewBounds
+越出 Surface 或游戏区、Lock 失败、pitch 异常分别返回对应 `reason`。
+
+元数据另含 `native_terrain`：`surface`（当时 Tile 指针，仅用于观察交换）、`surface_width/height`、
+`view_bounds`（Tile 坐标）、`placed_at`（区域在图片中的左上角）和 `tactical_position`
+（TacticalPos）。其他来源该字段为 `null`。`cursor=not_included`。
+
+这是原生地形**缓存**，不是纯 TMP：除地块外还含矿石／围墙等 overlay、弹坑、部分静态对象与
+建筑底座，迷雾／未探索区也已烘入；单位、选择框、文字等 mode 2 动态层不在其中。
+纯地块对照需用受控地图。实机（D3D12，1024×768 与 800×600）静止、向下和斜向滚屏后，与同帧
+`ddraw` 的战术区仅在单位、光标和顶部文字处不同；`terrain_not_in_scenario` 未能实机触发
+（Spawner 直接进入场景，MCP 可用时已在局内）。
 
 ### SDL GPU
 

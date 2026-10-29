@@ -27,7 +27,7 @@ tags:
 
 - 有副作用的请求必须带 `_meta`：`com.phobos/instance_id`（取自 game_status）和 `com.phobos/request_id`（每次新生成）。截图只需要 instance_id。结果不确定时不要用新 ID 自动重放。
 - 输入走引擎队列：按键用 `WWKeyboardClass::Put_Key_Message`；鼠标按钮经私有 message-only 窗口送到原始 WndProc；移动用 `WWMouse::SetCoords`（**不移动桌面指针，也不发 WM_MOUSEMOVE**）；滚轮投递 `WM_MOUSEWHEEL`。`consumed` 恒为 null，队列排空不代表产生了游戏效果。
-- `game_screenshot`：`source=ddraw` 复制 Primary 自有像素；`source=gpu` 按需离屏渲染并经独立 fence 读回。返回 PNG `ImageContent` 和元数据（`simulation_frame`、`gpu_present_id`、`backend`、`output_mode`、`letterbox` 等）。`crop` 用的是源图像素坐标。
+- `game_screenshot`：`source=ddraw` 复制 Primary 自有像素；`source=gpu` 按需离屏渲染并经独立 fence 读回。返回 PNG `ImageContent` 和元数据（`simulation_frame`、`gpu_present_id`、`backend`、`output_mode`、`letterbox` 等）。`crop` 用的是源图像素坐标。`source=native_terrain` 复制原生地形缓存 `DSurface::Tile` 的 ViewBounds 区域，放在 Composite 画布位置、其余黑，元数据含 `native_terrain`；它含 overlay、弹坑、静态对象和迷雾，不是纯 TMP（阶段 C 对照用，见 `docs/Automation-MCP.md`）。
 
 ## 使用陷阱（2026-10-29 实测）
 

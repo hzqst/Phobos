@@ -15,7 +15,9 @@ namespace Automation
 			image.Scene = GameFrameHost().Scene();
 			image.SimulationFrame = GameFrameHost().CompletedFrames();
 			image.TimestampMS = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-			if (command.Arguments["source"] == "gpu") GPURender::Capture(command.Image);
+			const auto& source = command.Arguments["source"];
+			if (source == "gpu") GPURender::Capture(command.Image);
+			else if (source == "native_terrain") SurfaceMirror::CaptureTerrainPixels(image);
 			else SurfaceMirror::CapturePixels(image);
 		}
 		const auto& image = *command.Image;

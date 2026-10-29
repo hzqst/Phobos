@@ -1,6 +1,10 @@
 #include "SurfaceMirror.h"
+#include "Tooltip.h"
 
+#include <GameOptionsClass.h>
+#include <Phobos.h>
 #include <Surface.h>
+#include <TacticalClass.h>
 #include <Unsorted.h>
 
 #include <Helpers/CompileTime.h>
@@ -29,6 +33,20 @@ namespace
 	constexpr ULONGLONG SkipLogIntervalMS = 5000;
 
 	ULONGLONG LastSkipLogTime = 0;
+
+	bool DecodeNative(const std::vector<uint16_t>& pixels, RenderCapture::Image& image)
+	{
+		const auto& pack = Unsorted::ColorPackData;
+		if (RenderCapture::Decode16(pixels, {pack._R_SHL, pack._G_SHL, pack._B_SHL},
+			{8 - pack._R_SHR, 8 - pack._G_SHR, 8 - pack._B_SHR}, image.Pixels)) return true;
+		image.Error = "unsupported_color_packing";
+		return false;
+	}
+
+	bool ValidPitch(int pitch, int width)
+	{
+		return int64_t(pitch) >= int64_t(width) * BytesPerPixel || -int64_t(pitch) >= int64_t(width) * BytesPerPixel;
+	}
 }
 
 SurfaceMirror::CaptureResult SurfaceMirror::Capture(SDL_GPUDevice* pDevice)
@@ -97,7 +115,7 @@ bool SurfaceMirror::ReadPrimary(const std::function<bool(const unsigned char*, i
 		const int pitch = pPrimary->GetPitch();
 
 		error = "invalid_primary_pitch";
-		if (int64_t(pitch) >= int64_t(pPrimary->GetWidth()) * 2 || -int64_t(pitch) >= int64_t(pPrimary->GetWidth()) * 2)
+		if (ValidPitch(pitch, pPrimary->GetWidth()))
 		{
 			error = "primary_copy_failed";
 			result = copy(pSource, pitch, width, height);
@@ -126,12 +144,54 @@ bool SurfaceMirror::CapturePixels(RenderCapture::Image& image)
 			std::memcpy(pixels.data() + size_t(y) * w, source + ptrdiff_t(y) * pitch, size_t(w) * 2);
 		return true;
 	}, error)) { image.Error = error; return false; }
-	const auto& pack = Unsorted::ColorPackData;
-	if (!RenderCapture::Decode16(pixels, {pack._R_SHL, pack._G_SHL, pack._B_SHL},
-		{8 - pack._R_SHR, 8 - pack._G_SHR, 8 - pack._B_SHR}, image.Pixels))
-	{ image.Error = "unsupported_color_packing"; return false; }
+	if (!DecodeNative(pixels, image)) return false;
 	image.Viewport = {0, 0, float(image.Width), float(image.Height)};
 	image.Source = "ddraw"; image.Backend = "DirectDraw"; image.OutputMode = "original";
+	image.Ready = true;
+	return true;
+}
+
+bool SurfaceMirror::CaptureTerrainPixels(RenderCapture::Image& image)
+{
+	static_assert(offsetof(TacticalClass, TacticalPos) == 0xB0);
+	image.Width = image.LogicalWidth = DSurface::WindowBounds.Width;
+	image.Height = image.LogicalHeight = DSurface::WindowBounds.Height;
+	if (!RenderCapture::ValidSize(image.Width, image.Height)) { image.Error = "capture_size_limit"; return false; }
+	// Outside a running scenario Tile holds no current tactical view.
+	if (!Unsorted::ScenarioStarted || Phobos::IsLoadingSaveGame) { image.Error = "terrain_not_in_scenario"; return false; }
+	// Scrolling swaps the Tile and Composite pointers, so the slot is read on every capture.
+	DSurface* const pTile = DSurface::Tile;
+	const TacticalClass* pTactical = TacticalClass::Instance;
+	if (!pTile || !pTactical) { image.Error = "terrain_surface_unavailable"; return false; }
+	if (pTile->GetBytesPerPixel() != BytesPerPixel) { image.Error = "terrain_surface_not_16_bit"; return false; }
+	// The terrain pass draws ViewBounds of Tile, then copies that rectangle to the same
+	// place on Composite; Composite starts at the canvas origin of the game area.
+	const auto& view = DSurface::ViewBounds;
+	const auto& sidebar = DSurface::SidebarBounds;
+	const int canvasX = Tooltip::CanvasOrigin(Tooltip::Target::Composite, GameOptionsClass::Instance.SidebarMode,
+		view.X + view.Width, sidebar.X + sidebar.Width);
+	const int surfaceWidth = pTile->GetWidth(), surfaceHeight = pTile->GetHeight();
+	if (view.Width <= 0 || view.Height <= 0 || view.X < 0 || view.Y < 0
+		|| int64_t(view.X) + view.Width > surfaceWidth || int64_t(view.Y) + view.Height > surfaceHeight)
+	{ image.Error = "terrain_view_outside_surface"; return false; }
+	const int64_t left = int64_t(canvasX) + view.X;
+	if (left < 0 || left + view.Width > image.Width || int64_t(view.Y) + view.Height > image.Height)
+	{ image.Error = "terrain_view_outside_game_area"; return false; }
+	std::vector<uint16_t> pixels(size_t(image.Width) * image.Height);
+	const auto pSource = static_cast<const BYTE*>(pTile->Lock(view.X, view.Y));
+	if (!pSource) { image.Error = "terrain_surface_lock_failed"; return false; }
+	const int pitch = pTile->GetPitch();
+	const bool pitchValid = ValidPitch(pitch, surfaceWidth);
+	if (pitchValid)
+		for (int y = 0; y < view.Height; ++y)
+			std::memcpy(pixels.data() + size_t(view.Y + y) * image.Width + size_t(left), pSource + ptrdiff_t(y) * pitch, size_t(view.Width) * 2);
+	pTile->Unlock();
+	if (!pitchValid) { image.Error = "invalid_terrain_pitch"; return false; }
+	if (!DecodeNative(pixels, image)) return false;
+	image.Terrain = RenderCapture::SurfaceRegion {reinterpret_cast<std::uintptr_t>(pTile), surfaceWidth, surfaceHeight,
+		{view.X, view.Y, view.Width, view.Height}, int(left), view.Y, pTactical->TacticalPos.X, pTactical->TacticalPos.Y};
+	image.Viewport = {0, 0, float(image.Width), float(image.Height)};
+	image.Source = "native_terrain"; image.Backend = "DirectDraw"; image.OutputMode = "original";
 	image.Ready = true;
 	return true;
 }

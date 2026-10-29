@@ -4,6 +4,7 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
@@ -102,7 +103,15 @@ namespace Automation
 			metadata["gpu_present_id"] = image.Source == "gpu" ? Json(image.PresentID) : Json();
 			metadata["gpu_present_id_semantics"] = image.Source == "gpu" ? Json("successful_swapchain_submission") : Json();
 			metadata["scene_id"] = image.Scene; metadata["backend"] = image.Backend; metadata["output_mode"] = image.OutputMode;
-			metadata["cursor"] = image.Source == "ddraw" || image.OutputMode == "mirror" ? "surface_contents_if_drawn" : "rendered_gpu_cursor_if_visible";
+			metadata["cursor"] = image.Terrain ? "not_included" : image.Source == "ddraw" || image.OutputMode == "mirror" ? "surface_contents_if_drawn" : "rendered_gpu_cursor_if_visible";
+			if (const auto& terrain = image.Terrain)
+			{
+				char surface[32];
+				std::snprintf(surface, sizeof(surface), "%08zX", size_t(terrain->Surface));
+				metadata["native_terrain"] = {{"surface", surface}, {"surface_width", terrain->SurfaceWidth}, {"surface_height", terrain->SurfaceHeight},
+					{"view_bounds", terrain->Bounds}, {"placed_at", {terrain->CanvasX, terrain->CanvasY}}, {"tactical_position", {terrain->TacticalX, terrain->TacticalY}}};
+			}
+			else metadata["native_terrain"] = nullptr;
 			metadata["crop"] = {{"x", x}, {"y", y}, {"width", width}, {"height", height}};
 			metadata["pixel_format"] = "RGBA8"; metadata["file_path"] = nullptr;
 		}
