@@ -23,7 +23,8 @@ tags:
 | #10 | Cameo 图标内 UIName | `sidebar-cameo-name-gpu-handoff.md` | `3b42068` | 已交付，Phobos 侧暂缓 |
 | #11 | Tooltip 触发、文本、排版、目标 surface | `tooltip-gpu-handoff.md` | `3464e14` | 已交付，Phobos 侧已实现（`883e6dd0`），见 [[Tooltip 接入要点]] |
 | #12 | 电力条 `PowerClass::Draw @63FB20`（素材、状态帧、坐标、时序） | `sidebar-power-gpu-handoff.md` | `5a75392` | 已交付，Phobos 侧已实现（`4996d87a`），见 `src/Render/PowerGPU.md` |
-| #13 | 资金区（CreditsClass/TabData 数字、平滑滚动、Phobos 三个计数器） | `sidebar-credits-gpu-handoff.md` | `9002145` | 已交付，Phobos 侧已实现（未提交），见 `src/Render/CreditsGPU.md` |
+| #13 | 资金区（CreditsClass/TabData 数字、平滑滚动、Phobos 三个计数器） | `sidebar-credits-gpu-handoff.md` | `9002145` | 已交付，Phobos 侧已实现（`d3d6766c`），见 `src/Render/CreditsGPU.md` |
+| #14 | 雷达区非地图部分（外框、阵营标志、开关动画；小地图内容只预留矩形） | `sidebar-radar-gpu-handoff.md` | `6898733` | 已交付，Phobos 侧已实现（未提交），见 `src/Render/RadarGPU.md`；运行的 `gamemd.exe` 模式字段是 `+14B0`，不是 spawn IDB 的 `BAD3E8` |
 
 ## issue 写法
 

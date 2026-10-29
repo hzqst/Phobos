@@ -2,7 +2,7 @@
 
 基础建造图标已接入现有索引 atlas，首轮用户画面对照正常；实现、Ares动态列表补证、释放hook与覆盖限制见 [CameosGPU.md](CameosGPU.md)。第一批状态效果及用户所指Countdown扇形遮罩见 [CameoEffectsGPU.md](CameoEffectsGPU.md)，数量、READY/HOLD等文字仍未接入。
 
-资金数字与 Phobos 三个计数器见 [CreditsGPU.md](CreditsGPU.md)，电力条见 [PowerGPU.md](PowerGPU.md)。
+资金数字与 Phobos 三个计数器见 [CreditsGPU.md](CreditsGPU.md)，电力条见 [PowerGPU.md](PowerGPU.md)，雷达区主体（阵营标志、开关动画）见 [RadarGPU.md](RadarGPU.md)。
 
 缓存设计见 [FrameAtlasDesign.md](FrameAtlasDesign.md)，阶段1实现与验证见 [FrameCache.md](FrameCache.md)。当前已接入FrameID多页索引atlas与独立GPU调色板，实现与验收状态见 [FrameAtlas.md](FrameAtlas.md)。下方按钮和背景章节保留此前阶段记录。
 

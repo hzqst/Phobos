@@ -35,7 +35,8 @@ namespace SidebarSnapshot
 	constexpr size_t DarkenBegin = CameoBegin + ShapeImage::MaxCameoSlots;
 	constexpr size_t ClockBegin = DarkenBegin + ShapeImage::MaxCameoSlots;
 	constexpr size_t PowerBegin = ClockBegin + ShapeImage::MaxCameoSlots;
-	constexpr size_t AssetCount = PowerBegin + ShapeImage::PowerFrameCount;
+	constexpr size_t RadarBegin = PowerBegin + ShapeImage::PowerFrameCount;
+	constexpr size_t AssetCount = RadarBegin + 1;
 	constexpr int MaxCanvasDimension = 4096;
 	constexpr int MaxRepeats = 128;
 	constexpr std::uintptr_t ResourceSlots[BackgroundCount] =
@@ -44,6 +45,10 @@ namespace SidebarSnapshot
 		{"CREDITS", "SIDE1", "SIDE2", "SIDE3", "ADDON", "TOP"};
 	// POWERP.SHP and the sidebar layout height, both written by native sidebar setup.
 	constexpr std::uintptr_t PowerResourceSlot = 0xAC4E74, PowerLayoutHeight = 0xB0B504;
+	// RADAR/RADARY.SHP owned by the UI art loader (72FA10) and borrowed by Radar
+	// Init_For_House (652FB5); the radar's own Convert (72F510), not SIDEBAR_PAL.
+	constexpr std::uintptr_t RadarResourceSlot = 0xB04A38, RadarOwnedSlot = 0xB0FA68, RadarConvertSlot = 0xB0FBF8;
+	constexpr int RadarOpenFrame = 32;
 	constexpr std::uintptr_t ButtonObjects[ButtonCount] =
 		{0xB07DF8, 0xB0B3A0, 0xB07C48, 0xB07CA8, 0xB07D08, 0xB07D68, 0xB0B328, 0xB0B408, 0xB04978, 0xB04910};
 	static_assert(sizeof(ShapeButtonClass) == 0x60);
@@ -114,6 +119,13 @@ namespace SidebarSnapshot
 	inline unsigned PowerTraceCount = 0;
 	inline std::uint64_t PowerTraceHash = 0;
 	inline std::vector<int> PowerSequence;
+	static_assert(offsetof(RadarClass, RadarRect) == 0x149C);
+	static_assert(offsetof(RadarClass, RadarState) == 0x14AC);
+	static_assert(offsetof(RadarClass, unknown_14B0) == 0x14B0);
+	static_assert(offsetof(RadarClass, IsAvailableNow) == 0x14D8);
+	static_assert(offsetof(RadarClass, RadarAnimFrame) == 0x14FC);
+	inline unsigned RadarTraceCount = 0;
+	inline std::uint64_t RadarTraceHash = 0;
 	static_assert(offsetof(StripClass, Cameos) == 0x58);
 	static_assert(offsetof(TechnoTypeClass, Cameo) == 0x6F0);
 	static_assert(offsetof(TechnoTypeClass, AltCameo) == 0x710);
@@ -583,6 +595,61 @@ namespace SidebarSnapshot
 		}
 	}
 
+	// Radar::Draw (653100) paints the body from its final animation state; the GPU
+	// never advances it. Inactive/animating states show the native frame, the open
+	// map display (mode 1) keeps frame 32 under the map, the default mode frame 0.
+	// Statistics, movie and unknown modes or states are not supported and hide it.
+	inline void CaptureRadar()
+	{
+		const RadarClass& radar = SidebarClass::Instance;
+		const auto* self = reinterpret_cast<const std::uint8_t*>(&radar);
+		const int state = int(radar.RadarState), mode = int(radar.unknown_14B0), nativeFrame = radar.RadarAnimFrame;
+		const int x = *reinterpret_cast<const int*>(self + 0x11E4), y = *reinterpret_cast<const int*>(self + 0x11EC);
+		const auto* source = *reinterpret_cast<SHPStruct* const*>(RadarResourceSlot);
+		const auto* owned = *reinterpret_cast<SHPStruct* const*>(RadarOwnedSlot);
+		const auto* convert = *reinterpret_cast<ConvertClass* const*>(RadarConvertSlot);
+		int frame = -1;
+		const char* reason = "ready";
+		if (HouseClass::IsCurrentPlayerObserver()) reason = "observer";
+		// A borrowed pointer that no longer matches the owned slot may dangle after UI unload.
+		else if (!RadarButtonsReady || !source || source != owned) reason = "unbound";
+		else if (std::abs(x) > MaxCanvasDimension || std::abs(y) > MaxCanvasDimension) reason = "origin";
+		else if (mode != 0 && mode != 1) reason = "mode";
+		else if (state == int(RadarStateType::Active)) frame = mode == 1 ? RadarOpenFrame : 0;
+		else if (state >= int(RadarStateType::Inactive) && state <= int(RadarStateType::Activating)) frame = nativeFrame;
+		else reason = "state";
+		auto& asset = Current.Assets[RadarBegin];
+		const auto color = frame >= 0 ? CaptureColor(convert) : PaletteCache::Handle {};
+		bool ready = false;
+		if (frame >= 0 && !color) reason = "palette";
+		else if (frame >= 0 && !(ready = CopyAsset(source, color, asset, frame))) reason = "frame";
+		if (ready) Current.Placements.push_back({RadarBegin, x, y});
+		else { asset.ID = {}; asset.Color.reset(); }
+		if (Trace && RadarTraceCount < 64)
+		{
+			// Dirty flags are logged but not hashed: native map updates toggle them often.
+			const auto& map = radar.RadarRect;
+			const int values[] {int(Generation), ready, state, mode, radar.IsAvailableNow, nativeFrame, frame, x, y,
+				map.X, map.Y, map.Width, map.Height, asset.Left, asset.Top, asset.Width, asset.Height};
+			auto hash = Hash(values, sizeof(values));
+			const std::uintptr_t identities[] {std::uintptr_t(source), std::uintptr_t(owned), std::uintptr_t(convert),
+				std::uintptr_t(reason), asset.DataIdentity};
+			hash = Hash(identities, sizeof(identities), hash);
+			const auto colorHash = ColorHash(color);
+			hash = Hash(&colorHash, sizeof(colorHash), hash);
+			hash = Hash(&asset.ID.Value, sizeof(asset.ID.Value), hash);
+			if (hash != RadarTraceHash)
+			{
+				RadarTraceHash = hash;
+				Debug::Log("[SidebarRadarGPU] sample=%u generation=%u ready=%d reason=%s state=%d mode=%d available=%d dirty=%d,%d nativeFrame=%d frame=%d shape=%p owned=%p data=%p convert=%p palette=%016llX pos=%d,%d offset=%d,%d size=%dx%d map=%d,%d,%d,%d origin=%d frameID=%llu\n",
+					++RadarTraceCount, Generation, ready, reason, state, mode, radar.IsAvailableNow, radar.unknown_bool_14D9,
+					radar.unknown_bool_14DA, nativeFrame, frame, source, owned, reinterpret_cast<void*>(asset.DataIdentity), convert,
+					colorHash, x, y, asset.Left, asset.Top, asset.Width, asset.Height, map.X, map.Y, map.Width, map.Height,
+					Current.OriginX, asset.ID.Value);
+			}
+		}
+	}
+
 	inline void CaptureAfterDraw()
 	{
 		Current.Visible = false;
@@ -650,10 +717,11 @@ namespace SidebarSnapshot
 			Current.Placements.push_back({4, 0, y + Current.Assets[3].ShapeHeight});
 			CaptureButtons(0, 8);
 			CaptureCameos(repeats);
-			// Native order: Strip, Power, then Radar draws TOP and its buttons.
+			// Native order: Strip, Power, then Radar draws TOP, its buttons and its body.
 			CapturePower(color);
 			Current.Placements.push_back({5, topX, topY});
 			CaptureButtons(8, ButtonCount);
+			CaptureRadar();
 			// Native Radar may repaint repair then sell after its contents.
 			for (const size_t i : {size_t(1), size_t(0)})
 			{

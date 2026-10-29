@@ -30,16 +30,16 @@ tags:
 
 | 元素 | 位置（1024×768） | 原生来源 | 备注 |
 | --- | --- | --- | --- |
-| 资金数字 | sidebar 顶部 `(856,0)-(1024,16)`，原生中心 W/2 | `TabData::Draw @4A2370`，Fancy 返回 `4A25E0` | 已实现（2026-10-29，未提交）：复用 `4A5EB0/4A5FF2/434120` 观察器，按栈链识别资金数字，三个 Phobos 计数器靠 `4A25E0` 回调里的 `CounterBatch/CounterScope` 标记识别，无新 hook；D3D12/Vulkan/NOD 稳定最大差 1，滚动用三张截图；见 `src/Render/CreditsGPU.md`、gamemd-reverse #13 |
+| 资金数字 | sidebar 顶部 `(856,0)-(1024,16)`，原生中心 W/2 | `TabData::Draw @4A2370`，Fancy 返回 `4A25E0` | 已实现（`d3d6766c`）：复用 `4A5EB0/4A5FF2/434120` 观察器，按栈链识别资金数字，三个 Phobos 计数器靠 `4A25E0` 回调里的 `CounterBatch/CounterScope` 标记识别，无新 hook；D3D12/Vulkan/NOD 稳定最大差 1，滚动用三张截图；见 `src/Render/CreditsGPU.md`、gamemd-reverse #13 |
 | 电力条 | 左侧细条（GDI x=5、NOD x=0，y0=SidebarBounds.Y+69） | `PowerClass::Draw @63FB20` | 已实现（`4996d87a`）：`6A70AE` 快照读 G/Y/D/B（`+152C/1530/1534/151C`）与 L（`B0B504`）重建 POWERP 帧序列，无新 hook；D3D12/Vulkan/NOD 同帧最大差 1；见 `src/Render/PowerGPU.md`、gamemd-reverse #12 |
-| 雷达区 | `(856,48)-(1024,160)` | `RadarClass::Draw @653100` | TOP 和两个按钮已做；缺阵营标志、开关动画、小地图内容（小地图依赖阶段 C） |
+| 雷达区 | `(856,48)-(1024,160)` | `RadarClass::Draw @653100` | TOP、两个按钮、主体（阵营标志、开关动画、帧 32 外框）已实现（2026-10-30，未提交）：`6A70AE` 快照读 `+14AC/+14B0/+14FC`、`[B04A38]`（须等于 `[B0FA68]`）与 `[B0FBF8]`，无新 hook；GDI/NOD/Yuri 与 Vulkan 稳定最大差 1，动画用连拍池匹配；见 `src/Render/RadarGPU.md`、gamemd-reverse #14。缺小地图内容、边框线、视口框（依赖阶段 C），统计/电影模式不画 |
 | 底部命令栏 | `(0,736)-(856,768)` | `TabClass::Draw @6D0A20` 画到 Temp surface | LSPACER/LENDCAP/BTTNBKGD/RENDCAP 与命令按钮 |
 | Tooltip | 跟随鼠标 | CCToolTip `478E10..479029` | 已实现（2026-10-29，ExtendedToolTips 关闭）：Sidebar/Composite 两种目标，D3D12/Vulkan 同帧对照最大差 1；见 [[Tooltip 接入要点]]、`src/Render/TooltipGPU.md` |
 | UIName（图标内名称） | cameo 内 | `6A9BEC → 6AC480` | 暂缓：原生开关默认 0，当前配置不显示；方案见 [[Sidebar 文字与字形]] |
 | `self+5398` 可选叠层 | — | 三个 SHP `B0B478/47C/480` | 素材身份未识别 |
 | Phobos 扩展 | — | ProducingProgress `6A6EB1`、SW 侧栏、计数器 | 默认关闭 |
 
-建议顺序：雷达区不依赖地图的部分 → 命令栏（电力条、资金区已完成）。
+建议顺序：命令栏（电力条、资金区、雷达区非地图部分已完成）。
 
 已知风险：SIDE2 片数此前按 `PlayerSideIndex` 计算，2026-10-29 改为 Phobos `isNODSidebar`（与 `6A51E9` 一致）；`Sidebar.GDIPositions` 与阵营不一致的配置未实机验证。
 
