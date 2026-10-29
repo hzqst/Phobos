@@ -6,6 +6,7 @@
 #include "ShapeFrameSource.h"
 #include "PaletteCache.h"
 #include "SidebarText.h"
+#include "Tooltip.h"
 #include <ShapeButtonClass.h>
 #include <SidebarClass.h>
 #include <ScenarioClass.h>
@@ -118,6 +119,7 @@ namespace SidebarSnapshot
 		LastTraceHash = 0;
 		for (auto& states : NativeCameoStates) states.clear();
 		SidebarText::ClearRuns();
+		Tooltip::Clear();
 	}
 
 	inline void InitializeTrace()

@@ -1,6 +1,7 @@
 #include "GPURender.h"
 #include "CursorTrace.h"
 #include "SidebarText.h"
+#include "Tooltip.h"
 
 #include <Utilities/Macro.h>
 
@@ -42,9 +43,11 @@ DEFINE_HOOK(0x6BB8E0, DirectDrawWrap_DisposeOfStuff_GPURender, 0x5)
 // No outer MouseMutex transaction is introduced by this diagnostic stage.
 // Intentionally stacked with GScreenClass_DrawText: both return 0 and the observation
 // does not depend on which callback runs first, only on preceding the native staging.
+// Also the end of the top-level tooltip pass (4F4570 returns at 4F4573).
 DEFINE_HOOK(0x4F4583, DrawOnTop_CursorTraceBegin, 0x6)
 {
 	CursorTrace::Record(R);
+	GPURender::OnToolTipsDrawn();
 	return 0;
 }
 
@@ -188,7 +191,23 @@ DEFINE_HOOK(0x4A5FF2, SimpleText_PrintEnd_GPUText, 0x5)
 
 DEFINE_HOOK(0x434120, BitFont_Blit_GPUText, 0x5)
 {
-	SidebarText::ObserveGlyph(R);
+	if (!Tooltip::ObserveGlyph(R))
+		SidebarText::ObserveGlyph(R);
+	return 0;
+}
+
+// CCToolTip::Draw2 entry, mov edx,[esp+4] / sub esp,2Ch. Records the entry ESP only.
+DEFINE_HOOK(0x478E30, CCToolTip_Draw2_GPUTooltipBegin, 0x7)
+{
+	Tooltip::BeginDraw(R);
+	return 0;
+}
+
+// Epilogue pop edi / pop esi / pop ebx / add esp,2Ch shared by every return path,
+// including the early surface rejections. The entry ESP is ESP+38h here.
+DEFINE_HOOK(0x479042, CCToolTip_Draw2_GPUTooltipEnd, 0x6)
+{
+	Tooltip::EndDraw(R);
 	return 0;
 }
 

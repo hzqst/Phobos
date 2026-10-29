@@ -6,6 +6,7 @@
 #include "CursorTrace.h"
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
+#include "Tooltip.h"
 #include "FrameAtlas.h"
 #include "GPUReadback.h"
 #include <Automation/Automation.h>
@@ -78,44 +79,91 @@ namespace
 			return {asset.ID, asset.Color};
 		}
 
+	// Tooltip commands are in target surface coordinates with half-open clips.
+	SidebarSnapshot::Placement TooltipPlacement(const SidebarText::Command& command)
+	{
+		SidebarSnapshot::Placement placement {0, command.X, command.Y};
+		placement.Effect = command.Glyph ? ShapeImage::Effect::GlyphMask : ShapeImage::Effect::Solid;
+		placement.SolidColor = command.Color;
+		placement.SolidWidth = command.Width; placement.SolidHeight = command.Height;
+		placement.Opacity256 = command.Opacity256;
+		placement.Glyph = command.Glyph;
+		placement.TextShift = command.Shift; placement.TextBits = command.Bits;
+		placement.ClipLeft = command.ClipLeft; placement.ClipTop = command.ClipTop;
+		placement.ClipWidth = command.ClipRight; placement.ClipHeight = command.ClipBottom;
+		return placement;
+	}
+
+	struct OverlayPlacement
+	{
+		SidebarSnapshot::Placement Placement;
+		int OriginX, Width, Height;
+	};
+	std::vector<OverlayPlacement> Overlay;
+
+	void CollectTooltips()
+	{
+		for (const auto target : {Tooltip::Target::Sidebar, Tooltip::Target::Composite})
+			for (const auto& draw : Tooltip::Published(target))
+			{
+				// A tooltip whose glyph was invalidated is hidden whole, never drawn in part.
+				if (std::any_of(draw.Commands.begin(), draw.Commands.end(), [](const SidebarText::Command& command)
+					{ return command.Glyph && !SidebarText::Glyphs().Resolve(command.Glyph); })) continue;
+				for (const auto& command : draw.Commands)
+					Overlay.push_back({TooltipPlacement(command), draw.OriginX, draw.Width, draw.Height});
+			}
+	}
+
+	void AppendSprite(const SidebarSnapshot::Placement& placement, int originX, int width, int height)
+	{
+		const auto& asset = SidebarSnapshot::Current.Assets[placement.AssetIndex];
+		const auto view = Atlas.Resolve(SpriteRequest(placement));
+		if (!view.Texture) return;
+		const bool solid = placement.Effect == ShapeImage::Effect::Solid || bool(placement.Glyph);
+		// Captured text commands carry the engine's packed layout; other solids use the sidebar palette's.
+		const bool packed = placement.Glyph || placement.TextBits != std::array<unsigned, 3> {};
+		const auto x = std::int64_t(placement.X) + (solid ? 0 : asset.Left);
+		const auto y = std::int64_t(placement.Y) + (solid ? 0 : asset.Top);
+		if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return;
+		auto clipped = CursorImage::Clip(int(x), int(y), solid ? placement.SolidWidth : asset.Width,
+			solid ? placement.SolidHeight : asset.Height,
+			std::min(width, placement.ClipWidth), std::min(height, placement.ClipHeight));
+		const int trimX = std::max(0, placement.ClipLeft - clipped.X);
+		const int trimY = std::max(0, placement.ClipTop - clipped.Y);
+		clipped.X += trimX; clipped.SourceX += trimX; clipped.Width -= trimX;
+		clipped.Y += trimY; clipped.SourceY += trimY; clipped.Height -= trimY;
+		const auto canvasX = std::int64_t(clipped.X) + originX;
+		if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) return;
+		Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,
+			view.X + clipped.SourceX, view.Y + clipped.SourceY, true,
+			view.Palette ? view.Palette : view.Texture, // Mask branch never samples the second binding.
+			packed ? placement.TextShift : asset.Color->Values.Shift,
+			packed ? placement.TextBits : asset.Color->Values.Bits,
+			unsigned(placement.Effect), placement.SolidColor, placement.Opacity256});
+	}
+
 	FrameAtlas::BeginResult PrepareSidebar()
 	{
 		Sprites.clear();
+		Overlay.clear();
 		const auto& frame = SidebarSnapshot::Current;
 		const bool visible = frame.Visible && SidebarSnapshot::Eligible();
 		std::vector<FrameAtlas::Request> requests;
 		if (visible)
+		{
+			CollectTooltips();
 			for (const auto& placement : frame.Placements)
-			{
 				requests.push_back(SpriteRequest(placement));
-			}
+			for (const auto& overlay : Overlay)
+				requests.push_back(SpriteRequest(overlay.Placement));
+		}
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
 		if (result != FrameAtlas::BeginResult::Ready || !visible) return result;
 		for (const auto& placement : frame.Placements)
-		{
-			const auto& asset = frame.Assets[placement.AssetIndex];
-			const auto view = Atlas.Resolve(SpriteRequest(placement));
-			if (!view.Texture) continue;
-			const bool solid = placement.Effect == ShapeImage::Effect::Solid || bool(placement.Glyph);
-			const auto x = std::int64_t(placement.X) + (solid ? 0 : asset.Left);
-			const auto y = std::int64_t(placement.Y) + (solid ? 0 : asset.Top);
-			if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
-			auto clipped = CursorImage::Clip(int(x), int(y), solid ? placement.SolidWidth : asset.Width,
-				solid ? placement.SolidHeight : asset.Height,
-				std::min(frame.Width, placement.ClipWidth), std::min(frame.Height, placement.ClipHeight));
-			const int trimX = std::max(0, placement.ClipLeft - clipped.X);
-			const int trimY = std::max(0, placement.ClipTop - clipped.Y);
-			clipped.X += trimX; clipped.SourceX += trimX; clipped.Width -= trimX;
-			clipped.Y += trimY; clipped.SourceY += trimY; clipped.Height -= trimY;
-			const auto canvasX = std::int64_t(clipped.X) + frame.OriginX;
-			if (clipped.Width <= 0 || clipped.Height <= 0 || canvasX < INT_MIN || canvasX > INT_MAX) continue;
-			Sprites.push_back({view.Texture, int(canvasX), clipped.Y, clipped.Width, clipped.Height,
-				view.X + clipped.SourceX, view.Y + clipped.SourceY, true,
-				view.Palette ? view.Palette : view.Texture, // Mask branch never samples the second binding.
-				placement.Glyph ? placement.TextShift : asset.Color->Values.Shift,
-				placement.Glyph ? placement.TextBits : asset.Color->Values.Bits,
-				unsigned(placement.Effect), placement.SolidColor, placement.Opacity256});
-		}
+			AppendSprite(placement, frame.OriginX, frame.Width, frame.Height);
+		// Tooltips cover the sidebar or tactical surface they were drawn on, below the cursor.
+		for (const auto& overlay : Overlay)
+			AppendSprite(overlay.Placement, overlay.OriginX, overlay.Width, overlay.Height);
 		return result;
 	}
 
@@ -673,7 +721,16 @@ void GPURender::Present()
 void GPURender::OnSidebarDraw()
 {
 	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
+	{
+		Tooltip::PublishSidebar();
 		SidebarSnapshot::CaptureAfterDraw();
+	}
+}
+
+void GPURender::OnToolTipsDrawn()
+{
+	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
+		Tooltip::PublishTopLevel();
 }
 
 void GPURender::OnCameoState(int index, bool darken, bool progress, bool completed, int stage)

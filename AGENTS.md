@@ -117,7 +117,7 @@ cmd /c scripts\test_render_capture_regression.cmd
   旧版兼容测试使用另一个 `mcp==1.25.0` 环境运行 `test_http.py`，不要相互覆盖 SDK。
 - `test_automation.cmd` 先生成 HTTPHarness 和 PNG fixtures。HTTPHarness 是端口 18743 的测试夹具，不是正式服务器。
   使用同一端口的协议测试顺序执行，不并发启动多个夹具。
-- Render 回归脚本依赖主工程生成的 shader，当前覆盖 11 项既有测试；不包含需要外部字体资产的 GlyphCacheAssetTests。
+- Render 回归脚本依赖主工程生成的 shader，当前覆盖 12 项既有测试；不包含需要外部字体资产的 GlyphCacheAssetTests。
 - GPU 同步、资源身份和帧控制等高风险行为先补关键测试；文档小改只做定向检查，不为 AGENTS 文本或生成产物写内容锁定测试。
 - 测试程序用普通权限和 `asInvoker` manifest。遇到 UAC 提示先调查 manifest／兼容性设置，不用管理员启动掩盖问题。
 - 构建失败必须停止部署与后续实机验收；确认退出码及 DLL 身份，防止用旧 DLL 得到假的通过结果。

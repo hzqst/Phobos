@@ -272,7 +272,8 @@ Render 回归脚本覆盖 11 个既有测试（含 Atlas lifetime 和 D3D12 GPU�
 GPU 开启时的证据在 `Debug/AutomationTests/game-input-scenario-gpu`。
 Tooltip 触发已在隔离遭遇战实机验证（2026-10-29，D3D12，ExtendedToolTips 关闭）：悬停 cameo
 立即出现「名称+价格」，右键后消失；页签 `204` 显示「Tip:Tab2+禁用」文本；地图建造厂经 1 秒
-延迟的 Timer 分支显示名称，三者均为 DDraw 原生截图。GPU 侧尚未绘制 tooltip。
+延迟的 Timer 分支显示名称，三者均为 DDraw 原生截图。GPU 侧绘制及 D3D12/Vulkan 同帧对照见
+[TooltipGPU.md](../src/Render/TooltipGPU.md)。
 拖框尚未通过。sidebar 实际滚动已在条目超过一页的隔离场景（建筑页 28 项）验证：滚轮和底部箭头
 使 TopRowIndex 逐行变化并在底部钳制，D3D12／Vulkan 的 ddraw 与 gpu 同帧截图一致；
 平滑滑动（IsScrolling）在该配置下未出现，未验证。详见 `src/Render/CameosGPU.md` 的滚动小节。

@@ -25,7 +25,14 @@ namespace SidebarText
 		std::uint64_t Fingerprint = 0;
 		bool Known = true;
 	};
+	enum class GlyphResult { Captured, Skipped, Failed };
 	GlyphCache::Cache& Glyphs();
+	bool BindFont();
+	// Packed engine color layout of the current ColorPacker.
+	void ColorFormat(Command& command);
+	// Resolves the glyph of a BitFont::Blit (434120) entry and fills its mask,
+	// pen, inclusive font bounds as a half-open clip and native color.
+	GlyphResult CaptureGlyph(REGISTERS* registers, Command& command);
 	void BeginItem(REGISTERS* registers);
 	void EndItem(std::uintptr_t stack);
 	void ObservePrint(REGISTERS* registers);

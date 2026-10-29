@@ -18,7 +18,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | A | 黑底 + 独立 GPU 光标 | 已实现，D3D12 实机验证 |
-| B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动已完成；资金、电力条、雷达区、命令栏、tooltip 未做 |
+| B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动、tooltip 已完成；资金、电力条、雷达区、命令栏未做 |
 | C | 地图基础（地形、坐标变换） | 未开始 |
 | D | 场景对象（建筑、SHP、步兵、载具、Voxel） | 未开始 |
 | E | 效果与其余覆盖（阴影、粒子、迷雾、菜单、影片） | 未开始 |
@@ -33,7 +33,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 - [[Sidebar 元素状态]]：每个 sidebar 元素的实现与验收状态、剩余元素盘点
 - [[Sidebar 文字与字形]]：GlyphCache、文字采集 hook、UIName 暂缓及接入方案
 - [[GPU 光标]]
-- [[Tooltip 接入要点]]：#11 结论、Automation 触发缺口、采集与发布方案
+- [[Tooltip 接入要点]]：#11 结论、Automation 触发、GPU 采集/发布实现与验收（详见 `src/Render/TooltipGPU.md`）
 - [[Automation MCP]]：工具、元数据、截图语义、使用陷阱
 - [[实机验收流程]]：隔离副本、构建部署、Spawner 场景构造、同帧截图对照方法
 - [[gamemd-reverse 交接索引]]：静态调查 issue、交接文档与提交对照

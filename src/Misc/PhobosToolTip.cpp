@@ -8,6 +8,7 @@
 #include <Ext/Surface/Body.h>
 #include <Ext/House/Body.h>
 #include <Ext/Sidebar/SWSidebar/SWSidebarClass.h>
+#include <Render/Tooltip.h>
 
 #include <sstream>
 #include <iomanip>
@@ -431,10 +432,12 @@ DEFINE_HOOK(0x478FDC, CCToolTip_Draw2_FillRect, 0x5)
 			if (isCameo)
 				SidebarClass::Instance.SidebarBackgroundNeedsRedraw = true;
 
-			pThis->FillRectTrans(pRect,
-				pData->ToolTip_Background_Color.GetEx(&RulesExt::Global()->ToolTip_Background_Color),
-				pData->ToolTip_Background_Opacity.Get(RulesExt::Global()->ToolTip_Background_Opacity)
-			);
+			const auto pColor = pData->ToolTip_Background_Color.GetEx(&RulesExt::Global()->ToolTip_Background_Color);
+			const int opacity = pData->ToolTip_Background_Opacity.Get(RulesExt::Global()->ToolTip_Background_Opacity);
+			// Read-only GPU capture of the final rectangle and fill, before drawing.
+			Tooltip::ObserveFill(R, pRect, *pColor, opacity, Phobos::Config::ToolTipBlur);
+
+			pThis->FillRectTrans(pRect, pColor, opacity);
 
 			if (Phobos::Config::ToolTipBlur)
 				pThis->BlurRect(*pRect, pData->ToolTip_Background_BlurSize.Get(RulesExt::Global()->ToolTip_Background_BlurSize));
@@ -443,6 +446,8 @@ DEFINE_HOOK(0x478FDC, CCToolTip_Draw2_FillRect, 0x5)
 		}
 	}
 
+	// The native FillRect(rect, 0) follows: opaque black.
+	Tooltip::ObserveFill(R, pRect, ColorStruct {0, 0, 0}, 100, false);
 	return 0;
 }
 

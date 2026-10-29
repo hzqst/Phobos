@@ -1,5 +1,6 @@
 #include "SidebarText.h"
 #include "SidebarSnapshot.h"
+#include "Tooltip.h"
 #include "GPURender.h"
 #include <BitFont.h>
 #include <FactoryClass.h>
@@ -194,13 +195,6 @@ namespace SidebarText
 			if (keys != Lists[tab]) { Runs[tab].clear(); Lists[tab] = std::move(keys); }
 		}
 
-		void ColorFormat(Command& command)
-		{
-			const auto& pack = Unsorted::ColorPackData;
-			command.Shift = {unsigned(pack._R_SHL), unsigned(pack._G_SHL), unsigned(pack._B_SHL)};
-			command.Bits = {unsigned(8 - pack._R_SHR), unsigned(8 - pack._G_SHR), unsigned(8 - pack._B_SHR)};
-		}
-
 		void Append(Command command)
 		{
 			auto& scope = Items.back();
@@ -216,6 +210,13 @@ namespace SidebarText
 
 	GlyphCache::Cache& Glyphs() { return Cache; }
 
+	void ColorFormat(Command& command)
+	{
+		const auto& pack = Unsorted::ColorPackData;
+		command.Shift = {unsigned(pack._R_SHL), unsigned(pack._G_SHL), unsigned(pack._B_SHL)};
+		command.Bits = {unsigned(8 - pack._R_SHR), unsigned(8 - pack._G_SHR), unsigned(8 - pack._B_SHR)};
+	}
+
 	void ClearRuns()
 	{
 		for (auto& runs : Runs) runs.clear();
@@ -230,7 +231,7 @@ namespace SidebarText
 		const auto oldGlyph = LastGlyph;
 		const auto before = Cache.Storage().GetStats();
 		const bool oldResolved = Cache.Resolve(oldGlyph) != nullptr;
-		ClearRuns(); Cache.Clear(); BoundFont = nullptr; BoundID = {}; Binding = {}; Metrics = {};
+		ClearRuns(); Tooltip::Clear(); Cache.Clear(); BoundFont = nullptr; BoundID = {}; Binding = {}; Metrics = {};
 		if (SidebarSnapshot::Trace && oldFont && LifetimeTraceCount < 32)
 		{
 			TraceLifetime("invalidate", oldFont, oldGlyph, oldResolved);
@@ -346,14 +347,14 @@ namespace SidebarText
 		if (!Prints.empty() && Prints.back().Stack == stack) Prints.pop_back();
 	}
 
-	void ObserveGlyph(REGISTERS* r)
+	bool BindFont() { return RefreshFont(); }
+
+	GlyphResult CaptureGlyph(REGISTERS* r, Command& command)
 	{
-		if (Items.empty() || Prints.empty() || !Prints.back().Accepted || r->Stack<unsigned>(0) != 0x43464D) return;
 		const auto* font = reinterpret_cast<const BitFont*>(r->ECX());
 		const auto unit = r->Stack<unsigned short>(4);
-		if (unit == 9) return; // Native tab moves the pen without a bitmap.
-		if (font != BoundFont || !Readable(font, sizeof(*font)) || !font->pGraphBuffer)
-			{ Items.back().Pending.Known = false; return; }
+		if (unit == 9) return GlyphResult::Skipped; // Native tab moves the pen without a bitmap.
+		if (font != BoundFont || !Readable(font, sizeof(*font)) || !font->pGraphBuffer) return GlyphResult::Failed;
 		const auto& data = *font->InternalPTR;
 		const auto mapped = static_cast<unsigned short>(data.SymbolTable[unit]);
 		const auto bytes = std::size_t(1) + data.Stride * data.FontHeight;
@@ -382,25 +383,35 @@ namespace SidebarText
 			if (!mapped && SidebarSnapshot::Trace && MissingTraceCount < 32)
 				Debug::Log("[SidebarTextGPU] missing sample=%u unit=%04X fontID=%llu fallback=unsupported\n",
 					++MissingTraceCount, unsigned(unit), BoundID.Value);
-			Items.back().Pending.Known = false; return;
+			return GlyphResult::Failed;
 		}
 		const auto acquired = Cache.Acquire(BoundID, mapped ? mapped - 1 : unsigned(data.Count), {record, bytes});
-		if (acquired.State != FrameCache::Status::Ready) { Items.back().Pending.Known = false; return; }
+		if (acquired.State != FrameCache::Status::Ready) return GlyphResult::Failed;
 		LastGlyph = acquired.Value->ID;
 		if (!mapped && SidebarSnapshot::Trace && MissingTraceCount < 32)
 			Debug::Log("[SidebarTextGPU] missing sample=%u unit=%04X fontID=%llu fallback=verified glyphID=%llu\n",
 				++MissingTraceCount, unsigned(unit), BoundID.Value, LastGlyph.Value);
-		Command command;
 		command.Glyph = acquired.Value->ID;
 		command.X = r->Stack<int>(8); command.Y = r->Stack<int>(12);
 		command.Width = acquired.Value->Width; command.Height = acquired.Value->Height;
 		const auto* clip = reinterpret_cast<const int*>(&font->Bounds);
 		if (!font->field_41 || !Coordinate(clip[0]) || !Coordinate(clip[1]) || !Coordinate(clip[2]) || !Coordinate(clip[3]))
-			{ Items.back().Pending.Known = false; return; }
+			return GlyphResult::Failed;
 		command.ClipLeft = clip[0]; command.ClipTop = clip[1];
 		command.ClipRight = clip[2] + 1; command.ClipBottom = clip[3] + 1;
 		const auto color = r->Stack<int>(16);
 		command.Color = (color == -1 ? font->Color : static_cast<unsigned short>(color)) ^ (mapped ? 0 : 0x5555);
+		ColorFormat(command);
+		return GlyphResult::Captured;
+	}
+
+	void ObserveGlyph(REGISTERS* r)
+	{
+		if (Items.empty() || Prints.empty() || !Prints.back().Accepted || r->Stack<unsigned>(0) != 0x43464D) return;
+		Command command;
+		const auto result = CaptureGlyph(r, command);
+		if (result == GlyphResult::Failed) Items.back().Pending.Known = false;
+		if (result != GlyphResult::Captured) return;
 		command.AfterClock = Prints.back().AfterClock;
 		Append(command);
 	}
