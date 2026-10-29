@@ -63,6 +63,6 @@
 - Spawner普通权限直进`XMP30S6.MAP`，PID41100，D3D12。用户确认countdown mask正常。日志时钟帧1–24全部clockReady=1，FrameID19–42；hover开关时frame8复用ID26，frame9复用ID27，frame12复用ID30。
 - 300次CPU采集：decoded41、hits5182、invalid0、budgetRejected0。该区间时钟正在进入新帧，新增解码／上传是预期行为，不声称实战稳定300提交零增量。
 - 300次atlas提交：R8一页4MiB，两张palette，uploads39、indexBytes118960、budgetMisses0、busy0。
-- 本轮没有触发darken/flash，未动态覆盖帧25–54、暂停／取消／完成、其他页签、滚动、超武、第二局或Vulkan。暗化／闪烁目前有混合算法与GPU回读证据，尚无本轮实战画面对照。
+- 本轮没有触发darken/flash，未动态覆盖帧25–54、暂停／取消／完成、其他页签、滚动、超武、第二局或Vulkan。暗化／闪烁目前有混合算法与GPU回读证据，尚无本轮实战画面对照。2026-10-29 滚动实机对照触发了建造中的其余图标暗化、时钟、READY和HOLD，D3D12同帧ddraw/gpu最大色差8～10，见CameosGPU.md滚动小节；完成闪烁仍无实战对照。
 
 部署DLL SHA256 `a89467f9936925d07dc1f1dcf4766f937c6f2a6aba4b3744fb89a1f358facb96`，与构建一致；备份`D:/Ra2/Phobos-backup-cameo-effects-20261028-175424/`。日志、构建记录、实际GCLOCK2帧图和spawn.ini保存在`D:/Ra2/CameoEffects-evidence-20261028-41100/`。

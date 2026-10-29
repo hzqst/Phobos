@@ -255,7 +255,9 @@ Render 回归脚本覆盖 11 个既有测试（含 Atlas lifetime 和 D3D12 GPU�
 暂停、暂停期间输入、连续三次 Step(1)、Step(5)、暂停帧号不再增长、Resume 后帧号增长
 已在 GPU Disabled 和 GPU Running 的实机运行中通过（结果文件含 `frame_control_live_passed`）。
 GPU 开启时的证据在 `Debug/AutomationTests/game-input-scenario-gpu`。
-拖框尚未通过；滚轮请求完成不代表 sidebar 实际滚动，仍需具有足够条目的场景验证。
+拖框尚未通过。sidebar 实际滚动已在条目超过一页的隔离场景（建筑页 28 项）验证：滚轮和底部箭头
+使 TopRowIndex 逐行变化并在底部钳制，D3D12／Vulkan 的 ddraw 与 gpu 同帧截图一致；
+平滑滑动（IsScrolling）在该配置下未出现，未验证。详见 `src/Render/CameosGPU.md` 的滚动小节。
 
 DDraw 已验证 GPU 关闭／开启、菜单 800×600 到游戏 1024×768 的分辨率变化、原生 PNG 像素和裁剪。
 D3D12／Vulkan independent 已验证黑色背景、sidebar／cameo／光标、连续新 Present 截图、

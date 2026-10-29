@@ -157,7 +157,7 @@ Remove-Item Env:PHOBOS_GPU_MIRROR -ErrorAction SilentlyContinue
   默认证据目录会复用；需保留历史时先复制到独立证据目录，不用旧结果证明新二进制通过。
 - 历史测试不是当前修改的验收。明确区分“实机验证”“仅编译／单测”“未实现”“受环境限制未验证”。
   另一后端、侧别、wrapper、设备故障或长期性能结论不能从一次成功泛化。
-- 截至 `28be640b`，pair／复合操作工具尚未实现；拖框及 sidebar 实际滚动未完成验收；
+- 截至 `28be640b`，pair／复合操作工具尚未实现；拖框未完成验收；sidebar 逐行滚动已实机对照，平滑滑动未验证；
   原生全屏／其他 wrapper、真实设备丢失重建、系统性 FPS 与泄漏长测仍有缺口。后续以源码和新增证据更新状态。
 - 更新对应模块文档及 `docs/Automation-MCP.md`，检查 diff，排除游戏资产、Token、存档、生成 DLL/PDB 和无关修改。
   根目录已有的 `GPURender-Progress.md`、`Launch-Phobos.cmd` 等用户文件不因本指南而自动纳入提交。

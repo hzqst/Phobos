@@ -62,3 +62,28 @@ PCX与自定义调色板分支暂时标记不支持：类型扩展任一 PCX 绑
 - 进度时钟、Countdown百分比、数量、名称、READY/HOLD、hover轮廓、暗化／闪烁均留到状态层；本批没有实现其混合或文字绘制。
 
 部署DLL SHA256 `f201f72c9204158872aee89017790b87c7e1e9080ae3b5763ec2c2ae4cde9d9a`。旧版DLL/PDB备份 `D:/Ra2/Phobos-backup-cameos-20261028-170314/`。用户验收日志、构建日志、spawn.ini及运行hook核验存于 `D:/Ra2/Cameos-evidence-20261028-36224/`。机器路径仅用于本机证据定位。
+
+## 滚动与页签实机对照（2026-10-29）
+
+隔离副本 `Debug/AutomationGame`，Spawner 直进 `Arcana troop.mpr` 派生的临时地图：地图规则把三方 36 种建筑的 Owner/RequiredHouses 放开，Prerequisite 改为 GACNST、TechLevel=1。`N`/`D` 展开 MCV 后建筑页 count=28（14 行），1024×768 下 RepeatCount 10 行、20 槽。地图及 spawn.ini/RA2MD.INI 改动均为临时，测试后已删除并恢复。DLL SHA256 `e3a1740399cffd03002ae869206ef4588e2996f3152fc208ed6c68a07647643f`（`b5920e73`，工作区仅 AGENTS.md 有非代码改动）。
+
+每组先 `game_pause`，在同一暂停帧依次取 `source=ddraw` 与 `source=gpu`，两者 simulation_frame 相同。比较区为图标格子 `(874,224)-(1006,730)`，排除未迁移的电力条列和页签按钮底边。
+
+| 场景 | D3D12（PID30136） | Vulkan（PID61060） |
+| --- | --- | --- |
+| top=0 无叠层 | 最大色差 1 | 最大色差 1 |
+| 建造中时钟 + 其余图标暗化 | 最大 8，>8 为 0 | — |
+| 滚轮逐行 top 0→1→…→4（到底钳制） | 最大 5～8，>8 为 0 | top=4 最大 1 |
+| 底部箭头按钮滚动、回到顶部 READY | 最大 8，>8 为 0 | — |
+| HOLD + 时钟在 top=2，再滚到 top=1 | >8 共 58 像素，最大 10，全部在 HOLD 图标的时钟与文字底色叠加区，随图标整行平移 | 实际 top=3→2；>8 共 142 像素，最大 10，在 HOLD 文字底色区 |
+| 切到防御页（count=8）再切回 | 防御页最大 1；切回保持 top=1 与 HOLD | — |
+
+色差来自已接受的 alpha blending/RGB565 舍入：暗化、时钟、文字底色 176/256 近似 `dst*80/256`；叠加两层时红通道差约一个 RGB565 量化步长。滚动后图标、数量位置、时钟和 READY/HOLD 的位置与原生一致，没有残留旧行。
+
+未覆盖：
+- 本配置下滚轮和箭头均整行跳变，trace 30 次采样 `scroll=0`，连拍 DDraw/GPU 也未见半行偏移。IsScrolling/Slid 的部分可见行裁剪只有 CameoLayoutTests 覆盖，无实机证据。
+- 页签按钮闪烁随时间继续（暂停时也在闪），两次截图的相位可能不同，只能作 best_effort；交替连拍时两个来源都出现过两种帧。
+- 暂停期间点一次箭头会连续滚多行；运行中单击也会滚多行。这里只记录现象，未判断原生按住重复的节奏，不计入 GPU 结论。
+- 未覆盖其他侧别、步兵/载具页滚动、数量文字滚动、超武页滚动、第二局和分辨率变化。
+
+证据：`Debug/AutomationTests/sidebar-scroll-20261029/`（`d3d12/`、`vulkan/` 下的 `native-*.png`、`pairs.jsonl`、`pairs-summary.json`、debug 日志和临时脚本副本）。
