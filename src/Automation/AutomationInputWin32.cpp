@@ -9,6 +9,7 @@
 #include <UI.h>
 #include <OwnerDraw.h>
 #include <FootClass.h>
+#include <CCToolTip.h>
 #include <Utilities/Macro.h>
 #include <atomic>
 #include <vector>
@@ -20,6 +21,7 @@ namespace Automation
 	{
 		std::atomic<bool> InputEnabled {false};
 		std::atomic<bool> VirtualCursor {false};
+		std::atomic<int> VirtualX {0}, VirtualY {0};
 		std::atomic<bool> Keys[256] {};
 		HWND EngineInputWindow = nullptr;
 		constexpr char InputWindowClass[] = "Phobos.Automation.Input";
@@ -29,6 +31,18 @@ namespace Automation
 		{
 			return message == WM_LBUTTONDOWN || message == WM_LBUTTONUP || message == WM_RBUTTONDOWN
 				|| message == WM_RBUTTONUP || message == WM_MBUTTONDOWN || message == WM_MBUTTONUP || message == WM_MOUSEWHEEL;
+		}
+		// The game's message pump calls ToolTipManager::ProcessMessage (724200)
+		// before dispatching each message. Injected moves never reach the queue
+		// and injected buttons call the WndProc directly, so they would otherwise
+		// never start, re-time or hide a tooltip. Call it exactly once here.
+		void NotifyToolTip(UINT message, WPARAM key, LPARAM position)
+		{
+			if (auto const pToolTip = CCToolTip::Instance)
+			{
+				MSG msg {Game::hWnd, message, key, position, static_cast<DWORD>(GetMessageTime()), {}};
+				pToolTip->ProcessMessage(&msg);
+			}
 		}
 		LRESULT CALLBACK InputWindowProc(HWND hwnd, UINT message, WPARAM key, LPARAM position)
 		{
@@ -41,7 +55,10 @@ namespace Automation
 					// focus-dependent OS mouse filtering. Existing Syringe patches
 					// inside the engine function (e.g. wheel hooks) still execute.
 					const auto engineProc = reinterpret_cast<WNDPROC>(0x7775C0);
-					return engineProc(Game::hWnd, message - ForwardEngineMouse, key, position);
+					const UINT engineMessage = message - ForwardEngineMouse;
+					if (engineMessage != WM_MOUSEWHEEL)
+						NotifyToolTip(engineMessage, key, position);
+					return engineProc(Game::hWnd, engineMessage, key, position);
 				}
 				return 0;
 			}
@@ -155,8 +172,10 @@ namespace Automation
 				if (!LockMouse(mutex)) return false;
 				WWMouseClass::Instance->SetCoords({x, y});
 				LastRoute = "wwmouse";
+				VirtualX = x; VirtualY = y;
 				VirtualCursor = true;
 				if (mutex) ReleaseMutex(mutex);
+				NotifyToolTip(WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
 				return true;
 			}
 			bool Key(int key, bool down) override
@@ -338,6 +357,21 @@ namespace Automation
 		return true;
 	}
 	bool NativeCursor() { return InputEnabled && VirtualCursor; }
+	bool NativeToolTipPoint(Point2D& point)
+	{
+		if (!NativeCursor()) return false;
+		point = {VirtualX, VirtualY};
+		return true;
+	}
+	Json ToolTipStatus()
+	{
+		const auto pToolTip = CCToolTip::Instance;
+		if (!pToolTip) return nullptr;
+		// Manager state only: a current tooltip is not proof that it was drawn.
+		const auto pCurrent = pToolTip->CurrentToolTip;
+		return {{"active", pToolTip->IsActive}, {"current_id", pCurrent ? Json(pCurrent->GadgetID) : Json()},
+			{"delay_ms", pToolTip->ToolTipDelay}, {"hit_point", {pToolTip->CurrentMousePosition.X, pToolTip->CurrentMousePosition.Y}}};
+	}
 	Json GameInputStatus()
 	{
 		Json held = Json::array();
@@ -363,7 +397,7 @@ namespace Automation
 			{"drag_start", Unsorted::ScenarioStarted ? Json{{"x", DisplayClass::Instance.LeftDownPosition.X}, {"y", DisplayClass::Instance.LeftDownPosition.Y}} : Json()},
 			{"os_foreground", GetForegroundWindow() == Game::hWnd}, {"held_keys", held},
 			{"queue_pending", keyboard ? Json((keyboard->Tail - keyboard->Head + 256) % 256) : Json()},
-			{"virtual_cursor", bool(VirtualCursor)}};
+			{"virtual_cursor", bool(VirtualCursor)}, {"tooltip", ToolTipStatus()}};
 	}
 }
 
@@ -390,4 +424,41 @@ DEFINE_HOOK(0x53EC90, Automation_AsyncKeyState, 0x5)
 DEFINE_HOOK(0x7BA0D0, Automation_MouseCoordinates, 0x5)
 {
 	return Automation::NativeCursor() ? 0x7BA0D9 : 0;
+}
+
+// ToolTipManager::ProcessMessage hit-tests with GetCursorPos + ScreenToClient
+// instead of the message coordinates. While the automation cursor is active,
+// substitute the same logical client point WWMouse uses. Both windows are
+// `lea ebx,[esi+10h]; push ebx; call [GetCursorPos]` followed by the
+// ScreenToClient call; skipping the whole sequence keeps the stack balanced.
+DEFINE_HOOK(0x72429E, ToolTipManager_ProcessMessage_MoveCursor_Automation, 0xA)
+{
+	enum { SkipCursorQuery = 0x7242B3 };
+
+	GET(ToolTipManager*, pThis, ESI);
+	Point2D point;
+
+	if (!Automation::NativeToolTipPoint(point))
+		return 0;
+
+	pThis->CurrentMousePosition = point;
+	R->EBX(&pThis->CurrentMousePosition);
+	return SkipCursorQuery;
+}
+
+// The delayed WM_TIMER branch must use the virtual point as well; otherwise
+// it hit-tests wherever the desktop cursor happens to be.
+DEFINE_HOOK(0x724359, ToolTipManager_ProcessMessage_TimerCursor_Automation, 0xA)
+{
+	enum { SkipCursorQuery = 0x72436E };
+
+	GET(ToolTipManager*, pThis, ESI);
+	Point2D point;
+
+	if (!Automation::NativeToolTipPoint(point))
+		return 0;
+
+	pThis->CurrentMousePosition = point;
+	R->EBX(&pThis->CurrentMousePosition);
+	return SkipCursorQuery;
 }

@@ -21,7 +21,7 @@ tags:
 | #8 | Cameo 素材、列表、绘制链 | `sidebar-cameos-gpu-handoff.md` | `194cd7f` | 已实现 |
 | #9 | Sidebar 文字、字体、字形 | `sidebar-text-gpu-handoff.md` | `b63a6fe` | 首批已实现 |
 | #10 | Cameo 图标内 UIName | `sidebar-cameo-name-gpu-handoff.md` | `3b42068` | 已交付，Phobos 侧暂缓 |
-| #11 | Tooltip 触发、文本、排版、目标 surface | `tooltip-gpu-handoff.md`（待交付） | — | 待用户执行 |
+| #11 | Tooltip 触发、文本、排版、目标 surface | `tooltip-gpu-handoff.md` | `3464e14` | 已交付，Phobos 侧待实现，见 [[Tooltip 接入要点]] |
 
 ## issue 写法
 

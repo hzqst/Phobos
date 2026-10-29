@@ -150,6 +150,12 @@ GPU 窗口隐藏／Disabled 返回明确不可用，不偷偷显示窗口；最�
   这是显式菜单适配，不是对所有对话框冒充物理键盘。其他对话框仍使用其普通键盘消息路径。
 * 滚轮投递到原始游戏窗口的 `WM_MOUSEWHEEL` 处理路径，复用原有 sidebar 命令。
   滚轮没有 WWKeyboard 环形队列编码。
+* Tooltip：游戏消息泵在 Dispatch 前调用 `ToolTipManager::ProcessMessage@724200`，但注入的
+  移动不进队列、按钮直接调用 WndProc，原本都到不了它。移动成功后同步调用一次
+  `ProcessMessage(WM_MOUSEMOVE)`，转发按钮消息前也调用一次（滚轮不调用，原版该函数对滚轮无分支）。
+  `724200` 用 `GetCursorPos`+`ScreenToClient` 命中，虚拟光标有效时由两个 hook 换成最后一次
+  虚拟移动的逻辑客户区点；延迟到期的 WM_TIMER 分支同样使用虚拟点。计时、命中、文本生成仍走原版。
+  主菜单中管理器 `IsActive=0`，通知不产生效果。
 
 结果包含 `backend: engine_queue`、`input_route: wwkeyboard/wwmouse/engine_window_queue/native_window_queue/native_dialog_navigation`、
 `injected`、`queue_drained`、`consumed: null` 和最终逻辑坐标。**队列排空不等于预期游戏效果**，
@@ -157,7 +163,9 @@ GPU 窗口隐藏／Disabled 返回明确不可用，不偷偷显示窗口；最�
 tap/click 在按下事件离开队列之后才继续释放，所有等待受 Dispatcher 超时约束。
 
 `game_status.input` 提供 `os_foreground`、引擎是否可消费输入、队列长度、实际通过
-`WWKeyboard::Down` 查询的保持键，以及活动对话框 ID。`game_focused` 是引擎自己的状态，
+`WWKeyboard::Down` 查询的保持键，以及活动对话框 ID。`input.tooltip` 给出管理器状态：
+`active`、`current_id`（当前注册区域 ID，如 cameo `1000+槽位`、页签 `203..206`、地图 `500`）、
+`delay_ms` 和最后一次命中点 `hit_point`。这只是管理器状态，`current_id` 非空不代表 tooltip 已画出。`game_focused` 是引擎自己的状态，
 与 OS 前台窗口不同。
 
 后台支持需要引擎继续运行。测试使用 windowed DirectDraw wrapper，`noactivateapp=true`。
@@ -172,6 +180,8 @@ tap/click 在按下事件离开队列之后才继续释放，所有等待受 Dis
 | `Automation_KeyState` | `53EC70..53EC75` | EAX=虚拟状态，返回 `53EC80` 的 RET | 大小、冲突、边界、ECX 参数、栈深度通过 |
 | `Automation_AsyncKeyState` | `53EC90..53EC95` | 同上，返回 `53ECA0` | 同上 |
 | `Automation_MouseCoordinates` | `7BA0D0..7BA0D5` | 返回 `7BA0D9`，读取 XY1 | 同上；两处栈深度均为 -20 |
+| `ToolTipManager_ProcessMessage_MoveCursor_Automation` | `72429E..7242A8` | 写入虚拟点、EBX=`&CurrentMousePosition`，返回 `7242B3` | 大小、冲突通过；IDA 不可用，capstone 补核边界/栈/寄存器 |
+| `ToolTipManager_ProcessMessage_TimerCursor_Automation` | `724359..724363` | 同上，返回 `72436E` | 同上 |
 
 普通模式全部 return 0。第三个 Hook 覆盖 `call 53E720`，由 SyringeEx 在 trampoline 中
 重定位。检查使用技能目录中的 `discover_hooks.py`、`check_hook_conflicts.py`，并对
@@ -182,6 +192,11 @@ IDA 中的 gamemd.exe 逐项核对；脚本自动提取遗漏的条件返回地�
 `OwnerDraw::CurrentDialogHwnd` 是布局缓存，不能替代该栈顶。
 菜单资源 226/256 及控件 1006/1670 分别由 `531F60`、`52D640` 的 WM_COMMAND 分支核实。
 未修改 YRpp。
+
+两个 tooltip Hook 各覆盖 `lea ebx,[esi+10h]; push ebx; call [GetCursorPos]` 共 10 字节，
+跳过其后的 ScreenToClient；整段跳过使栈净变化为 0，返回点之后立即以 EBX 读取坐标，ESI 自
+`724203` 起保持为 this。被覆盖字节只有绝对间接 CALL，无相对重定位。依据 gamemd-reverse #11
+`tooltip-gpu-handoff.md` §2；本机 retail `gamemd.exe`（SHA256 `7b8a0685…b94b6`）字节已核对。
 
 原始引擎窗口函数 `7775C0` 的调用约定由函数末尾 `777624: ret 10h` 核实。
 绕开 wrapper 对后台 OS 输入消息的外层过滤，仍保留原始函数内部的 Hook。
@@ -255,6 +270,9 @@ Render 回归脚本覆盖 11 个既有测试（含 Atlas lifetime 和 D3D12 GPU�
 暂停、暂停期间输入、连续三次 Step(1)、Step(5)、暂停帧号不再增长、Resume 后帧号增长
 已在 GPU Disabled 和 GPU Running 的实机运行中通过（结果文件含 `frame_control_live_passed`）。
 GPU 开启时的证据在 `Debug/AutomationTests/game-input-scenario-gpu`。
+Tooltip 触发已在隔离遭遇战实机验证（2026-10-29，D3D12，ExtendedToolTips 关闭）：悬停 cameo
+立即出现「名称+价格」，右键后消失；页签 `204` 显示「Tip:Tab2+禁用」文本；地图建造厂经 1 秒
+延迟的 Timer 分支显示名称，三者均为 DDraw 原生截图。GPU 侧尚未绘制 tooltip。
 拖框尚未通过。sidebar 实际滚动已在条目超过一页的隔离场景（建筑页 28 项）验证：滚轮和底部箭头
 使 TopRowIndex 逐行变化并在底部钳制，D3D12／Vulkan 的 ddraw 与 gpu 同帧截图一致；
 平滑滑动（IsScrolling）在该配置下未出现，未验证。详见 `src/Render/CameosGPU.md` 的滚动小节。

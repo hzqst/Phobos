@@ -33,6 +33,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 - [[Sidebar 元素状态]]：每个 sidebar 元素的实现与验收状态、剩余元素盘点
 - [[Sidebar 文字与字形]]：GlyphCache、文字采集 hook、UIName 暂缓及接入方案
 - [[GPU 光标]]
+- [[Tooltip 接入要点]]：#11 结论、Automation 触发缺口、采集与发布方案
 - [[Automation MCP]]：工具、元数据、截图语义、使用陷阱
 - [[实机验收流程]]：隔离副本、构建部署、Spawner 场景构造、同帧截图对照方法
 - [[gamemd-reverse 交接索引]]：静态调查 issue、交接文档与提交对照

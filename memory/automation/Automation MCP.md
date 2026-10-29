@@ -34,8 +34,9 @@ tags:
 - `game_status` **没有 `paused` 字段**；暂停状态看 `frame_step_enabled: true`。
 - 暂停期间 sidebar UI 仍在处理输入：暂停时点滚动箭头一样会滚动，而且一次点击会连续滚多行（运行时也一样）。
 - 页签按钮闪烁由时间驱动，暂停时也继续闪；ddraw 和 gpu 两次截图可能截到不同相位，只能按 best_effort 记录。见 [[经验 页签闪烁导致双源截图差异]]。
-- 鼠标停在 cameo 上时连 DDraw 画面都没出现 tooltip；`SetCoords` 能否触发 tooltip 待 gamemd-reverse #11 查明。
+- Tooltip（2026-10-29 已修复）：移动后和转发按钮前各同步调用一次 `ProcessMessage@724200`；hook `72429E`/`724359`（各 10 字节）在虚拟光标有效时用最后一次虚拟移动的点替代 `GetCursorPos`+`ScreenToClient`。`game_status.input.tooltip` 返回 `active`、`current_id`、`delay_ms`、`hit_point`；`current_id` 非空不代表已画出。主菜单中管理器 `active=false`，通知无效果。
 - 客户端脚本不要命名为 `mcp.py`，见 [[经验 Python 脚本名遮蔽 mcp 包]]。
+- `game_input_smoke.py` 的「desktop cursor moved」断言会被测试期间的实体鼠标移动打断；失败时先排除外部干扰再判断回归（2026-10-29 曾两次误报，基线与改动版各自重跑后通过）。
 - 测试用 Python 环境：`Debug/AutomationTests/sdk2`（`mcp==2.3.0` + Pillow），不是仓库交付物。
 
 ## 已知缺口

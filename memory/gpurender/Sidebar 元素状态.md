@@ -34,7 +34,7 @@ tags:
 | 电力条 | 左侧细条 `x≈860–872` | `PowerClass::Draw @63FB20` | SHP 状态帧，可复用 atlas |
 | 雷达区 | `(856,48)-(1024,160)` | `RadarClass::Draw @653100` | TOP 和两个按钮已做；缺阵营标志、开关动画、小地图内容（小地图依赖阶段 C） |
 | 底部命令栏 | `(0,736)-(856,768)` | `TabClass::Draw @6D0A20` 画到 Temp surface | LSPACER/LENDCAP/BTTNBKGD/RENDCAP 与命令按钮 |
-| Tooltip | 跟随鼠标 | CCToolTip `478E10..479029` | 静态调查交给 gamemd-reverse #11；Phobos ExtendedToolTips 有 9 处 hook |
+| Tooltip | 跟随鼠标 | CCToolTip `478E10..479029` | #11 已交付（`3464e14`），方案见 [[Tooltip 接入要点]]；Automation 目前无法触发新 tooltip |
 | UIName（图标内名称） | cameo 内 | `6A9BEC → 6AC480` | 暂缓：原生开关默认 0，当前配置不显示；方案见 [[Sidebar 文字与字形]] |
 | `self+5398` 可选叠层 | — | 三个 SHP `B0B478/47C/480` | 素材身份未识别 |
 | Phobos 扩展 | — | ProducingProgress `6A6EB1`、SW 侧栏、计数器 | 默认关闭 |
