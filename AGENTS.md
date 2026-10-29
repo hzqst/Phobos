@@ -162,5 +162,3 @@ Remove-Item Env:PHOBOS_GPU_MIRROR -ErrorAction SilentlyContinue
   原生全屏／其他 wrapper、真实设备丢失重建、系统性 FPS 与泄漏长测仍有缺口。后续以源码和新增证据更新状态。
 - 更新对应模块文档及 `docs/Automation-MCP.md`，检查 diff，排除游戏资产、Token、存档、生成 DLL/PDB 和无关修改。
   根目录已有的 `GPURender-Progress.md`、`Launch-Phobos.cmd` 等用户文件不因本指南而自动纳入提交。
-- 未经本次任务授权不自动提交／推送。授权后使用 `<type>(scope): <summary>`，追加
-  `Co-Authored-By: Codex <codex@openai.com>`，推送后核对本地与远端提交。
