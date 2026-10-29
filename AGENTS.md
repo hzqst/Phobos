@@ -8,6 +8,7 @@
 
 1. 读取当前分支、HEAD、`git status --short` 和相关 diff，保留已有未提交修改。
 2. 优先用可用的 memory／context-engine 获取定位线索，再亲自读取即将修改的源码和相关设计文档。
+   先查 basic-memory 项目 `phobos` 的 `GPURender 索引`。
    Windows 本地文件读取、搜索优先使用 FastCtx；语义修改使用 `apply_patch`。
 3. 多步实现先给出简短调查结论与 TODO，同一时刻只标记一项进行中；完成已授权工作，不停留在方案。
 4. 先明确本次迁移的元素、来源、线程、资源所有权、失效边界和验收场景，再改 Hook 或渲染路径。
