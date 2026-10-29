@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Windows.h>
+#include "CaptureImage.h"
+#include <memory>
 
 // Draws independent game elements on black in a secondary SDL_GPU window. The old screen
 // mirror is an opt-in diagnostic mode. SDL is only included inside src\Render, so this header
@@ -44,6 +46,12 @@ public:
 	static void OnButtonShapeChanging(const void* button);
 
 	static State GetState();
+	static void Capture(std::shared_ptr<RenderCapture::Image> image);
+	static void PollCapture();
+	static uint64_t GetPresentID(); // Successful submissions with a swapchain texture, not completed simulation.
+	static const char* GetBackend();
+	static const char* GetOutputMode();
+	static HWND GetWindowHandle();
 
 private:
 	// [Phobos] GPURender.Enable / GPURender.Driver in RA2MD.INI

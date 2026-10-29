@@ -7,6 +7,9 @@
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
 #include "FrameAtlas.h"
+#include "GPUReadback.h"
+#include <Automation/Automation.h>
+#include <Automation/AutomationFrameControl.h>
 
 #include <CCINIClass.h>
 #include <GameOptionsClass.h>
@@ -22,6 +25,9 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_video.h>
+#include <SDL3/SDL_properties.h>
+#include <chrono>
 
 #include <cstdio>
 #include <cwchar>
@@ -55,6 +61,9 @@ namespace
 	int UploadedWidth = 0, UploadedHeight = 0;
 	bool CursorDirty = false;
 	FrameAtlas Atlas;
+	GPUReadback Readback;
+	std::shared_ptr<RenderCapture::Image> PendingCapture;
+	uint64_t PresentID = 0;
 	unsigned AtlasTraceCount = 0;
 	std::uint64_t LastAtlasIndexBytes = 0, LastAtlasPaletteBytes = 0, LastAtlasDecoded = 0;
 	std::vector<PresentPass::Sprite> Sprites;
@@ -343,10 +352,14 @@ void GPURender::DisableByCommandLine()
 	DisabledByCommandLine = true;
 }
 
-#include <Automation/Automation.h>
-
 void GPURender::OnVideoModeSet()
 {
+	if (PendingCapture)
+	{
+		PendingCapture->Error = "video_mode_changed";
+		if (Device) Readback.Reset(Device, "video_mode_changed");
+		PendingCapture.reset();
+	}
 	Automation::Start();
 	SidebarSnapshot::Invalidate();
 	const int width = DSurface::WindowBounds.Width;
@@ -527,6 +540,8 @@ void GPURender::ReleaseResources()
 	if (Device)
 	{
 		SDL_WaitForGPUIdle(Device);
+		Readback.Reset(Device, "gpu_device_destroyed");
+		if (PendingCapture) { PendingCapture->Error = "gpu_device_destroyed"; PendingCapture.reset(); }
 		PresentPass::Release(Device);
 		SurfaceMirror::Release(Device);
 		ReleaseCursorResources();
@@ -552,11 +567,15 @@ void GPURender::ReleaseResources()
 
 void GPURender::Present()
 {
+	PollCapture();
 	LastPresentTime = SDL_GetTicksNS();
+	bool mirrorFresh = true;
 
 	if (MirrorMode)
 	{
-		if (SurfaceMirror::Capture(Device) == SurfaceMirror::CaptureResult::Failed)
+		const auto captured = SurfaceMirror::Capture(Device);
+		mirrorFresh = captured == SurfaceMirror::CaptureResult::Captured;
+		if (captured == SurfaceMirror::CaptureResult::Failed)
 			return Fail("Capturing the game screen");
 	}
 	else
@@ -604,6 +623,7 @@ void GPURender::Present()
 	}
 
 	bool drawn = true;
+	bool captureDrawn = false;
 	if (pSwapchainTexture)
 	{
 		drawn = MirrorMode
@@ -611,6 +631,24 @@ void GPURender::Present()
 				SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
 			: PresentPass::DrawSprites(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
 				DSurface::WindowBounds.Width, DSurface::WindowBounds.Height, Sprites);
+		if (PendingCapture && mirrorFresh && !Readback.Busy() && Readback.Begin(Device, PendingCapture,
+			SDL_GetGPUSwapchainTextureFormat(Device, SecondaryWindow::Get()), int(swapchainWidth), int(swapchainHeight)))
+		{
+			auto& image = *PendingCapture;
+			image.LogicalWidth = DSurface::WindowBounds.Width; image.LogicalHeight = DSurface::WindowBounds.Height;
+			const float scale = std::min(float(swapchainWidth) / image.LogicalWidth, float(swapchainHeight) / image.LogicalHeight);
+			const float w = image.LogicalWidth * scale, h = image.LogicalHeight * scale;
+			image.Viewport = {(swapchainWidth - w) * .5f, (swapchainHeight - h) * .5f, w, h};
+			image.SimulationFrame = Automation::GameFrameHost().CompletedFrames();
+			image.TimestampMS = uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+			image.Backend = GetBackend(); image.OutputMode = GetOutputMode(); image.Source = "gpu";
+			captureDrawn = MirrorMode
+				? PresentPass::Draw(pCommandBuffer, Readback.Target(), swapchainWidth, swapchainHeight,
+					SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
+				: PresentPass::DrawSprites(pCommandBuffer, Readback.Target(), swapchainWidth, swapchainHeight,
+					image.LogicalWidth, image.LogicalHeight, Sprites);
+			if (!captureDrawn) Readback.Reset(Device, "gpu_capture_draw_failed");
+		}
 	}
 
 	// Acquiring a swapchain texture forbids Cancel, even if beginning the render pass failed.
@@ -618,6 +656,14 @@ void GPURender::Present()
 		Fail("SDL_SubmitGPUCommandBuffer");
 	else
 	{
+		if (pSwapchainTexture) ++PresentID;
+		if (captureDrawn)
+		{
+			PendingCapture->PresentID = PresentID;
+			// Preserve Atlas's submission/fence ownership. The following copy submission
+			// runs after the offscreen draw and owns its own independent readback fence.
+			Readback.SubmitDownload(Device);
+		}
 		CursorDirty = false;
 		if (!MirrorMode) TraceAtlas();
 		if (!drawn) Fail("Drawing the GPU output", "Could not begin the render pass");
@@ -698,6 +744,7 @@ void GPURender::OnBlit()
 
 void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 {
+	PollCapture();
 	CursorTrace::Poll();
 	if (CurrentState != State::Running && CurrentState != State::Hidden)
 		return;
@@ -740,6 +787,45 @@ void CALLBACK GPURender::OnTimer(HWND, UINT, UINT_PTR, DWORD)
 		Present();
 	else
 		RequestPresent();
+}
+
+void GPURender::Capture(std::shared_ptr<RenderCapture::Image> image)
+{
+	PollCapture();
+	if (CurrentState != State::Running || !Device) { image->Error = "gpu_renderer_not_running"; return; }
+	if (PendingCapture) { image->Error = "gpu_capture_busy"; return; }
+	PendingCapture = std::move(image);
+}
+
+void GPURender::PollCapture()
+{
+	if (!PendingCapture || !Device) return;
+	int width = 0, height = 0;
+	SDL_GetWindowSizeInPixels(SecondaryWindow::Get(), &width, &height);
+	if (PendingCapture->Cancelled || CurrentState != State::Running
+		|| PendingCapture->Scene != Automation::GameFrameHost().Scene()
+		|| (Readback.Busy() && (PendingCapture->Width != width || PendingCapture->Height != height)))
+	{
+		PendingCapture->Error = "capture_invalidated_or_cancelled";
+		Readback.Reset(Device, "capture_invalidated_or_cancelled");
+		PendingCapture.reset();
+		return;
+	}
+	Readback.Poll(Device);
+	if (PendingCapture->Ready || !PendingCapture->Error.empty()) PendingCapture.reset();
+}
+
+uint64_t GPURender::GetPresentID() { return PresentID; }
+const char* GPURender::GetBackend()
+{
+	if (!Device) return "unknown";
+	const char* name = SDL_GetGPUDeviceDriver(Device);
+	return std::strcmp(name, "direct3d12") == 0 ? "D3D12" : std::strcmp(name, "vulkan") == 0 ? "Vulkan" : "unknown";
+}
+const char* GPURender::GetOutputMode() { return !Device ? "unknown" : MirrorMode ? "mirror" : "independent"; }
+HWND GPURender::GetWindowHandle()
+{
+	return Device && SecondaryWindow::Get() ? static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(SecondaryWindow::Get()), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr)) : nullptr;
 }
 
 void GPURender::SetState(State state)

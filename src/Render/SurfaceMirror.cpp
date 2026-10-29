@@ -33,13 +33,35 @@ namespace
 
 SurfaceMirror::CaptureResult SurfaceMirror::Capture(SDL_GPUDevice* pDevice)
 {
+	const int width = DSurface::WindowBounds.Width, height = DSurface::WindowBounds.Height;
+	if (width <= 0 || height <= 0) return Skip("invalid primary dimensions");
+	if (!EnsureResources(pDevice, width, height)) return CaptureResult::Failed;
+	const char* error = nullptr;
+	bool mapFailed = false;
+	const bool copied = ReadPrimary([&](const unsigned char* source, int pitch, int w, int h)
+	{
+		if (w != width || h != height) return false;
+		auto* destination = static_cast<BYTE*>(SDL_MapGPUTransferBuffer(pDevice, TransferBuffer, true));
+		if (!destination) { mapFailed = true; return false; }
+		for (int y = 0; y < h; ++y)
+			std::memcpy(destination + size_t(y) * w * 2, source + ptrdiff_t(y) * pitch, size_t(w) * 2);
+		SDL_UnmapGPUTransferBuffer(pDevice, TransferBuffer);
+		return true;
+	}, error);
+	if (!copied) return mapFailed ? CaptureResult::Failed : Skip(error ? error : "primary copy failed");
+	PendingUpload = true;
+	return CaptureResult::Captured;
+}
+
+bool SurfaceMirror::ReadPrimary(const std::function<bool(const unsigned char*, int, int, int)>& copy, const char*& error)
+{
 	DSurface* const pPrimary = DSurface::Primary;
 
 	if (!pPrimary)
-		return Skip("there is no primary surface");
+		{ error = "primary_surface_unavailable"; return false; }
 
 	if (pPrimary->GetBytesPerPixel() != BytesPerPixel)
-		return Skip("the primary surface is not 16 bit");
+		{ error = "primary_surface_not_16_bit"; return false; }
 
 	const int width = DSurface::WindowBounds.Width;
 	const int height = DSurface::WindowBounds.Height;
@@ -49,16 +71,13 @@ SurfaceMirror::CaptureResult SurfaceMirror::Capture(SDL_GPUDevice* pDevice)
 	POINT origin { 0, 0 };
 
 	if (pPrimary->GetWidth() != width || pPrimary->GetHeight() != height)
-		ClientToScreen(Game::hWnd, &origin);
+		if (!ClientToScreen(Game::hWnd, &origin)) { error = "client_origin_unavailable"; return false; }
 
 	if (width <= 0 || height <= 0 || origin.x < 0 || origin.y < 0
 		|| origin.x + width > pPrimary->GetWidth() || origin.y + height > pPrimary->GetHeight())
 	{
-		return Skip("the game area is not inside the primary surface");
+		error = "game_area_outside_primary_surface"; return false;
 	}
-
-	if (!EnsureResources(pDevice, width, height))
-		return CaptureResult::Failed;
 
 	const HANDLE hMouseMutex = MouseMutex;
 
@@ -66,30 +85,22 @@ SurfaceMirror::CaptureResult SurfaceMirror::Capture(SDL_GPUDevice* pDevice)
 	{
 		const DWORD wait = WaitForSingleObject(hMouseMutex, MouseMutexTimeoutMS);
 
-		if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
-			return Skip("the mouse mutex is busy");
+		if (wait == WAIT_ABANDONED) { ReleaseMutex(hMouseMutex); error = "mouse_mutex_abandoned"; return false; }
+		if (wait != WAIT_OBJECT_0) { error = "mouse_mutex_busy"; return false; }
 	}
 
-	CaptureResult result = CaptureResult::Skipped;
+	bool result = false;
+	error = "primary_surface_lock_failed";
 
 	if (const auto pSource = static_cast<const BYTE*>(pPrimary->Lock(origin.x, origin.y)))
 	{
 		const int pitch = pPrimary->GetPitch();
 
-		if (const auto pDestination = static_cast<BYTE*>(SDL_MapGPUTransferBuffer(pDevice, TransferBuffer, true)))
+		error = "invalid_primary_pitch";
+		if (int64_t(pitch) >= int64_t(pPrimary->GetWidth()) * 2 || -int64_t(pitch) >= int64_t(pPrimary->GetWidth()) * 2)
 		{
-			const size_t rowSize = static_cast<size_t>(width) * BytesPerPixel;
-
-			for (int y = 0; y < height; ++y)
-				std::memcpy(pDestination + y * rowSize, pSource + y * pitch, rowSize);
-
-			SDL_UnmapGPUTransferBuffer(pDevice, TransferBuffer);
-			PendingUpload = true;
-			result = CaptureResult::Captured;
-		}
-		else
-		{
-			result = CaptureResult::Failed;
+			error = "primary_copy_failed";
+			result = copy(pSource, pitch, width, height);
 		}
 
 		pPrimary->Unlock();
@@ -98,7 +109,31 @@ SurfaceMirror::CaptureResult SurfaceMirror::Capture(SDL_GPUDevice* pDevice)
 	if (hMouseMutex)
 		ReleaseMutex(hMouseMutex);
 
-	return result == CaptureResult::Skipped ? Skip("the primary surface could not be locked") : result;
+	return result;
+}
+
+bool SurfaceMirror::CapturePixels(RenderCapture::Image& image)
+{
+	image.Width = image.LogicalWidth = DSurface::WindowBounds.Width;
+	image.Height = image.LogicalHeight = DSurface::WindowBounds.Height;
+	if (!RenderCapture::ValidSize(image.Width, image.Height)) { image.Error = "capture_size_limit"; return false; }
+	std::vector<uint16_t> pixels(size_t(image.Width) * image.Height);
+	const char* error = nullptr;
+	if (!ReadPrimary([&](const unsigned char* source, int pitch, int w, int h)
+	{
+		if (w != image.Width || h != image.Height) return false;
+		for (int y = 0; y < h; ++y)
+			std::memcpy(pixels.data() + size_t(y) * w, source + ptrdiff_t(y) * pitch, size_t(w) * 2);
+		return true;
+	}, error)) { image.Error = error; return false; }
+	const auto& pack = Unsorted::ColorPackData;
+	if (!RenderCapture::Decode16(pixels, {pack._R_SHL, pack._G_SHL, pack._B_SHL},
+		{8 - pack._R_SHR, 8 - pack._G_SHR, 8 - pack._B_SHR}, image.Pixels))
+	{ image.Error = "unsupported_color_packing"; return false; }
+	image.Viewport = {0, 0, float(image.Width), float(image.Height)};
+	image.Source = "ddraw"; image.Backend = "DirectDraw"; image.OutputMode = "original";
+	image.Ready = true;
+	return true;
 }
 
 bool SurfaceMirror::HasPendingUpload()

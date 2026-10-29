@@ -22,5 +22,9 @@ cl /nologo /std:c++20 /MT /Gz /W4 /D_HAS_EXCEPTIONS=0 /DNOMINMAX /I src tests\Au
 if not "%errorlevel%"=="0" exit /b 1
 Debug\AutomationTests\FrameControlTests.exe
 if not "%errorlevel%"=="0" exit /b 1
-cl /nologo /std:c++20 /MT /Gz /W4 /D_HAS_EXCEPTIONS=0 /DNOMINMAX /I src tests\Automation\HTTPHarness.cpp src\Automation\MCPProtocol.cpp src\Automation\MCPTools.cpp src\Automation\AutomationServer.cpp /FoDebug\AutomationTests\ /FeDebug\AutomationTests\HTTPHarness.exe
+cl /nologo /std:c++20 /MT /Gz /W4 /D_HAS_EXCEPTIONS=0 /DNOMINMAX /I src tests\Automation\CaptureTests.cpp src\Automation\CaptureEncoding.cpp src\Automation\MCPProtocol.cpp src\Automation\MCPTools.cpp /FoDebug\AutomationTests\ /FeDebug\AutomationTests\CaptureTests.exe
+if not "%errorlevel%"=="0" exit /b 1
+Debug\AutomationTests\CaptureTests.exe
+if not "%errorlevel%"=="0" exit /b 1
+cl /nologo /std:c++20 /MT /Gz /W4 /D_HAS_EXCEPTIONS=0 /DNOMINMAX /I src tests\Automation\HTTPHarness.cpp src\Automation\CaptureEncoding.cpp src\Automation\MCPProtocol.cpp src\Automation\MCPTools.cpp src\Automation\AutomationServer.cpp /FoDebug\AutomationTests\ /FeDebug\AutomationTests\HTTPHarness.exe
 exit /b %errorlevel%

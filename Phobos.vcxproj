@@ -22,6 +22,9 @@
   <ItemGroup>
     <!-- src/ -->
     <ClCompile Include="src\Automation\Automation.cpp" />
+    <ClCompile Include="src\Automation\AutomationCapture.cpp" />
+    <ClCompile Include="src\Automation\CaptureEncoding.cpp" />
+    <ClCompile Include="src\Render\GPUReadback.cpp" />
     <ClCompile Include="src\Automation\AutomationDispatcher.cpp" />
     <ClCompile Include="src\Automation\AutomationFrameControl.cpp" />
     <ClCompile Include="src\Automation\FrameControlEngine.cpp" />

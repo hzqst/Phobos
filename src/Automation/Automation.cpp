@@ -3,6 +3,8 @@
 #include "AutomationDispatcher.h"
 #include "AutomationInput.h"
 #include "AutomationFrameControl.h"
+#include "AutomationCapture.h"
+#include "CaptureEncoding.h"
 #include "MCPTools.h"
 
 #include <Commands/FrameByFrame.h>
@@ -36,6 +38,7 @@ namespace Automation
 		AutomationFrameControl Frames;
 		int LastWidth = 0, LastHeight = 0;
 		bool CursorResetPending = false;
+		std::atomic<bool> CaptureWorkerBusy {false};
 		struct CachedRequest
 		{
 			std::string Signature;
@@ -48,7 +51,22 @@ namespace Automation
 		Json Execute(const std::string& name, const Json& args, const Json& meta, const std::shared_ptr<std::atomic<bool>>& disconnected)
 		{
 			AutomationDispatcher::Ticket ticket;
-			if (name != "game_status")
+			const bool screenshot = name == "game_screenshot";
+			// Bound CPU pixels and WIC scratch memory across capture and encoding.
+			struct CaptureLease
+			{
+				bool Owned = false;
+				~CaptureLease() { if (Owned) CaptureWorkerBusy = false; }
+			} captureLease;
+			if (screenshot)
+			{
+				if (!meta.is_object() || meta.value("com.phobos/instance_id", Json()) != Instance)
+					return MCPProtocol::ToolResult(AutomationDispatcher::Failure("instance_mismatch_get_game_status_first"), true);
+				if (CaptureWorkerBusy.exchange(true)) return MCPProtocol::ToolResult(AutomationDispatcher::Failure("capture_busy"), true);
+				captureLease.Owned = true;
+				ticket = Dispatcher->Submit(name, args, std::chrono::milliseconds(args.value("timeout_ms", 5000)), disconnected);
+			}
+			else if (name != "game_status")
 			{
 				if (!meta.is_object() || !meta.contains("com.phobos/instance_id") || meta["com.phobos/instance_id"] != Instance)
 					return MCPProtocol::ToolResult(AutomationDispatcher::Failure("instance_mismatch_get_game_status_first"), true);
@@ -88,6 +106,13 @@ namespace Automation
 			result["instance_id"] = Instance;
 			if (ticket) result["request_id"] = ticket->ID;
 			const bool error = result.contains("automation_error");
+			if (screenshot && !error && ticket && ticket->Image)
+			{
+				auto encoded = EncodeScreenshot(*ticket->Image, args, std::move(result));
+				if (std::chrono::steady_clock::now() >= ticket->Deadline || (disconnected && *disconnected))
+					return MCPProtocol::ToolResult(AutomationDispatcher::Failure("capture_timeout_or_disconnected"), true);
+				return encoded;
+			}
 			return MCPProtocol::ToolResult(std::move(result), error);
 		}
 
@@ -111,12 +136,12 @@ namespace Automation
 			Json status = {
 				{"process_id", GetCurrentProcessId()}, {"instance_id", Instance},
 				{"game_window_hwnd", reinterpret_cast<uintptr_t>(static_cast<HWND>(Game::hWnd))},
-				{"gpu_window_hwnd", nullptr}, {"game_phase", Phobos::IsLoadingSaveGame ? "loading" : Unsorted::ScenarioStarted ? "in_game" : "unknown"},
+				{"gpu_window_hwnd", reinterpret_cast<uintptr_t>(GPURender::GetWindowHandle())}, {"game_phase", Phobos::IsLoadingSaveGame ? "loading" : Unsorted::ScenarioStarted ? "in_game" : "unknown"},
 				{"game_active", bool(Game::IsActive)}, {"game_focused", bool(Game::IsFocused)},
 				{"windowed", bool(GameOptionsClass::WindowedMode)}, {"singleplayer", Unsorted::ScenarioStarted ? Json(SessionClass::IsSingleplayer()) : Json()},
 				{"game_width", DSurface::WindowBounds.Width}, {"game_height", DSurface::WindowBounds.Height},
-				{"gpu_state", states[static_cast<size_t>(gpu)]}, {"gpu_backend", "unknown"},
-				{"gpu_output_mode", "unknown"}, {"simulation_frame", frameHost.CompletedFrames()}, {"gpu_present_id", nullptr},
+				{"gpu_state", states[static_cast<size_t>(gpu)]}, {"gpu_backend", GPURender::GetBackend()},
+				{"gpu_output_mode", GPURender::GetOutputMode()}, {"simulation_frame", frameHost.CompletedFrames()}, {"gpu_present_id", GPURender::GetPresentID()},
 				{"scene_id", frameHost.Scene()}, {"engine_frame", Unsorted::ScenarioStarted ? Json(int(Unsorted::CurrentFrame)) : Json()},
 				{"frame_step_enabled", FrameByFrameCommandClass::FrameStep},
 				{"frame_step_pending", FrameByFrameCommandClass::FrameStepCount},
@@ -136,6 +161,7 @@ namespace Automation
 			if (Dispatcher) Dispatcher->Pump([](AutomationDispatcher::Command& command)
 			{
 				if (IsFrameOperation(command.Operation)) return Frames.Tick(command, GameFrameHost(), GetTickCount64());
+				if (command.Operation == "game_screenshot") return CaptureTick(command);
 				if (command.Operation != "game_status")
 				{
 					if (CursorResetPending) return AutomationDispatcher::Failure("cursor_reset_pending");
@@ -148,6 +174,7 @@ namespace Automation
 				return result;
 			}, [](AutomationDispatcher::Command& command)
 			{
+				if (command.Operation == "game_screenshot") return CaptureCancel(command);
 				return IsFrameOperation(command.Operation) ? Frames.Cancel(command, GameFrameHost()) : Input.Cancel(command, GameInputHost());
 			});
 		}

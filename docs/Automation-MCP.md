@@ -46,6 +46,7 @@ method/name header 对照校验，限制 body、JSON 深度、连接数和排队
 | `game_pause` | 无；等待引擎到达暂停循环后确认 |
 | `game_step` | `frames: 1..10000`, `timeout_ms: 100..28000`（默认 5000） |
 | `game_resume` | 无；等待正常逻辑帧完成后确认 |
+| `game_screenshot` | `source: ddraw/gpu`, `max_edge: 0..4096`（默认 1280）, `include_metadata`（默认 true）, `timeout_ms: 100..28000`（默认 5000）, 可选 `crop: {x,y,width,height}` |
 
 拖动每步间隔至少 16ms。坐标为原始游戏逻辑画面坐标，越界拒绝。
 保持键有 10 秒租期，超时、引擎不可用、模式/分辨率变化及退出时释放。
@@ -62,6 +63,71 @@ method/name header 对照校验，限制 body、JSON 深度、连接数和排队
 
 相同 ID、相同参数返回已排队请求的结果；相同 ID 换参数会拒绝。缓存有界，不能用作永久
 幂等存储。响应丢失时不要生成新 ID 自动重放点击。游戏重启后必须重新获取实例 ID。
+截图只要求 `com.phobos/instance_id`，每次调用创建新的 capture ID，不复用旧图片或写入输入请求缓存。
+
+## 原生截图
+
+`game_screenshot` 返回标准 MCP `ImageContent`（`image/png`、base64），另外返回 `structuredContent`。
+例如 SDK 调用的工具参数：
+
+```json
+{"source":"ddraw","max_edge":1280,"include_metadata":true,"timeout_ms":5000}
+```
+
+```json
+{"source":"gpu","max_edge":0,"crop":{"x":856,"y":0,"width":168,"height":768}}
+```
+
+裁剪坐标是**对应来源的原始图片像素**，先裁剪再缩小，不扩大图片；GPU 窗口缩放后它可能
+不同于游戏逻辑坐标。`max_edge=0` 保留原尺寸。当前源图上限为单边 4096、总计
+4096×2160 像素，编码后 PNG 上限 12 MiB。默认缩略图避免大量图片数据。
+同一时刻只允许一个截图／编码任务，竞争返回 `capture_busy`；状态、输入请求仍可执行。
+
+元数据包含 `capture_id`、`request_id`、`instance_id`、`source`、`valid_capture`、
+返回 `width/height`、`original_width/original_height`、`game_width/game_height`、
+`timestamp_unix_ms`、`simulation_frame`、`scene_id`、`gpu_present_id`、`backend`、
+`output_mode`、`cursor`、`crop` 和 `pixel_format: RGBA8`。
+`simulation_frame` 是采集时的已完成逻辑计数，不证明 Surface 恰好在该逻辑帧重绘；
+时间戳分别记录 DDraw 拷贝开始或 GPU draw 命令记录时刻，含相应 `*_semantics` 字段。
+`viewport` 是原图上的 `[x,y,width,height]`，`letterbox` 是原图的 `[left,top,right,bottom]` 边带。
+`include_metadata=false` 仅保留来源、返回尺寸、有效性和请求／实例 ID。
+服务端不写图片文件，`file_path=null`；客户端可将收到的完整 PNG 保存到本地。
+
+### DirectDraw
+
+`SurfaceMirror::ReadPrimary` 共享现有 Primary Surface 捕获处理，独立于 SDL、GPU 开关和
+`PHOBOS_GPU_MIRROR`。根据游戏客户区计算桌面型 Primary 的偏移，检查区域、16-bit 格式和
+实际 row pitch。取得 MouseMutex 后 Lock，逐行复制到 Phobos 自有缓冲区，立即 Unlock／释放锁。
+Mutex 超时、放弃的 Mutex、Surface 不可用或 Lock 失败返回 `capture_unavailable` 及具体 `reason`。
+随后根据 `Unsorted::ColorPackData` 的通道位数／偏移转换 RGBA8，支持 RGB565 和 RGB555，
+不在 PNG 编码期间保留 Surface 指针。光标语义为 `surface_contents_if_drawn`：复制 Surface
+中当时实际存在的光标，不额外叠加桌面光标；实机图像已观察到游戏光标。
+
+### SDL GPU
+
+`GPUReadback` 按需创建 COLOR_TARGET 离屏纹理，格式与当前 swapchain 一致，复用原有
+`PresentPass::Draw/DrawSprites`，使用同一批 sidebar、字体、cameo、cursor 数据及 letterbox。
+不读 swapchain 纹理，也不修改 independent／mirror 的含义。independent 的黑色地图区域是
+当前渲染器的预期输出；mirror 才包含原始 DDraw 画面。
+
+正常命令仍经原来的 `Atlas.Submit` 提交，保持 Atlas 的 fence、上传和资源生命周期。
+随后单独提交 `SDL_DownloadFromGPUTexture`，取得自己的 fence；主线程只用
+`SDL_QueryGPUFence` 非阻塞查询，完成后 Map DOWNLOAD TransferBuffer、复制并归一化
+RGBA／BGRA 字节布局。行距按 256 字节对齐，offset 为 0。取消和资源释放走 SDL 延迟销毁。
+常规截图不调用 `SDL_WaitForGPUIdle`；原有设备退出路径仍保留其全局等待。
+对应约定：[GPU 下载](https://wiki.libsdl.org/SDL3/SDL_DownloadFromGPUTexture)、
+[提交顺序及 fence](https://wiki.libsdl.org/SDL3/SDL_SubmitGPUCommandBufferAndAcquireFence)、
+[传输对齐](https://wiki.libsdl.org/SDL3/SDL_GPUTextureTransferInfo)。
+
+GPU 窗口隐藏／Disabled 返回明确不可用，不偷偷显示窗口；最小化时若取不到新的 swapchain
+帧，请求受超时约束。窗口／逻辑分辨率改变、场景变化或设备销毁会使旧读回失效。
+`gpu_present_id` 统计具有 swapchain 纹理的成功 GPU 提交，不表示显示器已经扫描输出，
+更不等同于游戏逻辑帧。截图返回时，该截图的读回 fence 已完成。
+元素透明度在原有绘制管线中完成合成；最终黑色背景是不透明的，返回 PNG 的 alpha 为 255。
+
+两种来源的 PNG 都在 HTTP 工具工作线程通过系统 WIC 编码，无额外第三方编解码运行时。
+编码只读取不可变的自有像素，不访问引擎、SDL 或 Surface。WIC 内部编码不支持中途取消，
+完成后会再次检查请求截止时间和客户端断开状态，过期图片不会作为成功结果返回。
 
 ## 内部输入路径
 
@@ -149,6 +215,32 @@ $env:PHOBOS_TEST_SCENARIO = '1'
 Standalone EXE 嵌入 `asInvoker` manifest，无需管理员权限。
 测试覆盖协议、Dispatcher 以及按键时序/租期/取消/队列容量/鼠标三元素环绕/抑制事件。
 Python 标准 MCP SDK 2.3.0 运行实际 HTTP 客户端，另有 SDK 1.25.0 兼容测试环境。
+两套 SDK 已验证 PNG `ImageContent`，包含 2026-07-28 和 2025-11-25 路径。
+
+截图测试：
+
+```powershell
+cmd /c scripts\test_automation.cmd
+& .\Debug\AutomationTests\sdk2\Scripts\python.exe tests\Automation\test_capture_pixels.py
+cmd /c scripts\test_gpu_capture.cmd direct3d12
+cmd /c scripts\test_gpu_capture.cmd vulkan
+cmd /c scripts\test_render_capture_regression.cmd
+$env:PHOBOS_TEST_SCENARIO = '1'
+$env:PHOBOS_TEST_CAPTURE = '1'
+$env:PHOBOS_TEST_GPU = '1' # 0 验证关闭 GPU 时 DDraw
+$env:PHOBOS_TEST_DRIVER = 'vulkan' # 或 direct3d12
+$env:PHOBOS_TEST_CAPTURE_COUNT = '5' # 有界 1..50 次
+& .\Debug\AutomationTests\sdk2\Scripts\python.exe tests\Automation\game_input_smoke.py
+# mirror 测试另设 PHOBOS_GPU_MIRROR=1；完成后清除该环境变量。
+```
+
+GPU 测试脚本从 `Debug/AutomationGame` 或 `Debug` 查找已有 SDL3.dll；未提供 DLL 时需先放置
+与仓库 headers 相符的 x86 SDL3。实机脚本只临时修改隔离副本的 `GPURender.Driver`，退出后恢复。
+`CaptureTests` 验证 RGB565／555、非法位域、裁剪及 WIC 编码，Python/Pillow 独立验证确切像素。
+`GPUReadbackLifetimeTests` 验证 fence 未完成禁止 Map、竞争、取消及分配／Map／提交失败释放。
+真实 D3D12／Vulkan 测试验证 RGBA／BGRA、非对齐宽度、16 次完整资源循环和提交后取消。
+Render 回归脚本覆盖 11 个既有测试（含 Atlas lifetime 和 D3D12 GPU）；不含需要外部字体资产的
+`GlyphCacheAssetTests`。既有 ShapeImage/YRpp 测试编译仍有类型转换／未使用参数等警告。
 
 实机测试启动自己的小窗口，把游戏放到后台后再发请求；不会把游戏激活作为输入前提。
 证据截图通过临时 `SWP_NOACTIVATE` 置顶显示游戏取得，是诊断图，**不是 MCP 原生截图**。
@@ -165,8 +257,20 @@ Python 标准 MCP SDK 2.3.0 运行实际 HTTP 客户端，另有 SDK 1.25.0 兼�
 GPU 开启时的证据在 `Debug/AutomationTests/game-input-scenario-gpu`。
 拖框尚未通过；滚轮请求完成不代表 sidebar 实际滚动，仍需具有足够条目的场景验证。
 
-尚未实现 DDraw/GPU 原生截图、pair 与复合工具；
-`gpu_present_id` 等未接入字段仍为 null。正式 MCP ImageContent、
-GPU readback 和不同 GPU 后端验证均未完成。请勿把此阶段菜单输入验证当作整个 MCP 项目验收。
+DDraw 已验证 GPU 关闭／开启、菜单 800×600 到游戏 1024×768 的分辨率变化、原生 PNG 像素和裁剪。
+D3D12／Vulkan independent 已验证黑色背景、sidebar／cameo／光标、连续新 Present 截图、
+窗口缩放／letterbox、关闭 GPU 展示窗口后明确拒绝 GPU 截图且 DDraw 继续可用。
+原生 PNG 文件名为 `native-*.png`，与诊断桌面图分开保存。
+证据目录为 `Debug/AutomationTests/game-input-scenario[-gpu-direct3d12|-gpu-vulkan]`，
+mirror 模式追加 `-mirror`。mirror 的不同时间采样只做 best-effort 像素对比：允许 UNORM
+转换的 1 级色差和极少量渲染动画变化，不把相同逻辑帧号当成严格图像同步。
+截图后的菜单正常退出已验证，证据在 `Debug/AutomationTests/game-input-native-gpu-direct3d12`。
+当前 D3D12 环境在请求最小化后仍可产生新截图，未据此宣称实机超时测试通过；
+截止时间／取消清理由 Dispatcher 和 GPUReadback 的确定性测试覆盖。
+
+尚未实现 pair 与复合工具、自动保存服务端完整图像。原生全屏 DirectDraw／其他 wrapper、
+真实设备丢失／重建中截图、驱动异常时的最长阻塞时间和系统性 FPS／内存泄漏长测未完成。
+设备销毁／失败的资源释放当前有独立测试，不能代替全部真实驱动故障验证。
+请勿把此阶段截图验证当作整个 MCP 项目最终验收。
 
 关闭方式：移除 `-PhobosAutomation`，按原来的方式启动 Phobos。

@@ -5,6 +5,8 @@ No installed game files or saves are modified. No test is marked consumed based
 solely on queue drain; inspect the captured menu states separately.
 """
 import asyncio
+import base64
+import io
 import ctypes
 from ctypes import wintypes
 import json
@@ -18,15 +20,23 @@ import time
 import httpx2
 from mcp import Client, types
 from mcp.client.streamable_http import streamable_http_client
-from PIL import ImageGrab
+from PIL import Image, ImageChops, ImageGrab
 
 ROOT = Path(__file__).resolve().parents[2]
 GAME = ROOT / "Debug/AutomationGame"
 SCENARIO = os.environ.get("PHOBOS_TEST_SCENARIO") == "1"
 GPU = os.environ.get("PHOBOS_TEST_GPU") == "1"
+CAPTURE = os.environ.get("PHOBOS_TEST_CAPTURE") == "1"
+DRIVER = os.environ.get("PHOBOS_TEST_DRIVER", "")
+assert DRIVER in ("", "direct3d12", "vulkan")
+MIRROR = os.environ.get("PHOBOS_GPU_MIRROR") == "1"
 OUT = ROOT / ("Debug/AutomationTests/game-input-scenario" if SCENARIO else "Debug/AutomationTests/game-input-native")
 if GPU:
     OUT = OUT.with_name(OUT.name + "-gpu")
+if DRIVER:
+    OUT = OUT.with_name(OUT.name + "-" + DRIVER)
+if MIRROR:
+    OUT = OUT.with_name(OUT.name + "-mirror")
 URL = "http://127.0.0.1:18742/mcp"
 user = ctypes.WinDLL("user32", use_last_error=True)
 user.SetProcessDPIAware()
@@ -57,6 +67,7 @@ user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user.IsWindowVisible.argtypes = [wintypes.HWND]
 user.IsIconic.argtypes = [wintypes.HWND]
 kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel.WritePrivateProfileStringW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR]
 kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel.OpenProcess.restype = wintypes.HANDLE
 kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
@@ -141,6 +152,26 @@ async def exercise(token):
             OWN_PID = state["process_id"]
             hwnd = state["game_window_hwnd"]
             instance = state["instance_id"]
+            async def screenshot(source, tag, **options):
+                result = await client.call_tool("game_screenshot", {"source": source, "max_edge": 0, **options},
+                    meta={"com.phobos/instance_id": instance})
+                data = result.model_dump(by_alias=True)
+                assert not data["isError"], data
+                images = [item for item in result.content if isinstance(item, types.ImageContent)]
+                assert len(images) == 1 and images[0].mime_type == "image/png"
+                png = base64.b64decode(images[0].data, validate=True)
+                decoded = Image.open(io.BytesIO(png)).convert("RGBA")
+                metadata = data["structuredContent"]
+                assert decoded.size == (metadata["width"], metadata["height"])
+                assert metadata["source"] == source and metadata["valid_capture"]
+                assert metadata["timestamp_unix_ms"] > 0
+                if source == "ddraw" or tag != "menu":
+                    assert len(decoded.getcolors(decoded.width * decoded.height) or []) > 8, "capture has no meaningful pixel variation"
+                assert decoded.getchannel("A").getextrema() == (255,255)
+                (OUT / f"native-{tag}-{source}.png").write_bytes(png)
+                evidence.append({"native_capture": metadata, "png_bytes": len(png)})
+                (OUT / "results.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+                return decoded, metadata
             assert state["automation_enabled"] and state["gpu_state"] in ({"Running", "Hidden"} if GPU else {"Disabled"}), state
             await asyncio.sleep(8)
             state = await status()
@@ -186,6 +217,10 @@ async def exercise(token):
                 await act("game_key", {"key": "ESC", "action": "tap"})
                 await asyncio.sleep(.5)
             picture(hwnd, "00-menu-after-intro")
+            if CAPTURE:
+                await screenshot("ddraw", "menu")
+                if GPU:
+                    await screenshot("gpu", "menu")
             # A test-owned tiny window establishes a controlled background case.
             # Never activate the game or send any desktop input.
             WITNESS = user.CreateWindowExW(0, "STATIC", "Phobos background input test", 0x80000000,
@@ -251,6 +286,70 @@ async def exercise(token):
                     return data["structuredContent"]
 
                 await frame_call("game_pause", {})
+                if CAPTURE:
+                    ddraw, ddraw_meta = await screenshot("ddraw", "paused")
+                    cropped, _ = await screenshot("ddraw", "crop", crop={"x": 220, "y": 210, "width": 400, "height": 240}, max_edge=200)
+                    assert cropped.size == (200, 120)
+                    if GPU:
+                        gpu_image, gpu_meta = await screenshot("gpu", "paused")
+                        assert gpu_meta["simulation_frame"] == ddraw_meta["simulation_frame"]
+                        assert gpu_meta["output_mode"] == ("mirror" if MIRROR else "independent")
+                        if DRIVER:
+                            assert gpu_meta["backend"] == {"vulkan": "Vulkan", "direct3d12": "D3D12"}[DRIVER]
+                        core = (220, 210, 620, 450)
+                        if MIRROR:
+                            difference = ImageChops.difference(ddraw.crop(core).convert("RGB"), gpu_image.crop(core).convert("RGB"))
+                            # UNORM conversion can differ by one; render-only particles can
+                            # change between two calls even while simulation is paused.
+                            changed = sum(max(pixel) > 1 for pixel in difference.getdata())
+                            fraction = changed / (difference.width * difference.height)
+                            evidence.append({"mirror_core_fraction_over_one": fraction, "synchronization": "best_effort"})
+                            assert fraction <= .001, "mirror differs beyond UNORM rounding and sparse render-only updates"
+                        else:
+                            assert gpu_image.crop(core).convert("RGB").getbbox() is None, "DDraw map leaked into independent output"
+                            assert ddraw.crop(core).convert("RGB").getbbox() is not None
+                        previous = gpu_meta["gpu_present_id"]
+                        count = min(50, max(1, int(os.environ.get("PHOBOS_TEST_CAPTURE_COUNT", "5"))))
+                        durations = []
+                        for index in range(count):
+                            before = time.monotonic()
+                            _, metadata = await screenshot("gpu", f"repeat-{index}", max_edge=640)
+                            durations.append(time.monotonic() - before)
+                            assert metadata["gpu_present_id"] > previous
+                            previous = metadata["gpu_present_id"]
+                        evidence.append({"capture_repeat_seconds": durations})
+                        gpu_hwnd = (await status())["gpu_window_hwnd"]
+                        assert user.SetWindowPos(gpu_hwnd, None, 0, 0, 900, 700, 0x16) # NOACTIVATE, NOMOVE, NOZORDER
+                        await asyncio.sleep(.3)
+                        resized, metadata = await screenshot("gpu", "resized")
+                        rect = wintypes.RECT(); assert user.GetClientRect(gpu_hwnd, ctypes.byref(rect))
+                        assert resized.size == (rect.right, rect.bottom)
+                        assert any(value > 0 for value in metadata["letterbox"]), metadata
+                        if metadata["letterbox"][1] >= 1:
+                            assert resized.crop((0,0,resized.width,1)).convert("RGB").getbbox() is None
+                        user.ShowWindow(gpu_hwnd, 7) # SW_SHOWMINNOACTIVE
+                        await asyncio.sleep(.2)
+                        before = time.monotonic()
+                        timed = (await client.call_tool("game_screenshot", {"source":"gpu", "timeout_ms":200},
+                            meta={"com.phobos/instance_id":instance})).model_dump(by_alias=True)
+                        assert time.monotonic() - before < 2, timed["structuredContent"]
+                        # Some drivers keep supplying a swapchain image after minimization.
+                        # A fresh completed capture is valid; do not manufacture a timeout.
+                        if not timed["isError"]:
+                            assert timed["structuredContent"]["gpu_present_id"] > metadata["gpu_present_id"]
+                        evidence.append({"minimize_request_iconic": bool(user.IsIconic(gpu_hwnd)),
+                            "minimize_capture_is_error": timed["isError"], "minimize_capture": timed["structuredContent"]})
+                        user.ShowWindow(gpu_hwnd, 4) # SW_SHOWNOACTIVATE
+                        await asyncio.sleep(.3)
+                        await screenshot("gpu", "after-restore")
+                        # Close only the test's SDL presentation window. DDraw capture must survive.
+                        user.PostMessageW(gpu_hwnd, 0x0010, 0, 0)
+                        await asyncio.sleep(.3)
+                        hidden = (await client.call_tool("game_screenshot", {"source":"gpu", "timeout_ms":500},
+                            meta={"com.phobos/instance_id":instance})).model_dump(by_alias=True)
+                        assert hidden["isError"] and hidden["structuredContent"]["reason"] == "gpu_renderer_not_running", hidden
+                        await screenshot("ddraw", "gpu-hidden")
+                        evidence.append({"hidden_gpu_rejected": True, "ddraw_after_gpu_hidden": True})
                 stopped = (await status())["simulation_frame"]
                 await asyncio.sleep(.3)
                 assert stopped == (await status())["simulation_frame"], "pause did not stop simulation"
@@ -333,6 +432,10 @@ if __name__ == "__main__":
         if probe.connect_ex(("127.0.0.1", 18742)) == 0:
             raise RuntimeError("port 18742 already occupied; no game launched")
     token = secrets.token_hex(32)
+    ini = GAME / "RA2MD.INI"
+    original_ini = ini.read_bytes() if DRIVER else None
+    if DRIVER:
+        assert kernel.WritePrivateProfileStringW("Phobos", "GPURender.Driver", DRIVER, str(ini))
     # Do not activate the game: native automation must not need foreground.
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -374,3 +477,5 @@ if __name__ == "__main__":
                         kernel.TerminateProcess(handle, 1)
                 finally:
                     kernel.CloseHandle(handle)
+        if original_ini is not None:
+            ini.write_bytes(original_ini)

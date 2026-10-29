@@ -8,6 +8,8 @@
 #include <memory>
 #include <mutex>
 
+namespace RenderCapture { struct Image; }
+
 namespace Automation
 {
 	// The network owns no engine references. Commands and results own all data.
@@ -21,6 +23,7 @@ namespace Automation
 			std::string Instance, Operation;
 			Json Arguments;
 			Json Progress; // Accessed only by the main-thread handler.
+			std::shared_ptr<RenderCapture::Image> Image;
 			std::chrono::steady_clock::time_point Deadline;
 			std::mutex Mutex;
 			std::condition_variable Complete;

@@ -1,4 +1,6 @@
 #pragma once
+#include "CaptureImage.h"
+#include <functional>
 
 struct SDL_GPUDevice;
 struct SDL_GPUCopyPass;
@@ -18,6 +20,7 @@ public:
 	};
 
 	static CaptureResult Capture(SDL_GPUDevice* pDevice);
+	static bool CapturePixels(RenderCapture::Image& image);
 	static bool HasPendingUpload();
 	static void Upload(SDL_GPUCopyPass* pCopyPass);
 	static void Release(SDL_GPUDevice* pDevice);
@@ -27,6 +30,7 @@ public:
 	static int GetHeight();
 
 private:
+	static bool ReadPrimary(const std::function<bool(const unsigned char*, int, int, int)>& copy, const char*& error);
 	static bool EnsureResources(SDL_GPUDevice* pDevice, int width, int height);
 	static CaptureResult Skip(const char* pReason);
 

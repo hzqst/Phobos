@@ -1,5 +1,6 @@
 """Run against the native x86 fixture; requires mcp==2.3.0 (or 1.25.0 for legacy)."""
 import asyncio
+import base64
 import importlib.metadata
 import json
 import os
@@ -14,6 +15,16 @@ import urllib.request
 URL = "http://127.0.0.1:18743/mcp"
 TOKEN = secrets.token_hex(32)
 
+def check_image(result):
+    from mcp.types import ImageContent
+    images = [item for item in result.content if isinstance(item, ImageContent)]
+    assert len(images) == 1
+    data = images[0].model_dump(by_alias=True)
+    assert data["mimeType"] == "image/png"
+    png = base64.b64decode(data["data"], validate=True)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert png[16:24] == b"\x00\x00\x00\x01\x00\x00\x00\x01"
+
 
 async def sdk_tests():
     if importlib.metadata.version("mcp").startswith("2."):
@@ -25,12 +36,13 @@ async def sdk_tests():
                 async with Client(streamable_http_client(URL, http_client=http), mode=mode) as client:
                     assert version == client.protocol_version
                     tools = await client.list_tools()
-                    assert ["game_status"] == [t.name for t in tools.tools]
+                    assert tools.tools[0].name == "game_status" and tools.tools[-1].name == "game_screenshot"
                     result = await client.call_tool("game_status", {})
                     data = result.model_dump(by_alias=True)
                     assert "protocol-test" == data["structuredContent"]["instance_id"]
                     assert "text" == data["content"][0]["type"]
-            print(f"SDK 2.3.0 {version}: discover/initialize, list, call PASS")
+                    check_image(await client.call_tool("game_screenshot", {"source":"ddraw"}))
+            print(f"SDK 2.3.0 {version}: discover/initialize, list, call, PNG ImageContent PASS")
     else:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
@@ -38,10 +50,11 @@ async def sdk_tests():
             async with ClientSession(read, write) as client:
                 init = await client.initialize()
                 assert "2025-11-25" == init.protocolVersion
-                assert ["game_status"] == [t.name for t in (await client.list_tools()).tools]
+                assert "game_screenshot" in [t.name for t in (await client.list_tools()).tools]
                 result = await client.call_tool("game_status", {})
                 assert "protocol-test" == result.structuredContent["instance_id"]
-        print("SDK 1.25.0 2025-11-25 initialize, list, call PASS")
+                check_image(await client.call_tool("game_screenshot", {"source":"ddraw"}))
+        print("SDK 1.25.0 2025-11-25 initialize, list, call, PNG ImageContent PASS")
 
 
 def negative_tests():
