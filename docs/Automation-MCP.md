@@ -281,6 +281,8 @@ Tooltip 触发已在隔离遭遇战实机验证（2026-10-29，D3D12，ExtendedT
 见 [CreditsGPU.md](../src/Render/CreditsGPU.md)。
 雷达开关动画约 64ms 一帧，比一次截图还快，三张截图只能证明顺序；像素对照改为交替连拍，
 把 ddraw 帧汇成池后逐张查找 gpu 的完全相同帧，见 [RadarGPU.md](../src/Render/RadarGPU.md)。
+按钮按下状态需要按住鼠标：发起起止同点的长 `game_mouse_drag`，在拖动期间暂停并截图，
+见 [CommandBarGPU.md](../src/Render/CommandBarGPU.md)。
 拖框尚未通过。sidebar 实际滚动已在条目超过一页的隔离场景（建筑页 28 项）验证：滚轮和底部箭头
 使 TopRowIndex 逐行变化并在底部钳制，D3D12／Vulkan 的 ddraw 与 gpu 同帧截图一致；
 平滑滑动（IsScrolling）在该配置下未出现，未验证。详见 `src/Render/CameosGPU.md` 的滚动小节。

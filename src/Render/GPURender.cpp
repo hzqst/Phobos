@@ -6,6 +6,7 @@
 #include "CursorTrace.h"
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
+#include "CommandBarSnapshot.h"
 #include "Tooltip.h"
 #include "FrameAtlas.h"
 #include "GPUReadback.h"
@@ -68,14 +69,16 @@ namespace
 	unsigned AtlasTraceCount = 0;
 	std::uint64_t LastAtlasIndexBytes = 0, LastAtlasPaletteBytes = 0, LastAtlasDecoded = 0;
 	std::vector<PresentPass::Sprite> Sprites;
-		FrameAtlas::Request SpriteRequest(const SidebarSnapshot::Placement& placement)
+		// Text and solid placements carry their own data; shapes index the owner's assets.
+		FrameAtlas::Request SpriteRequest(const SidebarSnapshot::Placement& placement,
+			const SidebarSnapshot::Asset* assets = SidebarSnapshot::Current.Assets.data())
 		{
 			if (placement.Glyph)
 			{
 				const auto* glyph = SidebarText::Glyphs().Resolve(placement.Glyph);
 				return {glyph ? glyph->Storage : FrameCache::FrameID {}, {}, FrameAtlas::SourceKind::Mask, &SidebarText::Glyphs().Storage()};
 			}
-			const auto& asset = SidebarSnapshot::Current.Assets[placement.AssetIndex];
+			const auto& asset = assets[placement.AssetIndex];
 			return {asset.ID, asset.Color};
 		}
 
@@ -99,10 +102,11 @@ namespace
 			}
 	}
 
-	void AppendSprite(const SidebarSnapshot::Placement& placement, int originX, int width, int height)
+	void AppendSprite(const SidebarSnapshot::Placement& placement, int originX, int width, int height,
+		const SidebarSnapshot::Asset* assets = SidebarSnapshot::Current.Assets.data())
 	{
-		const auto& asset = SidebarSnapshot::Current.Assets[placement.AssetIndex];
-		const auto view = Atlas.Resolve(SpriteRequest(placement));
+		const auto& asset = assets[placement.AssetIndex];
+		const auto view = Atlas.Resolve(SpriteRequest(placement, assets));
 		if (!view.Texture) return;
 		const bool solid = placement.Effect == ShapeImage::Effect::Solid || bool(placement.Glyph);
 		// Captured text commands carry the engine's packed layout; other solids use the sidebar palette's.
@@ -132,20 +136,31 @@ namespace
 		Sprites.clear();
 		Overlay.clear();
 		const auto& frame = SidebarSnapshot::Current;
+		const auto& bar = CommandBarSnapshot::Current;
 		const bool visible = frame.Visible && SidebarSnapshot::Eligible();
+		const bool barVisible = bar.Visible && CommandBarSnapshot::Eligible();
 		std::vector<FrameAtlas::Request> requests;
+		if (barVisible)
+			for (const auto& placement : bar.Placements)
+				requests.push_back(SpriteRequest(placement, bar.Assets.data()));
 		if (visible)
-		{
-			CollectTooltips();
 			for (const auto& placement : frame.Placements)
 				requests.push_back(SpriteRequest(placement));
+		if (visible || barVisible)
+		{
+			CollectTooltips();
 			for (const auto& overlay : Overlay)
 				requests.push_back(SpriteRequest(overlay.Placement));
 		}
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
-		if (result != FrameAtlas::BeginResult::Ready || !visible) return result;
-		for (const auto& placement : frame.Placements)
-			AppendSprite(placement, frame.OriginX, frame.Width, frame.Height);
+		if (result != FrameAtlas::BeginResult::Ready) return result;
+		// Composite and the sidebar do not overlap; the bar keeps Tab's order before the sidebar.
+		if (barVisible)
+			for (const auto& placement : bar.Placements)
+				AppendSprite(placement, bar.OriginX, bar.Width, bar.Height, bar.Assets.data());
+		if (visible)
+			for (const auto& placement : frame.Placements)
+				AppendSprite(placement, frame.OriginX, frame.Width, frame.Height);
 		// Tooltips cover the sidebar or tactical surface they were drawn on, below the cursor.
 		for (const auto& overlay : Overlay)
 			AppendSprite(overlay.Placement, overlay.OriginX, overlay.Width, overlay.Height);
@@ -395,6 +410,7 @@ void GPURender::OnVideoModeSet()
 	}
 	Automation::Start();
 	SidebarSnapshot::Invalidate();
+	CommandBarSnapshot::Invalidate();
 	const int width = DSurface::WindowBounds.Width;
 	const int height = DSurface::WindowBounds.Height;
 
@@ -497,6 +513,7 @@ void GPURender::Initialize(int width, int height)
 	char mirror[2] {};
 	MirrorMode = GetEnvironmentVariableA("PHOBOS_GPU_MIRROR", mirror, sizeof(mirror)) == 1 && mirror[0] == '1';
 	SidebarSnapshot::InitializeTrace();
+	CommandBarSnapshot::InitializeTrace();
 	Debug::Log("[GPURender] Output: %s.\n", MirrorMode ? "diagnostic CPU mirror" : "black background + GPU sidebar + GPU cursor");
 
 	if (!SDLLoader::Load())
@@ -580,6 +597,7 @@ void GPURender::ReleaseResources()
 		ReleaseCursorResources();
 		Atlas.Release();
 		SidebarSnapshot::Invalidate();
+		CommandBarSnapshot::Invalidate();
 
 		if (WindowClaimed)
 		{
@@ -709,6 +727,8 @@ void GPURender::OnSidebarDraw()
 	{
 		Tooltip::PublishSidebar();
 		SidebarSnapshot::CaptureAfterDraw();
+		// Independent of the sidebar's own readiness; shares this capture's palette copies.
+		CommandBarSnapshot::CaptureAfterDraw();
 	}
 }
 
@@ -727,6 +747,7 @@ void GPURender::OnCameoState(int index, bool darken, bool progress, bool complet
 void GPURender::InvalidateSidebar(bool resources)
 {
 	SidebarSnapshot::Invalidate();
+	CommandBarSnapshot::Invalidate();
 	if (resources)
 	{
 		ShapeFrameSource::Clear();
@@ -752,6 +773,7 @@ void GPURender::InvalidateSidebarPalette()
 {
 	// Color-table lifetime changes do not change immutable SHP indices or FrameIDs.
 	SidebarSnapshot::Invalidate();
+	CommandBarSnapshot::Invalidate();
 	SidebarSnapshot::LowerButtonsReady = false;
 	SidebarSnapshot::RadarButtonsReady = false;
 }
@@ -759,7 +781,10 @@ void GPURender::InvalidateSidebarPalette()
 void GPURender::OnShapeInvalidating(const void* shape)
 {
 	if (ShapeFrameSource::Invalidate(reinterpret_cast<std::uintptr_t>(shape)))
+	{
 		SidebarSnapshot::Invalidate();
+		CommandBarSnapshot::Invalidate();
+	}
 }
 
 void GPURender::OnButtonShapeChanging(const void* object)
@@ -770,6 +795,11 @@ void GPURender::OnButtonShapeChanging(const void* object)
 	if (std::find(std::begin(SidebarSnapshot::ButtonObjects), std::end(SidebarSnapshot::ButtonObjects),
 		reinterpret_cast<std::uintptr_t>(object)) != std::end(SidebarSnapshot::ButtonObjects))
 		SidebarSnapshot::Invalidate();
+	const auto address = reinterpret_cast<std::uintptr_t>(object);
+	if (address == CommandBarSnapshot::ExpandedThumb || address == CommandBarSnapshot::CollapsedThumb
+		|| (address >= CommandBarSnapshot::CommandObjects
+			&& address < CommandBarSnapshot::CommandObjects + CommandBarSnapshot::CommandCount * sizeof(ShapeButtonClass)))
+		CommandBarSnapshot::Invalidate();
 }
 
 void GPURender::RequestPresent()
