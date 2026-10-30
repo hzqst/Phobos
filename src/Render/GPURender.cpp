@@ -151,8 +151,12 @@ namespace
 			for (const auto& placement : terrain.Placements)
 				requests.push_back(TerrainPass::Request(placement));
 			if (OverlaySnapshot::Current.Visible)
+			{
 				for (const auto& draw : OverlaySnapshot::Current.Draws)
 					requests.push_back(TerrainPass::Request(draw));
+				for (const auto& draw : OverlaySnapshot::Current.CompositeDraws)
+					requests.push_back(TerrainPass::Request(draw));
+			}
 			ABufferPass::AppendRequests(ABufferSnapshot::Current, requests);
 		}
 		if (barVisible)

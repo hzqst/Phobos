@@ -33,6 +33,8 @@ namespace TerrainPass
 		SDL_GPUGraphicsPipeline* TilePipelines[2] {};
 		// Overlay bodies and their shadows, both testing strictly smaller depths and writing them.
 		SDL_GPUGraphicsPipeline* ShapePipelines[2] {};
+		// The same for mode 2's animated Terrain (2E00, 2E01), which tests depths without writing them.
+		SDL_GPUGraphicsPipeline* LayerPipelines[2] {};
 		SDL_GPUGraphicsPipeline* CompositePipeline = nullptr;
 		SDL_GPUTextureFormat DepthFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
 		SDL_GPUTexture* TableTexture = nullptr;
@@ -44,8 +46,9 @@ namespace TerrainPass
 		// The tile images, then one instance that draws the tactical target onto the canvas.
 		InstanceBuffer Tiles;
 		std::vector<TerrainBatch::Run> Runs;
-		// Overlay runs follow the tile runs; their Depth marks shadows.
-		std::vector<TerrainBatch::Run> ShapeRuns;
+		// Overlay runs follow the tile runs, and 6D8DB0's runs on Composite follow them; their Depth
+		// marks shadows.
+		std::vector<TerrainBatch::Run> ShapeRuns, LayerRuns;
 		StorageBuffer<TerrainBatch::Shape> Shapes;
 		// The Z shape bytes of the overlays, four to a word.
 		StorageBuffer<std::uint32_t> ZBytes;
@@ -155,10 +158,15 @@ namespace TerrainPass
 		darken.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 		darken.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
 		ShapePipelines[1] = CreatePipeline(device, shape, 3, darken, &depth, DepthFormat, 2);
+		// Composite starts as Tile's copy with Tile's ZBuffer; 2E00 and 2E01 only test it.
+		depth.enable_depth_write = false;
+		LayerPipelines[0] = CreatePipeline(device, shape, 3, color, &depth, DepthFormat, 2);
+		LayerPipelines[1] = CreatePipeline(device, shape, 3, darken, &depth, DepthFormat, 2);
 		SDL_GPUColorTargetDescription window {};
 		window.format = target;
 		CompositePipeline = CreatePipeline(device, GPUShader::Make(g_TerrainComposite_ps_DXIL, g_TerrainComposite_ps_SPIRV), 1, window);
-		if (!TilePipelines[0] || !TilePipelines[1] || !ShapePipelines[0] || !ShapePipelines[1] || !CompositePipeline) return false;
+		if (!TilePipelines[0] || !TilePipelines[1] || !ShapePipelines[0] || !ShapePipelines[1] || !LayerPipelines[0] || !LayerPipelines[1]
+			|| !CompositePipeline) return false;
 
 		SDL_GPUSamplerCreateInfo sampler {};
 		sampler.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -188,7 +196,7 @@ namespace TerrainPass
 
 	void Release(SDL_GPUDevice* device)
 	{
-		for (auto* pipelines : {TilePipelines, ShapePipelines})
+		for (auto* pipelines : {TilePipelines, ShapePipelines, LayerPipelines})
 			for (int i = 0; i < 2; ++i)
 			{
 				if (pipelines[i]) SDL_ReleaseGPUGraphicsPipeline(device, pipelines[i]);
@@ -202,7 +210,7 @@ namespace TerrainPass
 		Tiles.Release(device);
 		Shapes.Release(device);
 		ZBytes.Release(device);
-		Shapes.Instances.clear(); ZBytes.Instances.clear(); ShapeRuns.clear();
+		Shapes.Instances.clear(); ZBytes.Instances.clear(); ShapeRuns.clear(); LayerRuns.clear();
 		CompositePipeline = nullptr; Sampler = nullptr; TableTexture = nullptr; TableTransfer = nullptr;
 		Tiles.Instances.clear(); Runs.clear();
 		Visible = false;
@@ -222,8 +230,10 @@ namespace TerrainPass
 
 	namespace
 	{
-		// The overlay instances after the tile instances, their shapes, Z bytes and runs.
-		void PrepareShapes(const FrameAtlas& atlas, const RectangleStruct& view, const OverlaySnapshot::Frame& overlays)
+		// The instances of a draw list after those already prepared, their shapes and Z bytes; returns
+		// their runs.
+		std::vector<TerrainBatch::Run> PrepareShapes(const FrameAtlas& atlas, const RectangleStruct& view, const std::vector<OverlaySnapshot::Draw>& draws,
+			std::vector<std::uint8_t>& packed)
 		{
 			auto& instances = Tiles.Instances;
 			const auto first = std::uint32_t(instances.size());
@@ -232,9 +242,7 @@ namespace TerrainPass
 			const auto& pack = Unsorted::ColorPackData;
 			const auto mask = TerrainBatch::HalfMask({pack._R_SHL, pack._G_SHL, pack._B_SHL},
 				{int(ChannelBits(pack._R_SHR)), int(ChannelBits(pack._G_SHR)), int(ChannelBits(pack._B_SHR))});
-			auto& bytes = ZBytes.Instances;
-			std::vector<std::uint8_t> packed;
-			for (const auto& draw : overlays.Draws)
+			for (const auto& draw : draws)
 			{
 				const auto atlasView = atlas.Resolve(Request(draw));
 				TerrainBatch::Instance instance;
@@ -260,11 +268,9 @@ namespace TerrainPass
 				pages.push_back(atlasView.Texture);
 				shadows.push_back(draw.Shadow ? 1 : 0);
 			}
-			// At least one word: the shader's buffer is bound whenever overlays draw.
-			bytes.assign((packed.size() + 3) / 4 + 1, 0);
-			std::memcpy(bytes.data(), packed.data(), packed.size());
-			ShapeRuns = TerrainBatch::Split(pages, shadows);
-			for (auto& run : ShapeRuns) run.First += first;
+			auto runs = TerrainBatch::Split(pages, shadows);
+			for (auto& run : runs) run.First += first;
+			return runs;
 		}
 	}
 
@@ -274,6 +280,7 @@ namespace TerrainPass
 		instances.clear();
 		Shapes.Instances.clear();
 		ShapeRuns.clear();
+		LayerRuns.clear();
 		Skipped = 0;
 		Visible = false;
 		std::vector<const void*> pages;
@@ -300,7 +307,16 @@ namespace TerrainPass
 				depths.push_back(placement.UsesZ ? 1 : 0);
 			}
 			Runs = TerrainBatch::Split(pages, depths);
-			if (overlays && overlays->Visible) PrepareShapes(atlas, view, *overlays);
+			if (overlays && overlays->Visible)
+			{
+				std::vector<std::uint8_t> packed;
+				ShapeRuns = PrepareShapes(atlas, view, overlays->Draws, packed);
+				LayerRuns = PrepareShapes(atlas, view, overlays->CompositeDraws, packed);
+				// At least one word: the shader's buffer is bound whenever shapes draw.
+				auto& bytes = ZBytes.Instances;
+				bytes.assign((packed.size() + 3) / 4 + 1, 0);
+				std::memcpy(bytes.data(), packed.data(), packed.size());
+			}
 			CompositeInstance = std::uint32_t(instances.size());
 			instances.push_back({frame->OriginX + view.X, view.Y, TerrainBatch::Pack(std::uint32_t(view.Width), std::uint32_t(view.Height)),
 				0, 0, 0, 0, 0});
@@ -390,12 +406,17 @@ namespace TerrainPass
 				SDL_PushGPUVertexUniformData(commands, 0, &view, sizeof(view));
 				SDL_DrawGPUPrimitives(pass, run.Count * VerticesPerTile, 1, 0, 0);
 			}
-			if (!ShapeRuns.empty() && Shapes.Buffer && ZBytes.Buffer)
+			if (!(ShapeRuns.empty() && LayerRuns.empty()) && Shapes.Buffer && ZBytes.Buffer)
 			{
 				SDL_GPUBuffer* buffers[2] {Shapes.Buffer, ZBytes.Buffer};
-				for (const auto& run : ShapeRuns)
+				// The Tile pass's shapes, then what RenderLayers draws over Tile's copy.
+				std::vector<std::pair<const TerrainBatch::Run*, SDL_GPUGraphicsPipeline*>> ordered;
+				for (const auto& run : ShapeRuns) ordered.push_back({&run, ShapePipelines[run.Depth ? 1 : 0]});
+				for (const auto& run : LayerRuns) ordered.push_back({&run, LayerPipelines[run.Depth ? 1 : 0]});
+				for (const auto& [shapeRun, pipeline] : ordered)
 				{
-					if (auto* pipeline = ShapePipelines[run.Depth ? 1 : 0]; pipeline != bound)
+					const auto& run = *shapeRun;
+					if (pipeline != bound)
 					{
 						SDL_BindGPUGraphicsPipeline(pass, pipeline);
 						SDL_PushGPUFragmentUniformData(commands, 0, &decode, sizeof(decode));
@@ -432,7 +453,7 @@ namespace TerrainPass
 		SDL_DrawGPUPrimitives(pass, VerticesPerTile, 1, 0, 0);
 	}
 
-	size_t DrawCount() { return Runs.size() + ShapeRuns.size(); }
+	size_t DrawCount() { return Runs.size() + ShapeRuns.size() + LayerRuns.size(); }
 	size_t ShapeCount() { return Shapes.Instances.size(); }
 	size_t SkippedShapes() { return Skipped; }
 	size_t InstanceCount() { return Visible ? Tiles.Instances.size() - 1 : 0; }

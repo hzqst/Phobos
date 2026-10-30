@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象 / C7 桥格与平铺帧 / D2a 动画 Terrain 对照）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象 / C7 桥格与平铺帧 / D2a 动画 Terrain 对照 / D2b GPU 动画 Terrain）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。C5.2a 把战术区改画进与 ViewBounds 同尺寸的离屏目标，带深度缓冲，地块按 `547CF0` 测试并写 Z（见“深度”），为 #18/#19 中会被地块 Z 遮挡的 overlay、Terrain 对象与悬崖投影做准备。C5.2b 采集 overlay 本体与阴影（`OverlaySnapshot`），只在 trace 中用 CPU 重放整个 Tile 层并与原生 Tile、ZBuffer 逐像素核对；C5.2c 把 overlay 本体与阴影画进战术目标（见“Overlay”）。C6 依据 Issue #19 / `terrain-objects-shadows-gpu-handoff.md`，在 overlay 之后按原生顺序采集静态 Terrain 对象的本体与自身阴影、悬崖投影，CPU 重放与 GPU 都复用 overlay 的绘制列表（见“Terrain 对象与悬崖投影”）。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序与原生 Z，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。deferred 记录、建筑底座、alpha shape 都不在本层；动画或崩塌中的 Terrain 对象由 mode 2 画在 Composite，也不在本层：D2a 依据 Issue #23 / `animated-terrain-composite-gpu-handoff.md`（PR #24，未合并）在同一回调采集它们，只在 trace 中重放并与 `6D4664` 的原生 Composite 逐像素核对，GPU 尚未画（D2b，见“动画 Terrain（mode 2）”）。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。C5.2a 把战术区改画进与 ViewBounds 同尺寸的离屏目标，带深度缓冲，地块按 `547CF0` 测试并写 Z（见“深度”），为 #18/#19 中会被地块 Z 遮挡的 overlay、Terrain 对象与悬崖投影做准备。C5.2b 采集 overlay 本体与阴影（`OverlaySnapshot`），只在 trace 中用 CPU 重放整个 Tile 层并与原生 Tile、ZBuffer 逐像素核对；C5.2c 把 overlay 本体与阴影画进战术目标（见“Overlay”）。C6 依据 Issue #19 / `terrain-objects-shadows-gpu-handoff.md`，在 overlay 之后按原生顺序采集静态 Terrain 对象的本体与自身阴影、悬崖投影，CPU 重放与 GPU 都复用 overlay 的绘制列表（见“Terrain 对象与悬崖投影”）。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序与原生 Z，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。deferred 记录、建筑底座、alpha shape 都不在本层；动画或崩塌中的 Terrain 对象由 mode 2 画在 Composite，也不在本层：D2a 依据 Issue #23 / `animated-terrain-composite-gpu-handoff.md`（PR #24，未合并）在同一回调采集它们，在 trace 中重放并与 `6D4664` 的原生 Composite 逐像素核对；D2b 把它们画在战术目标的最后，使 GPU 输出对应原生 Composite 在对象层之后的样子（见“动画 Terrain（mode 2）”）。
 
 ## 采集
 
@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 动画/崩塌 Terrain（D2a）：GPU 尚未画；崩塌中的对象、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- 动画/崩塌 Terrain（D2）：只画 Terrain，对象层中的单位、建筑、动画（如矿石闪光）、粒子与 Extras 都不画（阶段 D3 起）；崩塌中的对象、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
 - `4D1890` deferred 记录不画：开 FogOfWar 实测只出现建筑记录（阶段 D1，#22）；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。建筑底座不画（阶段 D）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -162,6 +162,8 @@ trace（`PHOBOS_TERRAIN_TRACE=1`，与 `tilecheck` 同一次采集）在 `tilede
 
 - `composite`：层内对象数 `layerObjects`；非 Terrain 对象 `others`、其中在视图范围内的 `othersInRange`、被 `6D8DB0` 标 IsVisible 的 `othersVisible`（它先清每个对象的该标志，绘制时再置位）、其中 `GetRenderDimensions` 为空的 `unbounded`（体素单位如 MCV）；选中的 Terrain `animated`、不在范围内的 `outOfRange`、Location 在迷雾中的 `locationFogged`；`terrainOutside` 与 `bodies/shadows` 等同 `overlay` 行；`copyFailed` 为复制失败的渲染数。
 - `compositedraws`：每次绘制 `类型@x,y:帧`，阴影加 `s`。
+GPU（D2b）：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之后，共用 shape 实例、atlas 与着色器，另建两条只测不写深度的管线（本体、阴影各一，严格 `<`，阴影仍是乘 1/2 的混合），按列表顺序提交；战术目标因此是“Tile + 动画 Terrain”，对照基准改为同一暂停帧的 `native_composite`。
+
 - `compositecheck`：`input/output` 为两份副本的状态（`ok`、失败原因、`bounds_differ` 或 `stale`=不是本帧）；`inputMismatched` 为输入与原生 Tile 的 ViewBounds 不同的像素（应为 0：RenderLayers 之前没有别的东西画进来）；在输入上用原生 Z、A 按顺序重放 `CompositeDraws`，与输出比较：`drawn` 为被 Terrain 画到的像素，`mismatched` 分为 `body/shadow`（Terrain 像素不同）与 `untouched`（Terrain 没画到的像素不同，即别的对象画的），后者再按是否落在 IsVisible 对象的 `GetRenderDimensions` 矩形内分为 `others/unexplained`。`compositesamples` 列前 24 个不同像素。
 
 ## 验收（2026-10-30）
@@ -333,3 +335,16 @@ HEAD `4a11f135` + 本批未提交改动，最终 DLL SHA256 `82c92fbb…de02c`�
 | Vulkan | 上滚、左右滚 3 次 | 9 棵（一次一个阴影在 clip 外），帧 0/3 | `body=0 shadow=0 unexplained=0` |
 
 `tilecheck` 在所有样本中颜色、Z 都一致，说明对象层没有写 Z；Terrain 本体与阴影在原生 Z、A 下的重放与 `6D4664` 的原生 Composite 逐像素相同。MCP 的 `native_composite` 与同帧 `native_terrain` 只在矿柱与 MCV 处不同。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d2a`（D3D12 无迷雾的日志未保留，结果见上表；FogOfWar 与 Vulkan 的日志为 `debug-fog.log`、`debug-vk.log`）。回归新增 `TerrainObjectImageTests` 的动画帧与视图范围、`CaptureTests` 的 `native_composite` 元数据；Debug 构建无警告。
+
+### D2b GPU 动画 Terrain（2026-10-30）
+
+HEAD `d507b7de` + 本批未提交改动，DLL SHA256 `933132e2…8d7d`，1024×768。GPUANIM 同 D2a（开局点 `(70,70)`，上滚 1.8 秒后左右各滚一次），每个状态在同一暂停帧比较 `native_composite` 与 `gpu` 的 ViewBounds 区域（`scripts/cmpcomp.py`）。
+
+| 后端 | 状态 | GPU 对 `native_composite` | 同次 `compositecheck` |
+| --- | --- | --- | --- |
+| D3D12 | 上滚、右滚 | 只有光标 187–188 像素 | `body=0 shadow=0 unexplained=0` |
+| D3D12 | 左滚 | 光标 188 像素 + 一个矿石闪光动画 6 像素（GPU 处等于 Tile） | 同上 |
+| Vulkan | 上滚、右滚 | 只有光标 187 像素 | 同上 |
+| Vulkan | 左滚 | 光标 + 一个闪光动画 6 像素 | 同上 |
+
+闪光动画属对象层的 AnimClass，不在 D2 范围。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d2b`。Debug 构建无警告。

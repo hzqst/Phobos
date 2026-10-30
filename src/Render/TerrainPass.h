@@ -19,7 +19,9 @@
 // a tactical target of ViewBounds' size, one target pixel per Tile pixel: color channels as their
 // integer values and a depth buffer holding the native Z, tested and written like 547CF0. The
 // overlays of OverlaySnapshot follow, one instance per 4AED70 draw, with the strict depth test of the
-// shape blitters and a blending pipeline for their shadows (C5.2c). The present pass then draws that
+// shape blitters and a blending pipeline for their shadows (C5.2c). The animated Terrain mode 2
+// draws on Composite, Tile's copy, comes last with the same test and no depth write (D2b), so the
+// target matches the native Composite after the layers. The present pass then draws that
 // target onto the window. It runs on the main thread like the rest
 // of the render; the GPU resources and shaders live in TerrainPass.cpp.
 namespace TerrainPass
