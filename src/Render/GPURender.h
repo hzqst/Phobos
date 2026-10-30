@@ -4,6 +4,8 @@
 #include "CaptureImage.h"
 #include <memory>
 
+class DSurface;
+
 // Draws independent game elements on black in a secondary SDL_GPU window. The old screen
 // mirror is an opt-in diagnostic mode. SDL is only included inside src\Render, so this header
 // must stay free of SDL types.
@@ -40,6 +42,8 @@ public:
 	static void OnSidebarDraw();
 	// DrawOnTop has finished its top-level tooltip pass; the frame's terrain is on Tile
 	static void OnToolTipsDrawn();
+	// RenderLayers (6D8DB0) is about to draw on, or has drawn on, the locked target of this render
+	static void OnRenderLayers(DSurface* pSurface, bool drawn);
 	// The terrain cache surfaces or the scenario's tiles are about to change
 	static void InvalidateTerrain(bool resources = false);
 	static void OnCameoState(int index, bool darken, bool progress, bool completed, int stage);

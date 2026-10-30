@@ -327,6 +327,7 @@
     <ClCompile Include="src\Render\SidebarSnapshot.cpp" />
     <ClCompile Include="src\Render\TerrainPass.cpp" />
     <ClCompile Include="src\Render\OverlaySnapshot.cpp" />
+    <ClCompile Include="src\Render\CompositeSnapshot.cpp" />
     <ClCompile Include="src\Render\TerrainSnapshot.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
@@ -509,6 +510,7 @@
     <ClInclude Include="src\Render\SDLLoader.h" />
     <ClInclude Include="src\Render\SecondaryWindow.h" />
     <ClInclude Include="src\Render\SurfaceMirror.h" />
+    <ClInclude Include="src\Render\CompositeSnapshot.h" />
     <!-- src\Utilities -->
     <ClInclude Include="src\Utilities\Anchor.h" />
     <ClInclude Include="src\Utilities\AresFunctions.h" />

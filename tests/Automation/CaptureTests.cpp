@@ -27,12 +27,19 @@ int __cdecl main()
 	assert(minimal["structuredContent"]["capture_id"] == 2 && !minimal["structuredContent"].contains("viewport"));
 	assert(full["structuredContent"]["native_terrain"].is_null());
 	image.Source = "native_terrain"; image.OutputMode = "original";
-	image.Terrain = RenderCapture::SurfaceRegion {0x1234, 856, 768, {0, 16, 856, 736}, 0, 16, 120, -45};
+	image.Region = RenderCapture::SurfaceRegion {0x1234, 856, 768, {0, 16, 856, 736}, 0, 16, 120, -45};
 	const auto terrain = EncodeScreenshot(image, Json::object(), Json::object())["structuredContent"];
+	assert(terrain["native_composite"].is_null() && !terrain["native_terrain"].contains("game_frame"));
 	assert(terrain["cursor"] == "not_included" && terrain["native_terrain"]["surface"] == "00001234");
 	assert((terrain["native_terrain"]["view_bounds"] == Json{0, 16, 856, 736}));
 	assert((terrain["native_terrain"]["placed_at"] == Json{0, 16} && terrain["native_terrain"]["tactical_position"] == Json{120, -45}));
 	assert(terrain["native_terrain"]["surface_width"] == 856 && terrain["native_terrain"]["surface_height"] == 768);
+	assert(full["structuredContent"]["native_composite"].is_null());
+	image.Source = "native_composite";
+	image.Region->GameFrame = 321;
+	const auto composite = EncodeScreenshot(image, Json::object(), Json::object())["structuredContent"];
+	assert(composite["cursor"] == "not_included" && composite["native_terrain"].is_null() && composite["timestamp_semantics"] == "render_copy_read");
+	assert((composite["native_composite"]["view_bounds"] == Json{0, 16, 856, 736}) && composite["native_composite"]["game_frame"] == 321);
 	std::ofstream("Debug/AutomationTests/capture-fixtures.json") << Json{{"full",full},{"crop",crop}}.dump();
 	std::cout << "Capture format, crop and PNG encoding tests passed\n";
 }

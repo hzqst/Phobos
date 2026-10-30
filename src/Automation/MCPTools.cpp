@@ -69,8 +69,8 @@ namespace Automation
 		add("game_step", "Advance exactly the requested completed simulation frames while paused. Returns actual progress on timeout.",
 			{{"frames", integer(1, 10000)}, {"timeout_ms", integer(100, 28000)}}, {"frames"});
 		add("game_resume", "Clear pending steps and resume singleplayer simulation; wait for a completed logic frame.", Json::object(), Json::array());
-		add("game_screenshot", "Capture native DDraw or SDL GPU output as PNG. native_terrain copies only the tactical view of the native terrain cache surface (also holds overlays, smudges, cached objects and fog), placed as Composite shows it; the rest is black. Default max_edge 1280; 0 keeps source size. Crop uses source-image pixels before resizing. Requires _meta com.phobos/instance_id. No desktop capture.",
-			{{"source", choice({"ddraw", "gpu", "native_terrain"})}, {"max_edge", integer(0, 4096)}, {"include_metadata", {{"type", "boolean"}}},
+		add("game_screenshot", "Capture native DDraw or SDL GPU output as PNG. native_terrain copies only the tactical view of the native terrain cache surface (also holds overlays, smudges, cached objects and fog), placed as Composite shows it; the rest is black. native_composite gives the same view of Composite as the last render's object layers left it (before the effects and UI drawn after them), placed the same way. Default max_edge 1280; 0 keeps source size. Crop uses source-image pixels before resizing. Requires _meta com.phobos/instance_id. No desktop capture.",
+			{{"source", choice({"ddraw", "gpu", "native_terrain", "native_composite"})}, {"max_edge", integer(0, 4096)}, {"include_metadata", {{"type", "boolean"}}},
 			 {"timeout_ms", integer(100, 28000)}, {"crop", {{"type", "object"}, {"properties", {{"x", coord}, {"y", coord}, {"width", integer(1, 4096)}, {"height", integer(1, 4096)}}},
 			 {"required", {"x", "y", "width", "height"}}, {"additionalProperties", false}}}}, {"source"}, true);
 		tools.back()["outputSchema"] = {{"type", "object"}, {"required", {"capture_id", "source", "width", "height", "valid_capture"}},

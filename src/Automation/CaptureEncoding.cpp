@@ -99,19 +99,22 @@ namespace Automation
 			metadata["letterbox"] = {image.Viewport[0], image.Viewport[1], image.Width - image.Viewport[0] - image.Viewport[2], image.Height - image.Viewport[1] - image.Viewport[3]};
 			metadata["timestamp_unix_ms"] = image.TimestampMS; metadata["simulation_frame"] = image.SimulationFrame;
 			metadata["simulation_frame_semantics"] = "completed_logic_counter_at_capture";
-			metadata["timestamp_semantics"] = image.Source == "gpu" ? "draw_recorded" : "surface_copy_started";
+			metadata["timestamp_semantics"] = image.Source == "gpu" ? "draw_recorded" : image.Source == "native_composite" ? "render_copy_read" : "surface_copy_started";
 			metadata["gpu_present_id"] = image.Source == "gpu" ? Json(image.PresentID) : Json();
 			metadata["gpu_present_id_semantics"] = image.Source == "gpu" ? Json("successful_swapchain_submission") : Json();
 			metadata["scene_id"] = image.Scene; metadata["backend"] = image.Backend; metadata["output_mode"] = image.OutputMode;
-			metadata["cursor"] = image.Terrain ? "not_included" : image.Source == "ddraw" || image.OutputMode == "mirror" ? "surface_contents_if_drawn" : "rendered_gpu_cursor_if_visible";
-			if (const auto& terrain = image.Terrain)
+			metadata["cursor"] = image.Region ? "not_included" : image.Source == "ddraw" || image.OutputMode == "mirror" ? "surface_contents_if_drawn" : "rendered_gpu_cursor_if_visible";
+			metadata["native_terrain"] = nullptr;
+			metadata["native_composite"] = nullptr;
+			if (const auto& region = image.Region)
 			{
 				char surface[32];
-				std::snprintf(surface, sizeof(surface), "%08zX", size_t(terrain->Surface));
-				metadata["native_terrain"] = {{"surface", surface}, {"surface_width", terrain->SurfaceWidth}, {"surface_height", terrain->SurfaceHeight},
-					{"view_bounds", terrain->Bounds}, {"placed_at", {terrain->CanvasX, terrain->CanvasY}}, {"tactical_position", {terrain->TacticalX, terrain->TacticalY}}};
+				std::snprintf(surface, sizeof(surface), "%08zX", size_t(region->Surface));
+				Json described = {{"surface", surface}, {"surface_width", region->SurfaceWidth}, {"surface_height", region->SurfaceHeight},
+					{"view_bounds", region->Bounds}, {"placed_at", {region->CanvasX, region->CanvasY}}, {"tactical_position", {region->TacticalX, region->TacticalY}}};
+				if (image.Source == "native_composite") described["game_frame"] = region->GameFrame;
+				metadata[image.Source == "native_composite" ? "native_composite" : "native_terrain"] = std::move(described);
 			}
-			else metadata["native_terrain"] = nullptr;
 			metadata["crop"] = {{"x", x}, {"y", y}, {"width", width}, {"height", height}};
 			metadata["pixel_format"] = "RGBA8"; metadata["file_path"] = nullptr;
 		}

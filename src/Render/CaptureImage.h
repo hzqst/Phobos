@@ -14,19 +14,21 @@ namespace RenderCapture
 		return width > 0 && height > 0 && width <= MaxDimension && height <= MaxDimension
 			&& size_t(width) * height <= MaxPixels;
 	}
-	// The native surface region a native_terrain capture copied, in that surface's own
-	// coordinates, and where it was placed in the game-area image.
+	// The native surface region a native_terrain or native_composite capture copied, in that
+	// surface's own coordinates, and where it was placed in the game-area image.
 	struct SurfaceRegion
 	{
 		std::uintptr_t Surface = 0;
 		int SurfaceWidth = 0, SurfaceHeight = 0;
 		std::array<int, 4> Bounds {};
 		int CanvasX = 0, CanvasY = 0, TacticalX = 0, TacticalY = 0;
+		// native_composite: the game frame the render that copied it drew.
+		int GameFrame = -1;
 	};
 	// Main-thread-owned until Dispatcher publishes completion. Then immutable.
 	struct Image
 	{
-		std::optional<SurfaceRegion> Terrain;
+		std::optional<SurfaceRegion> Region;
 		std::vector<uint8_t> Pixels; // RGBA8, top-down, tightly packed, opaque output.
 		int Width = 0, Height = 0, LogicalWidth = 0, LogicalHeight = 0;
 		std::array<float, 4> Viewport {};

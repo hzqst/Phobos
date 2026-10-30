@@ -39,6 +39,22 @@ DEFINE_HOOK(0x6BB8E0, DirectDrawWrap_DisposeOfStuff_GPURender, 0x5)
 	return 0;
 }
 
+// 6D3D10's mode 2 around RenderLayers: the call at 6D465F and the Spotlights' call after it, both
+// displaced whole and kept by return 0 (gamemd-reverse #23 §9.2). EBX is the locked target.
+DEFINE_HOOK(0x6D465F, TacticalClass_Render_LayersBegin, 0x5)
+{
+	GET(DSurface*, pSurface, EBX);
+	GPURender::OnRenderLayers(pSurface, false);
+	return 0;
+}
+
+DEFINE_HOOK(0x6D4664, TacticalClass_Render_LayersEnd, 0x5)
+{
+	GET(DSurface*, pSurface, EBX);
+	GPURender::OnRenderLayers(pSurface, true);
+	return 0;
+}
+
 // Observational probes: return 0 preserves every displaced instruction via SyringeEx.
 // No outer MouseMutex transaction is introduced by this diagnostic stage.
 // Intentionally stacked with GScreenClass_DrawText: both return 0 and the observation

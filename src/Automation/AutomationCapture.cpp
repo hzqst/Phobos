@@ -18,6 +18,7 @@ namespace Automation
 			const auto& source = command.Arguments["source"];
 			if (source == "gpu") GPURender::Capture(command.Image);
 			else if (source == "native_terrain") SurfaceMirror::CaptureTerrainPixels(image);
+			else if (source == "native_composite") SurfaceMirror::CaptureCompositePixels(image);
 			else SurfaceMirror::CapturePixels(image);
 		}
 		const auto& image = *command.Image;

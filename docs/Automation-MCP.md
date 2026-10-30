@@ -46,7 +46,7 @@ method/name header 对照校验，限制 body、JSON 深度、连接数和排队
 | `game_pause` | 无；等待引擎到达暂停循环后确认 |
 | `game_step` | `frames: 1..10000`, `timeout_ms: 100..28000`（默认 5000） |
 | `game_resume` | 无；等待正常逻辑帧完成后确认 |
-| `game_screenshot` | `source: ddraw/gpu/native_terrain`, `max_edge: 0..4096`（默认 1280）, `include_metadata`（默认 true）, `timeout_ms: 100..28000`（默认 5000）, 可选 `crop: {x,y,width,height}` |
+| `game_screenshot` | `source: ddraw/gpu/native_terrain/native_composite`, `max_edge: 0..4096`（默认 1280）, `include_metadata`（默认 true）, `timeout_ms: 100..28000`（默认 5000）, 可选 `crop: {x,y,width,height}` |
 
 拖动每步间隔至少 16ms。坐标为原始游戏逻辑画面坐标，越界拒绝。
 保持键有 10 秒租期，超时、引擎不可用、模式/分辨率变化及退出时释放。
@@ -121,6 +121,26 @@ pitch，Lock 后只复制 `ViewBounds` 区域。地形阶段把 Tile 的 ViewBou
 纯地块对照需用受控地图。实机（D3D12，1024×768 与 800×600）静止、向下和斜向滚屏后，与同帧
 `ddraw` 的战术区仅在单位、光标和顶部文字处不同；`terrain_not_in_scenario` 未能实机触发
 （Spawner 直接进入场景，MCP 可用时已在局内）。
+
+### 原生 Composite（对象层之后）
+
+`source=native_composite` 是 GPURender 阶段 D 的对照来源（依据 gamemd-reverse #23 §9.2）。
+Tactical mode 2 在 `6D465F` 调 RenderLayers（`6D8DB0`）画五个对象层，`6D4664` 返回后才画
+Spotlight、激光、计时器等；Phobos 在 `6D4664` 从当次锁定的目标（`EBX`，须同时是 Temp 与
+Composite、16-bit）按 pitch 复制 `ViewBounds` 区域到自有缓冲，不另行 Lock。截图读取最近
+一次渲染保存的副本，放置方式与 `native_terrain` 相同：图片尺寸同 `ddraw`，该区域放在
+Composite 的画布原点处，其余像素为黑。副本只在 GPU 窗口运行（independent）或 MCP 服务
+运行时保存。
+
+元数据另含 `native_composite`：字段同 `native_terrain`（`surface` 为当时 Composite 指针），
+另加 `game_frame`（复制时的引擎帧）；`timestamp_semantics=render_copy_read`（时间戳是读取
+副本的时刻，不是渲染时刻），`cursor=not_included`。不在场景中返回
+`composite_not_in_scenario`；尚未复制或复制失败时 `reason` 为失败原因（如
+`composite_not_copied`、`composite_target_not_composite`、`composite_not_locked`）。
+
+这一点只在受控场景下是“Tile + 对象层”的纯世界图像：RenderLayers 之前已有鼠标辅助、虚线、
+选择／放置辅助和 IonBlast/Veinhole 绘制，对象层本身也画单位的 Extras（血条、选择框）。
+对照动画 Terrain 时视野内不能有单位、建筑、选择和这些效果。
 
 ### SDL GPU
 

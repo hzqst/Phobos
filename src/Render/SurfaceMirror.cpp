@@ -1,4 +1,5 @@
 #include "SurfaceMirror.h"
+#include "CompositeSnapshot.h"
 #include "Tooltip.h"
 
 #include <GameOptionsClass.h>
@@ -188,10 +189,38 @@ bool SurfaceMirror::CaptureTerrainPixels(RenderCapture::Image& image)
 	pTile->Unlock();
 	if (!pitchValid) { image.Error = "invalid_terrain_pitch"; return false; }
 	if (!DecodeNative(pixels, image)) return false;
-	image.Terrain = RenderCapture::SurfaceRegion {reinterpret_cast<std::uintptr_t>(pTile), surfaceWidth, surfaceHeight,
+	image.Region = RenderCapture::SurfaceRegion {reinterpret_cast<std::uintptr_t>(pTile), surfaceWidth, surfaceHeight,
 		{view.X, view.Y, view.Width, view.Height}, int(left), view.Y, pTactical->TacticalPos.X, pTactical->TacticalPos.Y};
 	image.Viewport = {0, 0, float(image.Width), float(image.Height)};
 	image.Source = "native_terrain"; image.Backend = "DirectDraw"; image.OutputMode = "original";
+	image.Ready = true;
+	return true;
+}
+
+bool SurfaceMirror::CaptureCompositePixels(RenderCapture::Image& image)
+{
+	image.Width = image.LogicalWidth = DSurface::WindowBounds.Width;
+	image.Height = image.LogicalHeight = DSurface::WindowBounds.Height;
+	if (!RenderCapture::ValidSize(image.Width, image.Height)) { image.Error = "capture_size_limit"; return false; }
+	if (!Unsorted::ScenarioStarted || Phobos::IsLoadingSaveGame) { image.Error = "composite_not_in_scenario"; return false; }
+	// Copied by the last render that drew the layers, under the GPU window's states that capture.
+	const auto& copy = CompositeSnapshot::Output;
+	if (!copy.Valid) { image.Error = copy.Error; return false; }
+	const auto& view = copy.Bounds;
+	const auto& sidebar = DSurface::SidebarBounds;
+	const int canvasX = Tooltip::CanvasOrigin(Tooltip::Target::Composite, GameOptionsClass::Instance.SidebarMode,
+		view.X + view.Width, sidebar.X + sidebar.Width);
+	const int64_t left = int64_t(canvasX) + view.X;
+	if (left < 0 || left + view.Width > image.Width || int64_t(view.Y) + view.Height > image.Height)
+	{ image.Error = "composite_view_outside_game_area"; return false; }
+	std::vector<uint16_t> pixels(size_t(image.Width) * image.Height);
+	for (int y = 0; y < view.Height; ++y)
+		std::memcpy(pixels.data() + size_t(view.Y + y) * image.Width + size_t(left), copy.Pixels.data() + size_t(y) * view.Width, size_t(view.Width) * 2);
+	if (!DecodeNative(pixels, image)) return false;
+	image.Region = RenderCapture::SurfaceRegion {copy.Surface, copy.SurfaceWidth, copy.SurfaceHeight,
+		{view.X, view.Y, view.Width, view.Height}, int(left), view.Y, copy.TacticalX, copy.TacticalY, copy.Frame};
+	image.Viewport = {0, 0, float(image.Width), float(image.Height)};
+	image.Source = "native_composite"; image.Backend = "DirectDraw"; image.OutputMode = "original";
 	image.Ready = true;
 	return true;
 }

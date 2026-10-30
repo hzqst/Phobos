@@ -8,6 +8,7 @@
 #include "SidebarSnapshot.h"
 #include "CommandBarSnapshot.h"
 #include "ABufferPass.h"
+#include "CompositeSnapshot.h"
 #include "OverlaySnapshot.h"
 #include "TerrainPass.h"
 #include "Tooltip.h"
@@ -799,11 +800,25 @@ void GPURender::OnToolTipsDrawn()
 	}
 }
 
+void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
+{
+	const bool capturing = !MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden);
+	// The output is native_composite's source, kept for Automation as native_terrain is; the input
+	// serves only the trace that checks this render.
+	if (drawn)
+	{
+		if (capturing || Automation::IsRunning()) CompositeSnapshot::Record(CompositeSnapshot::Output, pSurface);
+	}
+	else if (capturing && OverlaySnapshot::RedrawRequested) CompositeSnapshot::Record(CompositeSnapshot::Input, pSurface);
+	else CompositeSnapshot::Input.Valid = false;
+}
+
 void GPURender::InvalidateTerrain(bool resources)
 {
 	if (resources) TerrainSnapshot::Clear();
 	else TerrainSnapshot::Invalidate();
 	OverlaySnapshot::Invalidate();
+	CompositeSnapshot::Invalidate();
 }
 
 void GPURender::OnCameoState(int index, bool darken, bool progress, bool completed, int stage)

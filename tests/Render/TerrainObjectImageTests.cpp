@@ -1,4 +1,5 @@
 #include <Render/TerrainObjectImage.h>
+#include <climits>
 #include <cstdio>
 
 namespace
@@ -14,7 +15,29 @@ int main()
 {
 	using namespace TerrainObjectImage;
 	Check(StaticFrame(false) == 0 && StaticFrame(true) == 1, "static frames");
+	Check(AnimationLength(false, 0, 40, false) == 20 && AnimationLength(false, 0, 40, true) == 10 && AnimationLength(true, 7, 40, true) == 7
+		&& AnimationLength(false, 0, 41, true) == 10 && AnimationLength(true, -2, 40, false) == -2, "animation lengths");
+	Check(DynamicFrame(true, false, false, false, false, 3, 20) == 3 && DynamicFrame(true, false, false, true, true, 3, 10) == 13,
+		"animated frames, damaged after the animation");
+	Check(DynamicFrame(true, true, true, true, false, 2, 10) == 23 && DynamicFrame(true, true, true, false, true, 2, 10) == 13,
+		"animated crumbling frames after the animations");
+	Check(DynamicFrame(true, true, false, false, false, 2, 10) == 2, "crumbling without its frames keeps animating");
+	Check(DynamicFrame(false, true, true, false, false, 4, 0) == 5 && DynamicFrame(false, true, false, false, true, 4, 0) == 1
+		&& DynamicFrame(false, true, false, false, false, 4, 0) == 0, "crumbling frames of a still object");
 	Check(ShadowFrame(0, 4) == 2 && ShadowFrame(1, 4) == 3 && ShadowFrame(1, 5) == 3, "shadow frames");
+
+	{
+		// 6D8DB0: (tx + W/2, ty - H), (tx + 2W, ty + H/2), (tx - W, ty + H/2).
+		const auto probes = RangeProbes(1000, 500, 857, 737);
+		Check(probes.Top.X == 1428 && probes.Top.Y == -237 && probes.Right.X == 2714 && probes.Right.Y == 868
+			&& probes.Left.X == 143 && probes.Left.Y == 868, "view range probes");
+		Check(RangeProbes(INT_MAX, 0, 2, 0).Top.X == INT_MIN, "view range probes wrap");
+		const auto range = MakeViewRange(100, -50, 160, 30);
+		Check(range.Left == 100 && range.Top == -50 && range.Width == 120 && range.Height == 160, "view range spans twice the differences");
+		Check(InViewRange(range, 100, -50) && InViewRange(range, 219, 109) && !InViewRange(range, 220, 0) && !InViewRange(range, 99, 0)
+			&& !InViewRange(range, 150, 110) && !InViewRange(range, 150, -51), "view range is half open");
+		Check(!InViewRange(MakeViewRange(10, 0, 5, 10), 8, 5), "a reversed range holds nothing");
+	}
 	Check(ShadowFrame(0, std::int16_t(-3)) == -1, "frames divide toward zero");
 	Check(Depth(0, false) == -12 && Depth(0, true) == -3 && Depth(30, false) == -42 && Depth(-15, true) == 12, "object depths");
 

@@ -21,7 +21,9 @@
 // and the cliff shadows (6D7C00, 547230) of gamemd-reverse #19 follow in the same list, in the native
 // order (C6). TerrainPass draws the list after the tiles (C5.2c); the trace replays the captured
 // tiles, smudges and draws in software and compares the result with the native Tile and ZBuffer
-// (C5.2b). Rubble and the deferred records of 6D3470 are absent.
+// (C5.2b). Rubble and the deferred records of 6D3470 are absent. The animated or crumbling Terrain
+// objects RenderLayers (6D8DB0) draws on Composite in mode 2 (gamemd-reverse #23) are captured in the
+// same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -55,6 +57,10 @@ namespace OverlaySnapshot
 	constexpr std::uintptr_t FoggedPairs = 0x8B3CC0, FoggedCount = 0x8B3CC4;
 	constexpr size_t FoggedKind = 0x30, FoggedBounds = 0x40, FoggedEnabled = 0x74, FoggedRecordSize = 0x78;
 	constexpr int FoggedBuilding = 6;
+	// 6D8DB0 walks the layers at 8A0360 and bounds the Terrain objects it draws by Locations that
+	// 5AFB80 (the matrix applied to a vector) gives for its corners.
+	constexpr int LayerCount = 5;
+	constexpr std::uintptr_t MatrixApply = 0x5AFB80;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0) or a cliff (6D7C00).
 	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff };
@@ -79,9 +85,11 @@ namespace OverlaySnapshot
 		// Width x Height.
 		bool ZShaped = false;
 		std::vector<std::uint8_t> ZBytes;
-		// For the trace: the layer, and the overlay, Terrain type or tile type index.
+		// 4AED70's Z write: the Tile pass writes Z (4E00, 4601), mode 2's Terrain only tests it (2E00).
+		bool WritesDepth = true;
+		// For the trace: the layer, the overlay, Terrain type or tile type index, and the shape's frame.
 		Layer Source = Layer::Overlay;
-		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Index = -1;
+		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Index = -1, ShapeFrame = 0;
 	};
 	struct Counters
 	{
@@ -93,12 +101,24 @@ namespace OverlaySnapshot
 		// 4D1890's records, the building ones and the others, and the enabled ones whose saved rectangle
 		// meets the clip.
 		int Fogged = 0, FoggedBuildings = 0, FoggedBuildingsInView = 0, FoggedOthersInView = 0;
+		// 6D8DB0: the objects of its layers, the Terrain ones it selects (animated or crumbling), those
+		// outside its view range or at a fogged Location, and the other objects with those in the range.
+		int LayerObjects = 0, Animated = 0, OutOfRange = 0, LocationFogged = 0, Others = 0, OthersInRange = 0;
+		// The other objects 6D8DB0 marked IsVisible (it clears the flag of each and sets it where it draws),
+		// and those of them whose rectangle (GetRenderDimensions) is empty.
+		int OthersVisible = 0, OthersUnbounded = 0;
 	};
 	struct Frame
 	{
 		bool Visible = false;
 		std::vector<Draw> Draws;
 		Counters Count;
+		// 6D8DB0's draws on Composite, in its order, and their counters.
+		std::vector<Draw> CompositeDraws;
+		Counters CompositeCount;
+		// For the trace: the rectangles of those other objects on the clip's surface, where the layers
+		// drew what the D2 replay does not.
+		std::vector<RectangleStruct> OtherBounds;
 	};
 	extern Frame Current;
 	extern unsigned TraceCount;

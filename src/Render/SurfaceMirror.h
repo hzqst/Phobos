@@ -24,6 +24,9 @@ public:
 	// The tactical view of the native terrain cache (DSurface::Tile) at the position
 	// Composite shows it in the game area; everything else stays black.
 	static bool CaptureTerrainPixels(RenderCapture::Image& image);
+	// The tactical view of Composite as RenderLayers left it (CompositeSnapshot's copy at 6D4664)
+	// at the same position; everything else stays black.
+	static bool CaptureCompositePixels(RenderCapture::Image& image);
 	static bool HasPendingUpload();
 	static void Upload(SDL_GPUCopyPass* pCopyPass);
 	static void Release(SDL_GPUDevice* pDevice);

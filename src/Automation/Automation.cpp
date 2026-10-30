@@ -180,6 +180,7 @@ namespace Automation
 		}
 	}
 	void Enable() { Enabled = true; }
+	bool IsRunning() { return Server != nullptr; }
 	bool AutomationOwnsStep() { return Frames.OwnsStep(); }
 	void FrameSceneChanged()
 	{
