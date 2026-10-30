@@ -12,7 +12,8 @@ namespace ShapeImage
 	constexpr int MaxCameoSlots = 60;
 	// Matches Effect.x in IndexedSprite.ps.hlsl. Alpha blending is an intentional
 	// approximation of the original RGB16 integer darken/translucent blitters.
-	enum class Effect : std::uint32_t { Normal, Darken, Translucent50, Solid, GlyphMask };
+	// TileDiamond draws index 0 too, inside the TMP diamond around the frame origin in Effect.w.
+	enum class Effect : std::uint32_t { Normal, Darken, Translucent50, Solid, GlyphMask, TileDiamond };
 	struct CameoSlot { int Item, X, Y, ClipWidth, ClipHeight; };
 	inline bool PlaceCameo(int slot, int topRow, int count, int originX, int originY,
 		int pitchX, int pitchY, bool scrolling, int slid, int sidebarX, int width, int height, CameoSlot& out)

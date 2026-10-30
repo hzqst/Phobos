@@ -19,7 +19,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 | --- | --- | --- |
 | A | 黑底 + 独立 GPU 光标 | 已实现，D3D12 实机验证 |
 | B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动、tooltip、电力条、资金区、雷达区非地图部分、底部命令栏已完成；小地图未做 |
-| C | 地图基础（地形、坐标变换） | 进行中：#16 已交付（`443a5e7`）；C1 对照基准 `game_screenshot source=native_terrain` 已实现；下一步 C2 坐标与平地块（在 `4F4583` 采集） |
+| C | 地图基础（地形、坐标变换） | 进行中：#16 已交付（`443a5e7`）；C1 对照基准 `source=native_terrain` 已提交（`4ad5b6fc`）；C2 TMP 地块（坐标、变体、主菱形与 extra、默认 ABuffer 光照，无 Z）已实现并实机对照，见 `src/Render/TerrainGPU.md`；下一步 C3 Z 遮挡、C4 ABuffer/光照、C5 弹坑与 overlay |
 | D | 场景对象（建筑、SHP、步兵、载具、Voxel） | 未开始 |
 | E | 效果与其余覆盖（阴影、粒子、迷雾、菜单、影片） | 未开始 |
 | F | 接管主窗口与优化 | 未开始 |
@@ -37,12 +37,12 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 - [[Automation MCP]]：工具、元数据、截图语义、使用陷阱
 - [[实机验收流程]]：隔离副本、构建部署、Spawner 场景构造、同帧截图对照方法
 - [[gamemd-reverse 交接索引]]：静态调查 issue、交接文档与提交对照
-- 经验：[[经验 Spawner 预置建筑不生效]]、[[经验 Python 脚本名遮蔽 mcp 包]]、[[经验 页签闪烁导致双源截图差异]]、[[经验 cameo 名称开关语义相反]]
+- 经验：[[经验 Spawner 预置建筑不生效]]、[[经验 Python 脚本名遮蔽 mcp 包]]、[[经验 页签闪烁导致双源截图差异]]、[[经验 cameo 名称开关语义相反]]、[[经验 测试地图缺 OverlayPack 画出满屏围墙]]
 
 ## 仓库内权威文档
 
 - `AGENTS.md`：GPURender/Automation 开发约束（必读）
-- `src/Render/*.md`：FrameAtlasDesign、FrameAtlas、FrameCache、SidebarGPU、CameosGPU、CameoEffectsGPU、SidebarTextGPU、TooltipGPU、PowerGPU、CreditsGPU、RadarGPU、CommandBarGPU、CursorTrace
+- `src/Render/*.md`：FrameAtlasDesign、FrameAtlas、FrameCache、SidebarGPU、CameosGPU、CameoEffectsGPU、SidebarTextGPU、TooltipGPU、PowerGPU、CreditsGPU、RadarGPU、CommandBarGPU、TerrainGPU、CursorTrace
 - `docs/Automation-MCP.md`
 - 根目录 `GPURender-Progress.md`：用户本地交接日志（未入库，按时间倒序追加，很长，优先查本 memory）
 

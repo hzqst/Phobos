@@ -145,6 +145,7 @@ DEFINE_HOOK(0x560BF0, SetVideoMode_CursorTraceInvalidate, 0x5)
 {
 	CursorTrace::Record(R);
 	GPURender::InvalidateSidebar();
+	GPURender::InvalidateTerrain();
 	return 0;
 }
 
@@ -256,6 +257,7 @@ DEFINE_HOOK(0x6A5BF0, SidebarClass_UnloadShapes_GPURenderInvalidate, 0x7)
 DEFINE_HOOK(0x6BE1C0, Scenario_Clear_GPURenderInvalidate, 0x8)
 {
 	GPURender::InvalidateSidebar(true);
+	GPURender::InvalidateTerrain(true);
 	return 0;
 }
 

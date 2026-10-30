@@ -38,8 +38,10 @@ public:
 	// The game has blitted a surface to the primary surface
 	static void OnBlit();
 	static void OnSidebarDraw();
-	// DrawOnTop has finished its top-level tooltip pass
+	// DrawOnTop has finished its top-level tooltip pass; the frame's terrain is on Tile
 	static void OnToolTipsDrawn();
+	// The terrain cache surfaces or the scenario's tiles are about to change
+	static void InvalidateTerrain(bool resources = false);
 	static void OnCameoState(int index, bool darken, bool progress, bool completed, int stage);
 	static void InvalidateSidebar(bool resources = false);
 	static void SetSidebarButtonsReady(bool radar, bool ready);
