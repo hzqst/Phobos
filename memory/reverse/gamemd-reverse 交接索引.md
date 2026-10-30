@@ -26,7 +26,8 @@ tags:
 | #13 | 资金区（CreditsClass/TabData 数字、平滑滚动、Phobos 三个计数器） | `sidebar-credits-gpu-handoff.md` | `9002145` | 已交付，Phobos 侧已实现（`d3d6766c`），见 `src/Render/CreditsGPU.md` |
 | #14 | 雷达区非地图部分（外框、阵营标志、开关动画；小地图内容只预留矩形） | `sidebar-radar-gpu-handoff.md` | `6898733` | 已交付，Phobos 侧已实现（`1065de0e`），见 `src/Render/RadarGPU.md`；运行的 `gamemd.exe` 模式字段是 `+14B0`，不是 spawn IDB 的 `BAD3E8` |
 | #15 | 底部命令栏（LSPACER/LENDCAP/BTTNBKGD/RENDCAP、Advanced Command Bar 按钮、目标 surface 与发布点） | `command-bar-gpu-handoff.md` | `3e2cb23` | 已交付，Phobos 侧已实现（`bfef2044`），见 `src/Render/CommandBarGPU.md`；交接 §4 的 ShapeButton 字段偏移有误，以 YRpp/机器码为准（ShapeData `+58`、UseSidebarSurface `+4C`、IsAlpha `+55`） |
-| #16 | 战术区地形（帧流程与地形 surface 缓存、可见格与坐标变换、TMP 地块、光照、地形 surface 上的其他内容、对照基准与开图方法） | `terrain-gpu-handoff.md` | `443a5e7` | 已交付：复用 `4F4583` 回调采集；Tile 含覆盖物/弹坑/静态对象，不是纯 TMP 真值；颜色依赖完整 LightConvert shade 表与逐像素 ABuffer，TMP 自身用 Z 遮挡（悬崖/extra）；Phobos 侧待实现 |
+| #16 | 战术区地形（帧流程与地形 surface 缓存、可见格与坐标变换、TMP 地块、光照、地形 surface 上的其他内容、对照基准与开图方法） | `terrain-gpu-handoff.md` | `443a5e7` | 已交付：复用 `4F4583` 回调采集；Tile 含覆盖物/弹坑/静态对象，不是纯 TMP 真值；颜色依赖完整 LightConvert shade 表与逐像素 ABuffer，TMP 自身用 Z 遮挡（悬崖/extra）；Phobos 侧已实现 C2–C3（`ad256099`、`f39de890`、`3b7b2237`），见 `src/Render/TerrainGPU.md` |
+| #17 | 战术区 ABuffer（shroud/fog 写入路径与取帧、SHP 原始字节、写入公式、地图外轮廓、alpha shape、`4F4583` 对照可行性） | `abuffer-gpu-handoff.md` | `5ad221c` | 已交付，Phobos 侧已实现 shroud/fog（C4.1 `a79ea5e2`、C4.2 `7ff08512`），见 `src/Render/TerrainGPU.md`“ABuffer”；alpha shape 留到阶段 E。交接修正：ABuffer 为 16 位 WORD；FogOfWar 开时第一遍覆盖也用 FOG；掩码按邻格位未置位；写入不含高度；邻格查询不检查合法性（InvalidCell）。实测原版经 SHPReference 加载 SHROUD/FOG（各 96 帧），`6D8700` 回退判定与 spawn 一致 |
 
 ## issue 写法
 
