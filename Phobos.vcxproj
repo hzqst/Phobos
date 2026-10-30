@@ -318,6 +318,15 @@
     <ClCompile Include="src\Render\SDLLoader.cpp" />
     <ClCompile Include="src\Render\SecondaryWindow.cpp" />
     <ClCompile Include="src\Render\SurfaceMirror.cpp" />
+    <ClCompile Include="src\Render\ABufferPass.cpp" />
+    <ClCompile Include="src\Render\ABufferSnapshot.cpp" />
+    <ClCompile Include="src\Render\CommandBarSnapshot.cpp" />
+    <ClCompile Include="src\Render\CursorTrace.cpp" />
+    <ClCompile Include="src\Render\PaletteCache.cpp" />
+    <ClCompile Include="src\Render\ShapeFrameSource.cpp" />
+    <ClCompile Include="src\Render\SidebarSnapshot.cpp" />
+    <ClCompile Include="src\Render\TerrainPass.cpp" />
+    <ClCompile Include="src\Render\TerrainSnapshot.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
     <ClCompile Include="src\Utilities\AresAddressInit.cpp" />

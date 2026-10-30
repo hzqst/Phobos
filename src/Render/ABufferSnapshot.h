@@ -80,9 +80,9 @@ namespace ABufferSnapshot
 	};
 
 	// The frames of the shroud and fog shapes, each 60x30 here; checked by their headers on every capture.
-	inline FrameCache::Cache Frames({4 * 1024 * 1024, 1024, 16});
-	inline std::unordered_map<std::uintptr_t, std::uint64_t> HeaderHashes;
-	inline Snapshot Current;
+	extern FrameCache::Cache Frames;
+	extern std::unordered_map<std::uintptr_t, std::uint64_t> HeaderHashes;
+	extern Snapshot Current;
 
 	inline void Clear()
 	{

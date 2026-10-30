@@ -12,8 +12,8 @@ namespace ShapeFrameSource
 {
 	constexpr size_t MaxEncodedBytes = 16 * 1024 * 1024;
 	constexpr size_t MaxAliases = 512;
-	inline FrameCache::Cache Frames;
-	inline std::unordered_map<std::uintptr_t, std::uintptr_t> Aliases;
+	extern FrameCache::Cache Frames;
+	extern std::unordered_map<std::uintptr_t, std::uintptr_t> Aliases;
 
 	inline bool Invalidate(std::uintptr_t address)
 	{

@@ -102,6 +102,26 @@ namespace TerrainImage
 			std::int64_t(LevelHeight) * (cellX + cellY) - tacticalY - std::int64_t(LevelHeight) * level + viewY};
 	}
 
+	// 480350 and 6B55F0: a smudge draws frame 0 of its type's shape centered on the top corner of
+	// the cell's diamond, (tile.X + 30, tile.Y). Nonzero SmudgeData d, the subcell of a multi-cell
+	// smudge, moves the center back to the footprint's origin by q = d / width rows and r = d % width
+	// columns. 4AED70 then subtracts half the shape's canvas and adds the frame's offset. False where
+	// the native division by width would fault.
+	constexpr bool SmudgePosition(Point tile, int data, int width, int shapeWidth, int shapeHeight,
+		int frameLeft, int frameTop, Point& out)
+	{
+		std::int64_t q = 0, r = 0;
+		if (data != 0)
+		{
+			if (width == 0) return false;
+			q = data / width;
+			r = data % width;
+		}
+		out = {tile.X + TileWidth / 2 + TileWidth * (q - r) / 2 - shapeWidth / 2 + frameLeft,
+			tile.Y - LevelHeight * (q + r) - shapeHeight / 2 + frameTop};
+		return true;
+	}
+
 	// 47FF80: a piece with an extra image reaches this far above the diamond.
 	constexpr int ExtraRise(int pieceY, int extraY)
 	{

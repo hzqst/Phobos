@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。目前只画 TMP 地块：主菱形与 extra 图，按原生顺序、GPU 不用 Z buffer，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。弹坑、overlay、Terrain 对象、建筑底座、地块阴影、alpha shape、TMP 自身的 Z 遮挡都不在本层。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序、GPU 不用 Z buffer，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。overlay 及其阴影、deferred 记录、Terrain 对象、建筑底座、地块阴影、alpha shape、TMP 自身的 Z 遮挡都不在本层。
 
 ## 采集
 
@@ -32,7 +32,7 @@ C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS
 
 GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地形裁剪到 ViewBounds，加 Composite 画布原点（`Tooltip::CanvasOrigin`）。显示条件为 `Game::IsActive`、`ScenarioStarted`、Tactical 存在。
 
-`TerrainPass.h`（只由 `GPURender.cpp` 包含）负责实例化绘制：
+`TerrainPass.h` / `TerrainPass.cpp` 负责实例化绘制（着色器字节、GPU 资源与实例都在 `.cpp`；各快照模块的缓存与状态同样定义在各自的 `.cpp`，头文件只有 `extern` 声明）：
 
 - 每个裁剪后的地块图是一个 32 字节实例（`TerrainBatch::Instance`：画布位置、尺寸、atlas 纹素、帧内偏移、颜色表首行与 shade 数、q 与是否主菱形），放在 storage buffer 中。
 - 实例按原生顺序排列，按 atlas 页切成连续段，每段一次 `SDL_DrawGPUPrimitives`（每实例 6 个顶点）；同一次绘制内图元按提交顺序光栅化，顺序不变。正常只有一页，即一次绘制。
@@ -54,7 +54,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 不做深度测试，只按绘制顺序覆盖；已测地图上原生 Z 测试从不挡色（见“深度”），对象遮挡需要的 GPU 深度留到阶段 D。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 弹坑（`480350` 尾部）、overlay、Terrain 对象、建筑底座、地块阴影不画（C5/阶段 D）。
+- overlay 及其阴影（C5.2，严格测试并写 Z，需要先有 GPU 深度）、`4D1890` deferred 记录（Fogged overlay/smudge）、Terrain 对象、建筑底座、地块阴影不画（C5.2/C6/阶段 D）。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
 - Debug 构建每帧采集约 1 ms（下表），加 ABuffer 快照后约 1.4 ms，尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
@@ -92,6 +92,23 @@ GPU（`ABufferPass.h`、`ABufferFrame.ps.hlsl`，顶点着色器复用 `TerrainT
 `4801F0` 每次执行都会把两次取帧的原始结果存进 `Visibility`/`Foggedness`。`stale` 是这两个字节与当前结果不同的格数，即原生增量缓存尚未重画的格子。模型每次按当前标志完整重建，原生只重画 VisibleCells 中的格子；一个格子自身标志不变、只是邻格被揭开时不会进入该队列，旧帧会保留到之后被重画。这类格子上的差异属于原生缓存滞后，不是模型错误。
 
 首期不建模 alpha shape（`AlphaShapeClass::Array` 数量记录在 `abuffer` 行）与地形之后其他写 Alpha 的 blitter；`4F4583` 时的原生 ABuffer 只在这些都不存在时等于地块读取时的值。
+
+## 弹坑
+
+`480350` 画完本格 TMP（主菱形与 extra）后，只要 `SmudgeTypeIndex`（`+48`）不是 −1，就经类型虚槽 `+A0`（`6B55F0`）画该格的弹坑；TMP 没画出来（空 piece、无图）时也照画。是逐格穿插，不是全屏 TMP 画完再统一画弹坑。快照在每格 TMP 实例之后追加一个弹坑实例，规则在 `TerrainImage::SmudgePosition`（有单元测试）：
+
+| 步骤 | 规则 |
+| --- | --- |
+| 条件 | 与 TMP 相同的扫描与 `47FF80` 边界相交检查（`6D7560` 才会调用 `480350`）；类型索引越界计入 `smudgeMissing` |
+| 素材 | `SmudgeType` 的 `Image@+A4`，**固定帧 0**；`ShapeFrameSource::Acquire` 读已加载的 SHP（含 RLE），引用未加载时 NotReady，不触发 lazy load；类型无图时与原生一样不画 |
+| 位置 | 中心为本格主菱形顶角 `(tileX+30, tileY)`（含 Level）。`d = SmudgeData@+11F` 非零时是多格弹坑的子格号：`q=d/Width`、`r=d%Width`（`Width@+298`，有符号截断），中心再移 `(30(q−r), −15(q+r))` 回到足迹原点，所以足迹内每格都提交整张图；`Width=0` 时原生会除零，不画并计入 `smudgeMissing`。`4AED70` 的 `0x200` 居中：左上角为中心减画布宽高的一半（截断）加帧 `Left/Top` |
+| 裁剪 | 阶段 clip（整屏为 ViewBounds），不按格子菱形裁剪 |
+| 颜色 | flags `0xE00` 选 `TransXlatAlpha`：索引 0 透明，其余按本格 LightConvert、`Intensity_Terrain` 的光照行与该像素的 ABuffer 值查色，与 TMP 的 `420140` 公式相同，因此复用地形管线（实例不是主菱形，索引 0 `discard`） |
+| 深度 | 该 blitter 不测试也不写 Z，`ZAdjust=−1−AdjustForZ(Level·[89E7C0])` 不生效；实例 `UsesZ=false` |
+
+弹坑帧在 `ShapeFrameSource` 的共用缓存（与侧栏相同，SHP 析构时失效），地块 piece 仍在 `TerrainSnapshot::Frames`；`Placement::Storage` 记录实例的帧来自哪个缓存，atlas 请求与 `depthcheck` 都按它解析。trace 主行新增 `smudges`（提交的弹坑实例数）与 `smudgeMissing`。
+
+范围外：`4D1890` 的 smudge `1Dh` deferred 分支（帧取记录 `+58`、位置取保存矩形）不画；`6D7F20` 可见格队列的增量重画用完整 ViewBounds 作 clip，整屏重建不复现这种历史。
 
 ## 验收（2026-10-30）
 
@@ -166,3 +183,14 @@ HEAD `32ee7cce` + 本批未提交改动，1024×768，同上受控地图与比�
 | Vulkan GPUSHRD + FogOfWar | 开局、两段移动后 | 同上 | 49 次 `split=0` |
 
 DLL SHA256：D3D12 与 Vulkan 两轮为 `5648c158…f90a`；之后改为每次采集只查一次各帧号的 FrameID，最终 `bc86ae75…0c3e` 在 D3D12 GPUSHRD + FogOfWar 复测开局与移动后，结果同上（17 次 `split=0`、`unsupported=0`）。采集平均耗时 1.41 ms（之前 1.77 ms，C2.5 为约 1.0 ms），每次 present 地形仍为 1 次绘制、775 个实例。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的 `[Phobos] GPURender.Driver=vulkan`，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c42`、`c42f`、`c42v`、`c42p`。回归通过，`test_gpu_capture.cmd` 通过；Debug 构建无警告（含 `ABufferFrame.ps` 的 DXIL/SPIR-V）。
+
+### C5.1 弹坑（2026-10-30）
+
+HEAD `d510023a` + 本批未提交改动，DLL SHA256 `ad1859f8…c3c6`，1024×768。新增受控地图 `GPUSMUD.MAP`：`GPUTOMB.MAP` 加 24 个弹坑（`CRATER01–12`、`BURNT01–12`，开局视野内，含多格大坑）。同一暂停帧比较 `native_terrain` 与 `gpu` 的 ViewBounds 区域。
+
+| 后端 | 状态 | 弹坑实例 | 颜色对照 |
+| --- | --- | --- | --- |
+| D3D12 | 开局；向左、向右、向上、向下滚屏（弹坑在视野边缘被裁剪） | trace：开局 40、向左 32、向右 23，`smudgeMissing=0` | 每次只有光标处 188 像素不同 |
+| Vulkan | 开局、向左滚屏 | 同上 | 同上 |
+
+未单独测迷雾/黑幕下的弹坑（与 TMP 共用 ABuffer 查色）。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c51`、`c51v`。回归新增 `TerrainImageTests` 弹坑位置用例；Debug 构建无警告。

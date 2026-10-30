@@ -77,6 +77,19 @@ int main()
 	constexpr auto position = TilePosition(10, 4, 2, 100, 50, 16);
 	static_assert(position.X == 30 * 6 - 100 - 30 && position.Y == 15 * 14 - 50 - 30 + 16);
 	Check(ExtraRise(10, 4) == 6 && ExtraRise(4, 10) == 0, "extra rise");
+
+	// Smudges: a 1x1 shape centered on the diamond's top corner, then the subcells of a 3x2 smudge.
+	Point smudge {};
+	Check(SmudgePosition({100, 50}, 0, 1, 60, 30, 0, 0, smudge) && smudge.X == 100 && smudge.Y == 35, "smudge origin");
+	Check(SmudgePosition({100, 50}, 0, 0, 61, 31, 4, 2, smudge) && smudge.X == 100 + 30 - 30 + 4 && smudge.Y == 50 - 15 + 2,
+		"smudge frame offset, half canvas truncates, width unused at subcell 0");
+	Check(SmudgePosition({100, 50}, 1, 3, 180, 90, 0, 0, smudge) && smudge.X == 100 + 30 - 30 - 90 && smudge.Y == 50 - 15 - 45,
+		"second column moves back left and up");
+	Check(SmudgePosition({100, 50}, 3, 3, 180, 90, 0, 0, smudge) && smudge.X == 100 + 30 + 30 - 90 && smudge.Y == 50 - 15 - 45,
+		"second row moves back right and up");
+	Check(SmudgePosition({100, 50}, 5, 3, 180, 90, 0, 0, smudge) && smudge.X == 100 + 30 - 30 - 90 && smudge.Y == 50 - 45 - 45,
+		"last subcell");
+	Check(!SmudgePosition({100, 50}, 1, 0, 60, 30, 0, 0, smudge), "zero width faults natively");
 	Check(ScanRows(736) == 49 + 17 && ScanColumns(856) == 14 + 4, "1024x768 scan");
 	Check(ScanRows(568) == 37 + 17 && ScanColumns(632) == 10 + 4, "800x600 scan");
 	Check(FloorHalf(-3) == -2 && FloorHalf(-2) == -1 && FloorHalf(-1) == -1 && FloorHalf(3) == 1, "floor half");

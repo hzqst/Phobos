@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ABufferSnapshot.h"
+#include "ShapeFrameSource.h"
 #include "SidebarSnapshot.h"
 #include "TerrainBatch.h"
 #include "TerrainImage.h"
@@ -9,6 +10,7 @@
 #include <Drawing.h>
 #include <IsometricTileTypeClass.h>
 #include <MapClass.h>
+#include <SmudgeTypeClass.h>
 #include <TacticalClass.h>
 #include <cstdio>
 #include <unordered_map>
@@ -18,7 +20,8 @@
 // Stage C2: main diamond and extra image in native order, lit by Intensity_Terrain with the
 // default ABuffer value. Stage C3 adds each image's Z plane and base depth; the GPU does not test
 // them yet. Stage C4.2 captures the ABuffer's shroud and fog with each capture (ABufferSnapshot) for
-// the shader's light. Smudges and every later Tile layer are absent.
+// the shader's light. Stage C5.1 adds each cell's smudge (480350 -> 6B55F0) right after its tile.
+// Overlays and every later Tile layer are absent.
 namespace TerrainSnapshot
 {
 	using namespace TerrainImage;
@@ -41,6 +44,9 @@ namespace TerrainSnapshot
 	static_assert(offsetof(CellClass, LightConvert) == 0x34);
 	static_assert(offsetof(CellClass, IsoTileTypeIndex) == 0x38);
 	static_assert(offsetof(CellClass, Intensity_Terrain) == 0x10C);
+	static_assert(offsetof(CellClass, SmudgeTypeIndex) == 0x48);
+	static_assert(offsetof(CellClass, SmudgeData) == 0x11F);
+	static_assert(offsetof(SmudgeTypeClass, Width) == 0x298);
 	static_assert(offsetof(CellClass, Height) == 0x11A);
 	static_assert(offsetof(CellClass, Level) == 0x11B);
 	static_assert(offsetof(CellClass, Flags) == 0x140);
@@ -62,6 +68,8 @@ namespace TerrainSnapshot
 	static_assert(sizeof(Piece) == 0x34);
 	enum PieceFlag : std::uint8_t { HasExtra = 1, HasDepth = 2, AlternateVariant = 4 };
 
+	extern FrameCache::Cache Frames;
+
 	struct Placement
 	{
 		FrameCache::FrameID ID;
@@ -74,6 +82,8 @@ namespace TerrainSnapshot
 		// writes the ZBuffer; with it each pixel's depth is Depth plus its Z byte.
 		bool UsesZ = false;
 		std::uint16_t Depth = 0;
+		// Tile pieces live in Frames, smudge shapes in ShapeFrameSource's cache.
+		const FrameCache::Cache* Storage = &Frames;
 	};
 	struct Frame
 	{
@@ -83,14 +93,13 @@ namespace TerrainSnapshot
 		RectangleStruct Clip {};
 		std::vector<Placement> Placements;
 	};
-	inline Frame Current;
-	inline FrameCache::Cache Frames({64 * 1024 * 1024, 16384, 8192});
-	inline TerrainBatch::ColorTables Tables(TableRows);
-	inline std::unordered_map<std::uintptr_t, std::uint64_t> PieceHashes;
+	extern Frame Current;
+	extern TerrainBatch::ColorTables Tables;
+	extern std::unordered_map<std::uintptr_t, std::uint64_t> PieceHashes;
 	// 0: not checked yet, 1: the template is the analytic diamond, 2: it is not.
-	inline int TemplateState = 0;
-	inline bool Trace = false;
-	inline unsigned TraceCount = 0;
+	extern int TemplateState;
+	extern bool Trace;
+	extern unsigned TraceCount;
 	// Capture cost and what the presents drew, logged every PerfWindow captures.
 	constexpr unsigned PerfWindow = 600;
 	struct Perf
@@ -98,10 +107,10 @@ namespace TerrainSnapshot
 		std::uint64_t Captures = 0, Ticks = 0, MaxTicks = 0, Presents = 0, Draws = 0, Instances = 0;
 		unsigned Lines = 0;
 	};
-	inline Perf Stats;
-	inline std::uint64_t LastTraceHash = 0;
+	extern Perf Stats;
+	extern std::uint64_t LastTraceHash;
 	// The trace waits until the view stops scrolling, so its lines go to settled views.
-	inline Point LastTactical {INT64_MIN, INT64_MIN};
+	extern Point LastTactical;
 
 	inline void Invalidate()
 	{
@@ -159,7 +168,17 @@ namespace TerrainSnapshot
 	}
 
 	struct PieceFrames { FrameCache::FrameID Main, Extra; const char* Reason = nullptr; bool UsesZ = false; };
-	struct Counters { int Visited = 0, Legal = 0, Drawn = 0, Extras = 0, Tile = 0, Image = 0, Variant = 0, Empty = 0, Palette = 0, Frame = 0, NoDepth = 0, MaxLevel = 0; };
+	// Frame 0 of a smudge type's shape for one capture, with the shape's canvas and the type's Width.
+	// No ID and not Failed: the type has no shape and draws nothing.
+	struct SmudgeShape
+	{
+		FrameCache::FrameID ID;
+		FrameCache::Descriptor Frame;
+		int CanvasWidth = 0, CanvasHeight = 0, Width = 0;
+		bool Failed = false;
+	};
+	struct Counters { int Visited = 0, Legal = 0, Drawn = 0, Extras = 0, Tile = 0, Image = 0, Variant = 0, Empty = 0, Palette = 0, Frame = 0, NoDepth = 0, MaxLevel = 0,
+		Smudges = 0, SmudgeMissing = 0; };
 	// The drawn cell nearest the view center, for the trace.
 	struct Sample
 	{
@@ -326,7 +345,7 @@ namespace TerrainSnapshot
 		std::vector<std::uint16_t> model(size_t(clip.Width) * clip.Height, 0xFFFF);
 		for (const auto& placement : Current.Placements)
 		{
-			const auto* frame = Frames.Resolve(placement.ID);
+			const auto* frame = placement.Storage->Resolve(placement.ID);
 			const auto plane = size_t(placement.Width) * placement.Height;
 			if (!frame || frame->Indices.size() < plane * (placement.UsesZ ? 2 : 1)) { ++check.Missing; continue; }
 			const auto* indices = frame->Indices.data();
@@ -407,6 +426,26 @@ namespace TerrainSnapshot
 				if (inserted) it->second = CursorSnapshot::Readable(piece, sizeof(*piece) + DiamondPixels);
 				return it->second;
 			};
+			std::unordered_map<int, SmudgeShape> smudges;
+			// Null for an index outside the smudge types, where the native lookup would read past the array.
+			const auto smudgeShape = [&](int index) -> const SmudgeShape*
+			{
+				if (index < 0 || index >= SmudgeTypeClass::Array.Count) return nullptr;
+				const auto [it, inserted] = smudges.try_emplace(index);
+				auto& shape = it->second;
+				if (!inserted) return &shape;
+				const auto* smudgeType = SmudgeTypeClass::Array.Items[index];
+				if (!CursorSnapshot::Readable(smudgeType, sizeof(SmudgeTypeClass))) { shape.Failed = true; return &shape; }
+				shape.Width = smudgeType->Width;
+				if (!smudgeType->Image) return &shape;
+				// The loaded shape only: an unloaded reference stays NotReady instead of loading.
+				std::uintptr_t identity = 0;
+				const auto result = ShapeFrameSource::Acquire(smudgeType->Image, 0, identity);
+				const auto* info = result.State == FrameCache::Status::Ready ? ShapeFrameSource::Frames.Describe(result.Frame->Resource) : nullptr;
+				if (!info) { shape.Failed = true; return &shape; }
+				shape = {result.Frame->ID, result.Frame->Geometry, info->Width, info->Height, smudgeType->Width};
+				return &shape;
+			};
 			for (int r = -ScanMargin; r < rows + ScanMargin; ++r)
 				for (int c = -ScanMargin; c < columns + ScanMargin; ++c)
 				{
@@ -436,68 +475,87 @@ namespace TerrainSnapshot
 						if (basePiece->Flags & HasExtra) rise = ExtraRise(basePiece->Y, basePiece->ExtraY);
 					}
 					if (!Intersects(Current.Clip, position.X, position.Y - rise, TileWidth, std::int64_t(CellHeight) + rise)) continue;
-					// 480350: an alternate-variant piece (5471F0) takes the cell flag, otherwise 4814F0 picks.
-					const int variants = type->unk_2F0;
-					int variant = 0;
-					bool pick = clear;
-					if (!clear && variants > 1)
-					{
-						const auto* entry = PieceSlot(image, height % PieceCount(image));
-						if (entry && !readable(entry)) { ++count.Image; continue; }
-						if (entry && (entry->Flags & AlternateVariant))
-							variant = (std::uint32_t(cell->Flags) & AlternateVariantFlag) ? 1 : 0;
-						else pick = true;
-					}
-					if (pick)
-					{
-						if (variants > 4 && !table8Ready) { ++count.Variant; continue; }
-						variant = PickVariant(coords.X, coords.Y, height, image->GridWidth, image->GridHeight, variants, table4, table8);
-					}
-					const int steps = VariantSteps(variant, variants);
-					const IsometricTileTypeClass* drawn = type;
-					for (int i = 0; i < steps && drawn; ++i)
-						drawn = reinterpret_cast<const IsometricTileTypeClass*>(drawn->unk_2BC);
-					if (steps < 0 || !drawn) { ++count.Variant; continue; }
-					const auto* drawnImage = imageOf(drawn);
-					if (!drawnImage) { ++count.Image; continue; }
-					// 547CF0 draws nothing, extra image included, for an empty piece.
-					const auto* piece = PieceSlot(drawnImage, (clear ? 0 : height) % PieceCount(drawnImage));
-					if (!piece) { ++count.Empty; continue; }
-					if (!readable(piece)) { ++count.Image; continue; }
 					const auto* convert = cell->LightConvert;
 					const auto [table, inserted] = converts.try_emplace(convert);
 					if (inserted && ValidConvert(convert)) table->second = AcquireTable(convert);
 					if (!table->second) { ++count.Palette; continue; }
 					const int lightRow = LightRow(std::int16_t(cell->Intensity_Terrain));
-					const int shade = ShadeRow(convert->ShadeCount, lightRow, DefaultAlpha);
-					auto frames = captured.find(piece);
-					if (frames == captured.end()) frames = captured.emplace(piece, AcquirePiece(piece)).first;
-					if (frames->second.Reason) { ++count.Frame; continue; }
-					if (position.X < INT_MIN || position.X > INT_MAX || position.Y < INT_MIN || position.Y > INT_MAX) continue;
-					++count.Drawn;
-					if (!frames->second.UsesZ) ++count.NoDepth;
-					count.MaxLevel = std::max(count.MaxLevel, int(cell->Level));
-					const auto dx = position.X + TileWidth / 2 - (std::int64_t(view.X) + view.Width / 2);
-					const auto dy = position.Y + CellHeight / 2 - (std::int64_t(view.Y) + view.Height / 2);
-					if (dx * dx + dy * dy < sampleDistance)
+					// 480350 draws the tile, then the cell's smudge even where the tile drew nothing.
+					const auto placeTile = [&]
 					{
-						sampleDistance = dx * dx + dy * dy;
-						sample = {cellX, cellY, cell->IsoTileTypeIndex, typeIndex, height, cell->Level, variants, variant,
-							drawn->ArrayIndex, std::int16_t(cell->Intensity_Terrain), convert->ShadeCount, shade, piece};
-					}
-					const auto depth = BaseDepth(zbuffer->MaxValue, zbuffer->Bounds.Y, int(position.Y), drawnImage->PixelHeight, cell->Level);
-					const bool usesZ = frames->second.UsesZ;
-					Current.Placements.push_back({frames->second.Main, table->second, int(position.X), int(position.Y), TileWidth, DiamondRows,
-						lightRow, true, usesZ, depth});
-					if (frames->second.Extra)
+						// 480350: an alternate-variant piece (5471F0) takes the cell flag, otherwise 4814F0 picks.
+						const int variants = type->unk_2F0;
+						int variant = 0;
+						bool pick = clear;
+						if (!clear && variants > 1)
+						{
+							const auto* entry = PieceSlot(image, height % PieceCount(image));
+							if (entry && !readable(entry)) { ++count.Image; return; }
+							if (entry && (entry->Flags & AlternateVariant))
+								variant = (std::uint32_t(cell->Flags) & AlternateVariantFlag) ? 1 : 0;
+							else pick = true;
+						}
+						if (pick)
+						{
+							if (variants > 4 && !table8Ready) { ++count.Variant; return; }
+							variant = PickVariant(coords.X, coords.Y, height, image->GridWidth, image->GridHeight, variants, table4, table8);
+						}
+						const int steps = VariantSteps(variant, variants);
+						const IsometricTileTypeClass* drawn = type;
+						for (int i = 0; i < steps && drawn; ++i)
+							drawn = reinterpret_cast<const IsometricTileTypeClass*>(drawn->unk_2BC);
+						if (steps < 0 || !drawn) { ++count.Variant; return; }
+						const auto* drawnImage = imageOf(drawn);
+						if (!drawnImage) { ++count.Image; return; }
+						// 547CF0 draws nothing, extra image included, for an empty piece.
+						const auto* piece = PieceSlot(drawnImage, (clear ? 0 : height) % PieceCount(drawnImage));
+						if (!piece) { ++count.Empty; return; }
+						if (!readable(piece)) { ++count.Image; return; }
+						const int shade = ShadeRow(convert->ShadeCount, lightRow, DefaultAlpha);
+						auto frames = captured.find(piece);
+						if (frames == captured.end()) frames = captured.emplace(piece, AcquirePiece(piece)).first;
+						if (frames->second.Reason) { ++count.Frame; return; }
+						if (position.X < INT_MIN || position.X > INT_MAX || position.Y < INT_MIN || position.Y > INT_MAX) return;
+						++count.Drawn;
+						if (!frames->second.UsesZ) ++count.NoDepth;
+						count.MaxLevel = std::max(count.MaxLevel, int(cell->Level));
+						const auto dx = position.X + TileWidth / 2 - (std::int64_t(view.X) + view.Width / 2);
+						const auto dy = position.Y + CellHeight / 2 - (std::int64_t(view.Y) + view.Height / 2);
+						if (dx * dx + dy * dy < sampleDistance)
+						{
+							sampleDistance = dx * dx + dy * dy;
+							sample = {cellX, cellY, cell->IsoTileTypeIndex, typeIndex, height, cell->Level, variants, variant,
+								drawn->ArrayIndex, std::int16_t(cell->Intensity_Terrain), convert->ShadeCount, shade, piece};
+						}
+						const auto depth = BaseDepth(zbuffer->MaxValue, zbuffer->Bounds.Y, int(position.Y), drawnImage->PixelHeight, cell->Level);
+						const bool usesZ = frames->second.UsesZ;
+						Current.Placements.push_back({frames->second.Main, table->second, int(position.X), int(position.Y), TileWidth, DiamondRows,
+							lightRow, true, usesZ, depth});
+						if (frames->second.Extra)
+						{
+							const auto x = position.X + std::int64_t(piece->ExtraX) - piece->X;
+							const auto y = position.Y + std::int64_t(piece->ExtraY) - piece->Y;
+							if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) return;
+							++count.Extras;
+							Current.Placements.push_back({frames->second.Extra, table->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight,
+								lightRow, false, usesZ, depth});
+						}
+					};
+					placeTile();
+					if (cell->SmudgeTypeIndex == -1) continue;
+					// 6B55F0: frame 0 of the type's shape, lit like the tile, neither testing nor writing Z.
+					const auto* smudge = smudgeShape(cell->SmudgeTypeIndex);
+					TerrainImage::Point at {};
+					if (!smudge || !smudge->ID || !SmudgePosition(position, cell->SmudgeData, smudge->Width, smudge->CanvasWidth, smudge->CanvasHeight,
+						smudge->Frame.Left, smudge->Frame.Top, at) || at.X < INT_MIN || at.X > INT_MAX || at.Y < INT_MIN || at.Y > INT_MAX)
 					{
-						const auto x = position.X + std::int64_t(piece->ExtraX) - piece->X;
-						const auto y = position.Y + std::int64_t(piece->ExtraY) - piece->Y;
-						if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
-						++count.Extras;
-						Current.Placements.push_back({frames->second.Extra, table->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight,
-							lightRow, false, usesZ, depth});
+						// A type without a shape draws nothing natively; anything else is a capture failure.
+						if (!smudge || smudge->ID || smudge->Failed) ++count.SmudgeMissing;
+						continue;
 					}
+					++count.Smudges;
+					Current.Placements.push_back({smudge->ID, table->second, int(at.X), int(at.Y), smudge->Frame.Width, smudge->Frame.Height,
+						lightRow, false, false, 0, &ShapeFrameSource::Frames});
 				}
 			pieces = captured.size();
 			tables = Tables.Count();
@@ -517,7 +575,7 @@ namespace TerrainSnapshot
 		const int state[] {accelerated, zvalid ? zbuffer->MaxValue : 0, zvalid ? zbuffer->Bounds.Y : 0, count.NoDepth, count.MaxLevel, Current.Visible, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,
-			count.Palette, count.Frame, int(pieces), int(tables), sample.X, sample.Y};
+			count.Palette, count.Frame, int(pieces), int(tables), sample.X, sample.Y, count.Smudges, count.SmudgeMissing};
 		auto hash = SidebarSnapshot::Hash(state, sizeof(state));
 		hash = SidebarSnapshot::Hash(&reason, sizeof(reason), hash);
 		hash = SidebarSnapshot::Hash(&abuffer.Hash, sizeof(abuffer.Hash), hash);
@@ -526,12 +584,12 @@ namespace TerrainSnapshot
 		++TraceCount;
 		const auto& stats = Frames.GetStats();
 		Debug::Log("[TerrainGPU] sample=%u ready=%d reason=%s view=%d,%d,%d,%d origin=%d tactical=%d,%d anchor=%d,%d scan=%dx%d+%d "
-			"visited=%d legal=%d drawn=%d extras=%d tile=%d image=%d variant=%d empty=%d palette=%d frame=%d pieces=%zu tables=%zu rows=%u "
+			"visited=%d legal=%d drawn=%d extras=%d tile=%d image=%d variant=%d empty=%d palette=%d frame=%d smudges=%d smudgeMissing=%d pieces=%zu tables=%zu rows=%u "
 			"cache=%zu/%zu bytes=%zu center=%d,%d:index=%d:type=%d:sub=%d:level=%d:variants=%d:variant=%d:drawn=%d:piece=%p:intensity=%d:shade=%d/%d\n",
 			TraceCount, Current.Visible, reason, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns, ScanMargin,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,
-			count.Palette, count.Frame, pieces, tables, Tables.UsedRows(), stats.Resources, stats.Frames, stats.IndexBytes, sample.X, sample.Y, sample.Index,
+			count.Palette, count.Frame, count.Smudges, count.SmudgeMissing, pieces, tables, Tables.UsedRows(), stats.Resources, stats.Frames, stats.IndexBytes, sample.X, sample.Y, sample.Index,
 			sample.Type, sample.Height, sample.Level, sample.Variants, sample.Variant, sample.Drawn, sample.Piece, sample.Intensity,
 			sample.Shade, sample.Shades);
 		Debug::Log("[TerrainGPU] depth sample=%u accelerated=%d zbuffer=%p bounds=%d,%d,%d,%d maxValue=%d width=%d height=%d noDepth=%d maxLevel=%d\n",

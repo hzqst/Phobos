@@ -15,7 +15,7 @@ namespace PaletteCache
 	};
 	struct Record { PaletteID ID; Data Values; };
 	using Handle = std::shared_ptr<const Record>;
-	inline FrameCache::IDSequence IDs;
+	extern FrameCache::IDSequence IDs;
 	class Cache
 	{
 	public:

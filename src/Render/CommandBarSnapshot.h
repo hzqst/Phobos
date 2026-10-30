@@ -42,9 +42,9 @@ namespace CommandBarSnapshot
 		std::array<Asset, AssetCount> Assets;
 		std::vector<Placement> Placements;
 	};
-	inline Frame Current;
-	inline unsigned TraceCount = 0;
-	inline std::uint64_t LastTraceHash = 0;
+	extern Frame Current;
+	extern unsigned TraceCount;
+	extern std::uint64_t LastTraceHash;
 
 	inline void Invalidate()
 	{

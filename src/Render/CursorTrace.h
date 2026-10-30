@@ -9,7 +9,7 @@
 #include <cstdio>
 
 // Diagnostic only. No engine locks, surface methods, resource ownership or GPU calls.
-// Header-only so the probe can share the existing Render translation units.
+// The probe's state lives in CursorTrace.cpp; the functions stay inline for the hooks that record.
 namespace CursorTrace
 {
 	constexpr size_t Capacity = 16384;
@@ -26,16 +26,16 @@ namespace CursorTrace
 		DWORD background[3];
 	};
 
-	inline Event Events[Capacity] {};
-	inline SRWLOCK BufferLock = SRWLOCK_INIT;
-	inline std::atomic<bool> Recording { false };
-	inline std::atomic<unsigned> Dropped { 0 };
-	inline std::atomic<DWORD> NextFrame { 0 }, Mode { 0 }, Session { 0 };
-	inline thread_local DWORD Frame = 0, Depth = 0, ThreadSession = 0;
-	inline size_t Count = 0;
-	inline bool Armed = false, KeyDown = false, Pending = false;
-	inline DWORD Started = 0, CaptureNumber = 0;
-	inline LARGE_INTEGER Frequency {};
+	extern Event Events[Capacity];
+	extern SRWLOCK BufferLock;
+	extern std::atomic<bool> Recording;
+	extern std::atomic<unsigned> Dropped;
+	extern std::atomic<DWORD> NextFrame, Mode, Session;
+	extern thread_local DWORD Frame, Depth, ThreadSession;
+	extern size_t Count;
+	extern bool Armed, KeyDown, Pending;
+	extern DWORD Started, CaptureNumber;
+	extern LARGE_INTEGER Frequency;
 
 	inline void Initialize()
 	{
