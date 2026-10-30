@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序、GPU 不用 Z buffer，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。overlay 及其阴影、deferred 记录、Terrain 对象、建筑底座、地块阴影、alpha shape、TMP 自身的 Z 遮挡都不在本层。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。C5.2a 把战术区改画进与 ViewBounds 同尺寸的离屏目标，带深度缓冲，地块按 `547CF0` 测试并写 Z（见“深度”），为 #18/#19 中会被地块 Z 遮挡的 overlay、Terrain 对象与悬崖投影做准备。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序与原生 Z，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。overlay 及其阴影、deferred 记录、Terrain 对象、建筑底座、地块阴影、alpha shape 都不在本层。
 
 ## 采集
 
@@ -34,12 +34,14 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 `TerrainPass.h` / `TerrainPass.cpp` 负责实例化绘制（着色器字节、GPU 资源与实例都在 `.cpp`；各快照模块的缓存与状态同样定义在各自的 `.cpp`，头文件只有 `extern` 声明）：
 
-- 每个裁剪后的地块图是一个 32 字节实例（`TerrainBatch::Instance`：画布位置、尺寸、atlas 纹素、帧内偏移、颜色表首行与 shade 数、q 与是否主菱形），放在 storage buffer 中。
-- 实例按原生顺序排列，按 atlas 页切成连续段，每段一次 `SDL_DrawGPUPrimitives`（每实例 6 个顶点）；同一次绘制内图元按提交顺序光栅化，顺序不变。正常只有一页，即一次绘制。
+- 每个裁剪后的地块图是一个 32 字节实例（`TerrainBatch::Instance`：目标位置、尺寸、atlas 纹素、帧内偏移、颜色表首行与 shade 数、q 与是否主菱形、深度基值与 Z 平面相对索引平面的行数），放在 storage buffer 中。
+- 实例按原生顺序排列，按 atlas 页与深度模式（有无 Z 数据）切成连续段，每段一次 `SDL_DrawGPUPrimitives`（每实例 6 个顶点）；同一次绘制内图元按提交顺序光栅化，顺序不变。纯地块正常只有一段；弹坑不碰 Z，与地块交替时每次切换多一段。
 - `TerrainTile.vs.hlsl` 用 `View.z + SV_VertexID/6` 取实例；起始实例由顶点 uniform 传入，不依赖 base instance（D3D12 的 `SV_InstanceID` 不含起始值）。
-- 在 `PresentPass::DrawSprites` 的底层回调中绘制：同一渲染通道、清屏之后、精灵之前；交换链与截图读回两次绘制都包含地形。
+- 战术目标（`TerrainPass::Render`）：ABuffer 通道之后、获取交换链之前单独一个渲染通道，尺寸为 ViewBounds，一个目标像素对应一个 Tile 像素。颜色为 `R16G16B16A16_FLOAT`，存各通道的整数值（5/6 位），使以后的 `(old>>1)&HalfTranslucencyMask` 暗化可用混合系数 0.5 精确复现；深度为 `D32_FLOAT`，不支持时 `D16_UNORM`（日志 `Tactical depth buffer`）。每次清成黑色与深度 1。
+- 实例坐标为目标坐标：Tile 坐标减 ViewBounds 左上角。
+- 合成：`PresentPass::DrawSprites` 的底层回调里，用实例缓冲末尾的一个合成实例把整张战术目标贴到画布（Tile 画布原点 X + ViewBounds.X，ViewBounds.Y），`TerrainComposite.ps` 对通道值向下取整再按位数归一；交换链与截图读回两次绘制共用同一张战术目标。
 - 实例内容与上次上传相同时（没有新 GScreen 帧的 present）不重新上传；颜色表换代时整张重新上传（SDL 的 cycle 不保留旧内容）。
-- 地形 PS 另绑定 `ABufferPass` 的纹理：画布像素减去（Tile 画布原点 X，ViewBounds.Y）即 ABuffer 坐标，越界时取 127。
+- 地形 PS 另绑定 `ABufferPass` 的纹理：目标像素加 ViewBounds.X 即 ABuffer 坐标（两者行相同），越界时取 127。
 
 - `560BF0`（视频模式重建）与 `OnVideoModeSet` 清快照；`6BE1C0`（场景清理）与释放 GPU 资源时连同素材缓存一起清空。
 - 光照、retint、桥毁、地形变化不需要单独的失效 hook：每次采集重读格子与颜色表并按内容核对。
@@ -51,7 +53,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 ## 未支持与边界
 
-- GPU 不做深度测试，只按绘制顺序覆盖；已测地图上原生 Z 测试从不挡色（见“深度”），对象遮挡需要的 GPU 深度留到阶段 D。
+- 深度只实现了地块 `547CF0` 的规则（旧值 ≥ 新值时画并写）；overlay、Terrain 对象、阴影用的严格 `<` 规则、ZGradient、ZShape 在 C5.2/C6 实现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
 - overlay 及其阴影（C5.2，严格测试并写 Z，需要先有 GPU 深度）、`4D1890` deferred 记录（Fogged overlay/smudge）、Terrain 对象、建筑底座、地块阴影不画（C5.2/C6/阶段 D）。
@@ -65,7 +67,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 `depthcheck` 是只在 trace 中运行的对照：用 `TerrainImage::DrawDepth` 按快照顺序在 CPU 上模拟 Z（初值 `FFFF`），再经 `ZBuffer::GetBuffer(x, y−ViewBounds.Y)` 与 `AdjustPointer` 读原生环形缓冲逐像素比较，输出比较数、不一致数及范围、被 Z 测试挡住的像素数（`rejected`）、未画像素数与缺帧数。原生 ZBuffer 只在本帧整体重画或滚屏后、且没有其他东西写 Z 的区域才等于纯地形结果。
 
-把 tile 的 y 代入 b，Level 两项抵消，`b = 常数 − 15·(x+y)`：后画的行 b 更小，原生 Z 测试几乎总放行，与按顺序覆盖结果相同。因此地形颜色对照无法区分有无 Z；GPU 深度缓冲（已定 D32_FLOAT 为主、D16_UNORM 后备，PS 写 `SV_Depth`，地形与对象共用渲染通道）在阶段 D 对象需要被悬崖遮挡时实现并验证。
+把 tile 的 y 代入 b，Level 两项抵消，`b = 常数 − 15·(x+y)`：后画的行 b 更小，原生 Z 测试几乎总放行，与按顺序覆盖结果相同。因此地形颜色对照无法区分有无 Z。#18、#19 确认 overlay、Terrain 对象及其阴影、悬崖投影都会被已有 Z 遮挡，GPU 深度提前到 C5.2a：PS 写 `SV_Depth = uint16(b + Z字节) / 65535`（`0xFFFF` 即清空值 1；D32_FLOAT 中各整数映射互不相同且保序，D16_UNORM 中恰好还原为原整数），有 Z 数据的图用 `LESS_OR_EQUAL` 测试并写入，无 Z 数据的图（及弹坑）用不测试、不写入的管线。Z 平面在 atlas 中位于索引平面下方一个图高处。
 
 ## ABuffer
 
@@ -194,3 +196,16 @@ HEAD `d510023a` + 本批未提交改动，DLL SHA256 `ad1859f8…c3c6`，1024×7
 | Vulkan | 开局、向左滚屏 | 同上 | 同上 |
 
 未单独测迷雾/黑幕下的弹坑（与 TMP 共用 ABuffer 查色）。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c51`、`c51v`。回归新增 `TerrainImageTests` 弹坑位置用例；Debug 构建无警告。
+
+### C5.2a GPU 深度缓冲（2026-10-30）
+
+HEAD `10948817` + 本批未提交改动，1024×768，D3D12 选中 `D32_FLOAT`。同一暂停帧比较 `native_terrain` 与 `gpu` 的 ViewBounds 区域。
+
+| 后端/地图 | 状态 | 结果 |
+| --- | --- | --- |
+| D3D12 GPUTOMB | 开局、两次上滚、左右滚屏；悬崖视角（`maxLevel=4`、31 个 extra）与地图上边缘 | 每次只有光标 188 像素不同；trace `depthcheck mismatched=0 rejected=0`，`noDepth=0` |
+| Vulkan GPUTOMB | 开局、悬崖视角（30 个 extra） | 同上 |
+| Vulkan GPUSMUD | 开局（40 个弹坑，有 Z 与无 Z 管线交替） | 同上 |
+| D3D12 GPUTOMB，比较方向临时改为 `GREATER_OR_EQUAL` | 开局 | 97.85% 像素不同，证明深度测试确实生效；实验后已改回 |
+
+最终 DLL SHA256 `6958cf5f…76a3` 复测 GPUTOMB 开局与悬崖视角，结果同上。D16_UNORM 后备路径未实测。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52`、`c52v`、`c52x`、`c52f`。回归新增 `TerrainBatchTests` 深度字段与按深度模式分段用例；Debug 构建无警告（含 `TerrainComposite.ps` 的 DXIL/SPIR-V）。

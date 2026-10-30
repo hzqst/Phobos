@@ -20,6 +20,7 @@ struct VSOutput
     nointerpolation uint4 Data : TEXCOORD1;
     nointerpolation uint2 Size : TEXCOORD2;
     nointerpolation int2 Origin : TEXCOORD3;
+    nointerpolation uint Depth : TEXCOORD4;
 };
 
 float4 main(VSOutput input) : SV_Target

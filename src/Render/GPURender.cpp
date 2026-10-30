@@ -692,13 +692,19 @@ void GPURender::Present()
 		SDL_EndGPUCopyPass(pCopyPass);
 	}
 
-	// The terrain reads the ABuffer texture in both draws below; until the swapchain is acquired a
-	// failed pass can still cancel the command buffer.
+	// The tactical target reads the ABuffer texture, and both draws below read the tactical target;
+	// until the swapchain is acquired a failed pass can still cancel the command buffer.
 	if (!MirrorMode && !ABufferPass::Render(pCommandBuffer))
 	{
 		SDL_CancelGPUCommandBuffer(pCommandBuffer);
 		Atlas.CancelBatch();
 		return Fail("Drawing the terrain ABuffer");
+	}
+	if (!MirrorMode && !TerrainPass::Render(pCommandBuffer, ABufferPass::Texture, ABufferPass::Width, ABufferPass::Height))
+	{
+		SDL_CancelGPUCommandBuffer(pCommandBuffer);
+		Atlas.CancelBatch();
+		return Fail("Drawing the tactical terrain");
 	}
 
 	// Does not wait; there is no texture while the window is minimized or too many frames are queued
@@ -716,8 +722,7 @@ void GPURender::Present()
 	bool captureDrawn = false;
 	const PresentPass::Underlay terrain = [pCommandBuffer](SDL_GPURenderPass* pass, const SDL_GPUViewport& viewport)
 	{
-		TerrainPass::Draw(pass, pCommandBuffer, viewport, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height,
-			ABufferPass::Texture, ABufferPass::Width, ABufferPass::Height);
+		TerrainPass::Draw(pass, pCommandBuffer, viewport, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height);
 	};
 	if (pSwapchainTexture)
 	{

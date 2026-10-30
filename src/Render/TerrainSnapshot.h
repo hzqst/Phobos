@@ -18,8 +18,8 @@
 // The TMP tiles the terrain pass (6D2DE0 -> 6D7560 -> 480350 -> 547CF0) draws into
 // DSurface::Tile, captured in the 4F4583 callback as a full redraw of the visible cells.
 // Stage C2: main diamond and extra image in native order, lit by Intensity_Terrain with the
-// default ABuffer value. Stage C3 adds each image's Z plane and base depth; the GPU does not test
-// them yet. Stage C4.2 captures the ABuffer's shroud and fog with each capture (ABufferSnapshot) for
+// default ABuffer value. Stage C3 adds each image's Z plane and base depth, which the GPU tests and
+// writes since stage C5.2a. Stage C4.2 captures the ABuffer's shroud and fog with each capture (ABufferSnapshot) for
 // the shader's light. Stage C5.1 adds each cell's smudge (480350 -> 6B55F0) right after its tile.
 // Overlays and every later Tile layer are absent.
 namespace TerrainSnapshot

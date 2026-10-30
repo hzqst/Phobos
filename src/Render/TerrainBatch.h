@@ -21,7 +21,7 @@ namespace TerrainBatch
 		std::uint32_t Frame; // The same texel within the frame, for the diamond coverage.
 		std::uint32_t Table; // First row of the color table, its shade count.
 		std::uint32_t Light; // Light row q, 1 for a main diamond.
-		std::uint32_t Reserved;
+		std::uint32_t Depth; // Base depth, rows from the index plane down to the Z plane (0 without Z).
 	};
 	static_assert(sizeof(Instance) == 32);
 
@@ -29,10 +29,10 @@ namespace TerrainBatch
 
 	struct Rect { int X, Y, Width, Height; };
 
-	// A tile image at (x, y) on Tile, clipped to clip (Tile coordinates) and moved to the canvas
-	// by originX. False when nothing remains or a value leaves its packed range.
+	// A tile image at (x, y) on Tile, clipped to clip (Tile coordinates) and moved to the target
+	// by originX. depth is the packed Depth field. False when nothing remains or a value leaves its packed range.
 	inline bool Place(int x, int y, int width, int height, int originX, const Rect& clip, int atlasX, int atlasY,
-		unsigned tableRow, unsigned shades, int lightRow, bool diamond, Instance& out)
+		unsigned tableRow, unsigned shades, int lightRow, bool diamond, Instance& out, std::uint32_t depth = 0)
 	{
 		const auto left = std::max<std::int64_t>(x, clip.X);
 		const auto top = std::max<std::int64_t>(y, clip.Y);
@@ -47,19 +47,23 @@ namespace TerrainBatch
 			|| tableRow > 0xFFFF || shades > 0xFFFF || lightRow < 0 || lightRow > 0xFFFF) return false;
 		out = {int(canvasX), int(top), Pack(std::uint32_t(right - left), std::uint32_t(bottom - top)),
 			Pack(std::uint32_t(texelX), std::uint32_t(texelY)), Pack(std::uint32_t(frameX), std::uint32_t(frameY)),
-			Pack(tableRow, shades), Pack(std::uint32_t(lightRow), diamond ? 1u : 0u), 0};
+			Pack(tableRow, shades), Pack(std::uint32_t(lightRow), diamond ? 1u : 0u), depth};
 		return true;
 	}
 
-	struct Run { const void* Page; std::uint32_t First, Count; };
+	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; };
 
-	// Consecutive instances on the same atlas page, so each draw keeps the native order.
-	inline std::vector<Run> Split(std::span<const void* const> pages)
+	// Consecutive instances on the same atlas page and with the same depth mode (none when depths is
+	// empty), so each draw keeps the native order.
+	inline std::vector<Run> Split(std::span<const void* const> pages, std::span<const std::uint8_t> depths = {})
 	{
 		std::vector<Run> runs;
 		for (std::uint32_t i = 0; i < pages.size(); ++i)
-			if (runs.empty() || runs.back().Page != pages[i]) runs.push_back({pages[i], i, 1});
+		{
+			const bool depth = i < depths.size() && depths[i] != 0;
+			if (runs.empty() || runs.back().Page != pages[i] || runs.back().Depth != depth) runs.push_back({pages[i], i, 1, depth});
 			else ++runs.back().Count;
+		}
 		return runs;
 	}
 

@@ -1,6 +1,6 @@
-// One clipped image per instance, expanded from SV_VertexID into two triangles: the TMP tiles,
-// and the shroud and fog frames of the ABuffer pass.
-// The viewport selects the letterboxed area of the window; positions are logical canvas pixels.
+// One clipped image per instance, expanded from SV_VertexID into two triangles: the TMP tiles and
+// smudges into the tactical target, the shroud and fog frames of the ABuffer pass, and the tactical
+// target onto the window. Positions are pixels of the logical target the viewport maps.
 
 // Matches TerrainBatch::Instance; pairs pack X in the low 16 bits.
 struct Tile
@@ -11,7 +11,7 @@ struct Tile
 	uint Frame;
 	uint Table;
 	uint Light;
-	uint Reserved;
+	uint Depth;
 };
 
 StructuredBuffer<Tile> Tiles : register(t0, space0);
@@ -27,7 +27,8 @@ struct VSOutput
 	float2 Local : TEXCOORD0; // Pixels into the clipped rectangle.
 	nointerpolation uint4 Data : TEXCOORD1; // Atlas texel, frame texel, table, light.
 	nointerpolation uint2 Size : TEXCOORD2;
-	nointerpolation int2 Origin : TEXCOORD3; // Canvas position of the clipped rectangle.
+	nointerpolation int2 Origin : TEXCOORD3; // Target position of the clipped rectangle.
+	nointerpolation uint Depth : TEXCOORD4; // Base depth, Z plane offset.
 };
 
 VSOutput main(uint vertexId : SV_VertexID)
@@ -42,5 +43,6 @@ VSOutput main(uint vertexId : SV_VertexID)
 	output.Data = uint4(tile.Atlas, tile.Frame, tile.Table, tile.Light);
 	output.Size = size;
 	output.Origin = tile.Position;
+	output.Depth = tile.Depth;
 	return output;
 }

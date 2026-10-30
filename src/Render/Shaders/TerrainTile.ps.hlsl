@@ -1,5 +1,7 @@
-// TMP tile pixels of 547CF0: the index from the atlas, the shade row from the cell's light row
-// and the ABuffer word under the pixel, then the color from the cell's whole LightConvert table.
+// TMP tile pixels of 547CF0 and smudges: the index from the atlas, the shade row from the cell's
+// light row and the ABuffer word under the pixel, then the color from the cell's whole LightConvert
+// table. The tactical target keeps each channel's integer value; TerrainComposite.ps scales it.
+// An image with Z data writes its depth: the base plus the Z byte below its index, modulo 2^16.
 #ifdef __spirv__
 #define COMBINED_IMAGE_SAMPLER [[vk::combinedImageSampler]]
 #else
@@ -15,7 +17,7 @@ cbuffer Decode : register(b0, space3)
 {
     uint4 Shift;
     uint4 Bits;
-    int4 Alpha; // xy: canvas position of the ABuffer's first word, zw: its size.
+    int4 Alpha; // xy: target position of the ABuffer's first word, zw: its size.
 };
 
 struct VSOutput
@@ -25,6 +27,13 @@ struct VSOutput
     nointerpolation uint4 Data : TEXCOORD1;
     nointerpolation uint2 Size : TEXCOORD2;
     nointerpolation int2 Origin : TEXCOORD3;
+    nointerpolation uint Depth : TEXCOORD4;
+};
+
+struct PSOutput
+{
+    float4 Color : SV_Target;
+    float Depth : SV_Depth;
 };
 
 uint2 Unpack(uint value)
@@ -39,7 +48,7 @@ bool InsideDiamond(uint2 pixel)
     return pixel.y < 29 && pixel.x + half >= 30 && pixel.x < 30 + half;
 }
 
-float4 main(VSOutput input) : SV_Target
+PSOutput main(VSOutput input)
 {
     const uint2 offset = min(uint2(input.Local), input.Size - 1);
     const uint index = Atlas.Load(int3(Unpack(input.Data.x) + offset, 0));
@@ -56,5 +65,10 @@ float4 main(VSOutput input) : SV_Target
     const uint shade = min(last, last * (input.Data.w & 0xFFFF) * alpha / 32258) & 0xFF;
     const uint packed = Tables.Load(int3(index, (input.Data.z & 0xFFFF) + shade, 0));
     const uint3 maximum = (1u << Bits.xyz) - 1u;
-    return float4(float3((packed.xxx >> Shift.xyz) & maximum) / float3(maximum), 1.0);
+    PSOutput output;
+    output.Color = float4(float3((packed.xxx >> Shift.xyz) & maximum), 1.0);
+    // Only the pipeline of images with Z data tests and writes it; 0xFFFF maps to the cleared 1.
+    const uint z = Atlas.Load(int3(Unpack(input.Data.x) + offset + uint2(0, input.Depth >> 16), 0));
+    output.Depth = float(((input.Depth & 0xFFFF) + z) & 0xFFFF) / 65535.0;
+    return output;
 }

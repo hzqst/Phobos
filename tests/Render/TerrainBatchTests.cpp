@@ -17,7 +17,9 @@ int main()
 	Instance tile;
 	Check(Place(100, 200, 60, 29, 0, view, 300, 40, 53, 53, 127, true, tile), "inside the view");
 	Check(tile.X == 100 && tile.Y == 200 && tile.Size == Pack(60, 29) && tile.Atlas == Pack(300, 40)
-		&& tile.Frame == 0 && tile.Table == Pack(53, 53) && tile.Light == Pack(127, 1), "unclipped fields");
+		&& tile.Frame == 0 && tile.Table == Pack(53, 53) && tile.Light == Pack(127, 1) && tile.Depth == 0, "unclipped fields");
+	Check(Place(100, 200, 60, 29, 0, view, 300, 40, 53, 53, 127, true, tile, Pack(32000, 29)) && tile.Depth == Pack(32000, 29),
+		"depth base and Z plane offset");
 	// Clipped at the top-left corner: the atlas texel and the frame offset move together.
 	Check(Place(-10, -5, 60, 29, 168, view, 300, 40, 0, 27, 3, false, tile), "clipped at the corner");
 	Check(tile.X == 168 && tile.Y == 0 && tile.Size == Pack(50, 24) && tile.Atlas == Pack(310, 45)
@@ -33,6 +35,11 @@ int main()
 	Check(runs.size() == 3 && runs[0].First == 0 && runs[0].Count == 2 && runs[1].Page == &b && runs[1].First == 2
 		&& runs[1].Count == 3 && runs[2].First == 5 && runs[2].Count == 1, "runs keep the order");
 	Check(Split({}).empty(), "no instances, no runs");
+	const std::uint8_t depths[] {1, 0, 0, 0, 1, 1};
+	const auto modes = Split(pages, depths);
+	Check(modes.size() == 5 && modes[0].Depth && modes[0].Count == 1 && !modes[1].Depth && modes[1].First == 1
+		&& modes[2].Page == &b && modes[2].Count == 2 && modes[3].First == 4 && modes[3].Depth && modes[4].Page == &a && modes[4].Depth,
+		"runs also split where the depth mode changes");
 
 	ColorTables tables(100);
 	std::vector<std::uint16_t> first(53 * 256), second(27 * 256), third(40 * 256);
