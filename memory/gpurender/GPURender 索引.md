@@ -19,7 +19,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 | --- | --- | --- |
 | A | 黑底 + 独立 GPU 光标 | 已实现，D3D12 实机验证 |
 | B | Sidebar | 进行中：背景、按钮、cameo、状态效果、cameo 文字、滚动、tooltip、电力条、资金区、雷达区非地图部分、底部命令栏已完成；小地图未做 |
-| C | 地图基础（地形、坐标变换） | 进行中：#16 已交付（`443a5e7`）；C1 对照基准 `source=native_terrain` 已提交（`4ad5b6fc`）；C2 TMP 地块（坐标、变体、主菱形与 extra、默认 ABuffer 光照，无 Z）已提交（`ad256099`）；C2.5 实例化绘制（每 atlas 页一次）+ PS 查整张 LightConvert 表已实现并实机对照，见 `src/Render/TerrainGPU.md`；下一步 C3 Z 遮挡、C4 ABuffer 纹理（迷雾为独立数据层，PS 采样 a）、C5 弹坑与 overlay |
+| C | 地图基础（地形、坐标变换） | 进行中：#16 已交付（`443a5e7`）；C1 对照基准 `source=native_terrain` 已提交（`4ad5b6fc`）；C2 TMP 地块（坐标、变体、主菱形与 extra、默认 ABuffer 光照，无 Z）已提交（`ad256099`）；C2.5 实例化绘制（每 atlas 页一次）+ PS 查整张 LightConvert 表已提交（`f39de890`）；C3 深度采集（Z 平面 + 基准深度 b）与 trace 中对原生 ZBuffer 的逐像素对照已实现，全部一致且纯地形里 Z 测试从不挡色，GPU 深度缓冲（D32_FLOAT 主、D16 后备）留到阶段 D，见 `src/Render/TerrainGPU.md`；下一步 C4 ABuffer 纹理（迷雾为独立数据层，PS 采样 a）、C5 弹坑与 overlay |
 | D | 场景对象（建筑、SHP、步兵、载具、Voxel） | 未开始 |
 | E | 效果与其余覆盖（阴影、粒子、迷雾、菜单、影片） | 未开始 |
 | F | 接管主窗口与优化 | 未开始 |
