@@ -149,6 +149,9 @@ namespace
 		{
 			for (const auto& placement : terrain.Placements)
 				requests.push_back(TerrainPass::Request(placement));
+			if (OverlaySnapshot::Current.Visible)
+				for (const auto& draw : OverlaySnapshot::Current.Draws)
+					requests.push_back(TerrainPass::Request(draw));
 			ABufferPass::AppendRequests(ABufferSnapshot::Current, requests);
 		}
 		if (barVisible)
@@ -166,7 +169,7 @@ namespace
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
 		if (result != FrameAtlas::BeginResult::Ready) return result;
 		// The terrain cache is the bottom of Composite, drawn by TerrainPass before these sprites.
-		if (!TerrainPass::Prepare(Device, Atlas, terrainVisible ? &terrain : nullptr)
+		if (!TerrainPass::Prepare(Device, Atlas, terrainVisible ? &terrain : nullptr, terrainVisible ? &OverlaySnapshot::Current : nullptr)
 			|| !ABufferPass::Prepare(Device, Atlas, terrainVisible ? &ABufferSnapshot::Current : nullptr, terrain.Clip.Width, terrain.Clip.Height))
 			return FrameAtlas::BeginResult::Failed;
 		if (terrainVisible) TerrainSnapshot::RecordPresent(TerrainPass::DrawCount(), TerrainPass::InstanceCount());

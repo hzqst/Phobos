@@ -14,9 +14,9 @@
 // The overlay layer of the tactical Tile pass (gamemd-reverse #18): 6D6D10 draws every overlay
 // body (47F6A0), then every overlay shadow (47F510), each through 4AED70 with a Z test, after the
 // TMP tiles and smudges TerrainSnapshot captures. Captured in the same 4F4583 callback for a full
-// redraw of the visible cells. Stage C5.2b: the trace replays the captured tiles, smudges and
-// overlays in software and compares the result with the native Tile and ZBuffer; the GPU does not
-// draw overlays yet. Rubble and the deferred cells of 6D3470 are absent.
+// redraw of the visible cells. TerrainPass draws them after the tiles (C5.2c); the trace replays the
+// captured tiles, smudges and overlays in software and compares the result with the native Tile and
+// ZBuffer (C5.2b). Rubble and the deferred cells of 6D3470 are absent.
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -35,29 +35,33 @@ namespace OverlaySnapshot
 	// The SHP frame flag of an RLE frame.
 	constexpr unsigned CompressedFrame = 2;
 
-	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters.
+	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
+	// against the clip of the capture as 4373B0 / 437A10 do.
 	struct Draw
 	{
 		FrameCache::FrameID ID;
 		TerrainBatch::ColorTables::Handle Table;
-		// The frame's top-left on Tile and the size of the part to draw, which a Z shape can cut to
-		// start at (SourceX, SourceY) in the frame; ShapeDepth::Clip places it.
-		int X = 0, Y = 0, Width = 0, Height = 0, SourceX = 0, SourceY = 0;
-		int LightRow = 0, ZAdjust = 0, Gradient = 0;
+		// The first drawn pixel on Tile and in the frame, and the drawn columns and rows.
+		int X = 0, Y = 0, Width = 0, Height = 0, FrameX = 0, FrameY = 0;
+		int LightRow = 0;
+		// Drawn row j's depth base is ShapeDepth::RowBase(Rows, Gradient, j).
+		ShapeDepth::Rows Rows;
+		ShapeDepth::Gradient Gradient {};
 		bool Compressed = false;
 		// The shadow blitter (4601) halves the old color with Mask; the body one (4E00) draws.
 		bool Shadow = false;
 		std::uint32_t Mask = 0;
-		// An RLE frame with a Z shape: the byte 437A10 subtracts from each pixel's depth, for the
-		// Clip of the draw against the clip it was captured for, row by row.
+		// An RLE frame with a Z shape: the byte 437A10 subtracts from each drawn pixel's depth,
+		// Width x Height.
 		bool ZShaped = false;
 		std::vector<std::uint8_t> ZBytes;
-		int CellX = 0, CellY = 0, Overlay = -1;
+		// For the trace.
+		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Overlay = -1;
 	};
 	struct Counters
 	{
 		int Visited = 0, Legal = 0, Overlays = 0, Bodies = 0, Shadows = 0, NoBody = 0, Outside = 0, Empty = 0, Rubble = 0,
-			Tiberium = 0, Palette = 0, Frame = 0, ZShape = 0, Ramps = 0, Bridges = 0, Walls = 0, Compressed = 0, NoImage = 0, Unloaded = 0, Slopes = 0;
+			Tiberium = 0, Palette = 0, Frame = 0, ZShape = 0, Ramps = 0, Bridges = 0, Walls = 0, Compressed = 0, NoImage = 0, Unloaded = 0, Slopes = 0, Unsupported = 0;
 	};
 	struct Frame
 	{

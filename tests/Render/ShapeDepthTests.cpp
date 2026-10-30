@@ -111,6 +111,22 @@ int main()
 		Check(shaped.Base == 9834, "rows with a Z shape keep the base");
 	}
 
+	{
+		// The closed form follows Next row by row.
+		bool same = ClosedForm(Flat) && ClosedForm(Deg90);
+		const Gradient* gradients[] {&Flat, &Deg90};
+		for (const auto* g : gradients)
+			for (int height = 1; height <= 7; ++height)
+			{
+				auto rows = Plain(*g, MaxValue, BoundsY, ClipY, {0, 20, 30, height}, ZAdjust);
+				const auto first = rows;
+				for (int row = 0; row < 12; ++row, Next(rows, *g)) same = same && RowBase(first, *g, row) == rows.Base;
+			}
+		auto shaped = RLE(Deg90, MaxValue, BoundsY, ClipY, {0, 15, 30, 20}, {0, 15, 30, 15}, ZAdjust, true);
+		Check(same && RowBase(shaped, Deg90, 9) == shaped.Base, "closed-form row bases");
+		Check(!ClosedForm(Gradient {1, 1, 4, 3, 1, 0, {}}), "a gradient stepping more than a band per row");
+	}
+
 	Check(Depth(100, 0xFE) == 102 && Depth(100, 5) == 95 && Depth(100, 0) == 100, "signed Z shape bytes");
 	Check(Passes(4, 5) && !Passes(5, 5) && !Passes(6, 5), "strictly smaller depths pass");
 	Check(Passes(-1, 0) && !Passes(70000, 65535), "the test is signed against the stored word");

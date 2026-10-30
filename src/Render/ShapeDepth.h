@@ -178,6 +178,15 @@ namespace ShapeDepth
 		}
 	}
 
+	// Next's stepping in closed form, as the GPU computes it: row j's base. Holds while a row adds no
+	// more than a band, which the native gradients do; Rows keeps its accumulator below the limit.
+	constexpr bool ClosedForm(const Gradient& g) { return g.BandLimit > 0 && g.RowsPerBand >= 0 && g.RowsPerBand <= g.BandLimit; }
+	constexpr std::int32_t RowBase(const Rows& rows, const Gradient& g, int row)
+	{
+		if (!rows.Steps) return rows.Base;
+		return Add(rows.Base, Mul(g.BandDelta, Add(rows.Accumulator, Mul(row, g.RowsPerBand)) / g.BandLimit));
+	}
+
 	// A pixel's depth: the row base less its signed Z shape byte (0 without one).
 	constexpr std::int32_t Depth(std::int32_t base, std::uint8_t zShape) { return Sub(base, std::int8_t(zShape)); }
 

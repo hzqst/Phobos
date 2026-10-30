@@ -51,6 +51,49 @@ namespace TerrainBatch
 		return true;
 	}
 
+	// Matches struct Shape in TerrainShape.ps.hlsl: the depth of a 4AED70 draw (ShapeDepth). Drawn row j's
+	// base is Base + BandDelta * ((Accumulator + j * RowsPerBand) / BandLimit); a pixel's depth is the
+	// base less the signed byte at ZOffset + j * width + i of the Z bytes buffer, when ZOffset is not NoZ.
+	struct Shape
+	{
+		std::int32_t Base;
+		std::uint32_t Accumulator, RowsPerBand, BandLimit;
+		std::int32_t BandDelta;
+		std::uint32_t ZOffset;
+		// ShadowShape: halve the target's color instead of drawing.
+		std::uint32_t Flags, Padding;
+	};
+	static_assert(sizeof(Shape) == 32);
+	constexpr std::uint32_t NoZ = 0xFFFFFFFF, ShadowShape = 1;
+
+	// A clipped shape draw at (x, y) on Tile, wholly inside the view: the instance that moves it to
+	// the target by (originX, originY) and reads the atlas from (atlasX, atlasY). Frame holds the
+	// index of its Shape. False when a value leaves its packed range.
+	inline bool PlaceShape(int x, int y, int width, int height, int originX, int originY, int atlasX, int atlasY,
+		unsigned tableRow, unsigned shades, int lightRow, std::uint32_t shape, Instance& out)
+	{
+		if (width <= 0 || height <= 0 || width > 0xFFFF || height > 0xFFFF || atlasX < 0 || atlasX > 0xFFFF || atlasY < 0 || atlasY > 0xFFFF
+			|| tableRow > 0xFFFF || shades > 0xFFFF || lightRow < 0 || lightRow > 0xFFFF) return false;
+		const auto canvasX = std::int64_t(x) + originX, canvasY = std::int64_t(y) + originY;
+		if (canvasX < INT_MIN || canvasX > INT_MAX || canvasY < INT_MIN || canvasY > INT_MAX) return false;
+		out = {int(canvasX), int(canvasY), Pack(std::uint32_t(width), std::uint32_t(height)), Pack(std::uint32_t(atlasX), std::uint32_t(atlasY)),
+			shape, Pack(tableRow, shades), Pack(std::uint32_t(lightRow), 0), 0};
+		return true;
+	}
+
+	// The HalfTranslucencyMask a color pack implies: each channel's top bit cleared after a shift
+	// right by one, so (c >> 1) & mask halves every channel. shift is a channel's _SHL, bits its width.
+	constexpr std::uint32_t HalfMask(const int (&shift)[3], const int (&bits)[3])
+	{
+		std::uint32_t mask = 0;
+		for (int i = 0; i < 3; ++i)
+		{
+			const auto field = ((1u << bits[i]) - 1u) << shift[i];
+			mask |= (field >> 1) & field;
+		}
+		return mask;
+	}
+
 	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; };
 
 	// Consecutive instances on the same atlas page and with the same depth mode (none when depths is

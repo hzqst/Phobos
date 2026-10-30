@@ -61,6 +61,16 @@ int main()
 	tables.Clear();
 	Check(tables.Count() == 0 && tables.UsedRows() == 0, "cleared");
 	Check(!tables.Acquire(nullptr, 1) && !tables.Acquire(first.data(), 101), "invalid tables");
+	{
+		Instance shape {};
+		Check(PlaceShape(300, 50, 39, 22, -10, -20, 100, 200, 53, 53, 127, 7, shape) && shape.X == 290 && shape.Y == 30
+			&& shape.Size == Pack(39, 22) && shape.Atlas == Pack(100, 200) && shape.Frame == 7 && shape.Light == Pack(127, 0) && shape.Depth == 0,
+			"shape instance");
+		Check(!PlaceShape(0, 0, 0, 22, 0, 0, 0, 0, 53, 53, 127, 0, shape) && !PlaceShape(0, 0, 10, 10, 0, 0, -1, 0, 53, 53, 127, 0, shape),
+			"shape instances out of range");
+		// RGB565 and RGB555.
+		Check(HalfMask({11, 5, 0}, {5, 6, 5}) == 0x7BEF && HalfMask({10, 5, 0}, {5, 5, 5}) == 0x3DEF, "half translucency masks");
+	}
 	if (Failures) return 1;
-	std::puts("TerrainBatch: placement, clipping, page runs and color table packing passed.");
+	std::puts("TerrainBatch: placement, clipping, page runs, shape instances, masks and color table packing passed.");
 }

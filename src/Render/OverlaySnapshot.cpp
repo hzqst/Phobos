@@ -1,4 +1,5 @@
 #include "OverlaySnapshot.h"
+#include "TerrainPass.h"
 
 #include <Utilities/Debug.h>
 
@@ -39,6 +40,8 @@ namespace OverlaySnapshot
 		{
 			const RectangleStruct& Clip;
 			int TacticalX, TacticalY, ViewY;
+			// The ZBuffer's MaxValue and Bounds.Y, and how many of FlatZShape's first bytes are 0.
+			int MaxValue, BoundsY, FlatZeros;
 			std::unordered_map<const ConvertClass*, TerrainBatch::ColorTables::Handle> Tables;
 
 			TerrainBatch::ColorTables::Handle Table(const ConvertClass* convert)
@@ -50,12 +53,16 @@ namespace OverlaySnapshot
 			}
 
 			// 4AED70 with a Z shape: Z shape pixel (funX + i, funY + j) lies under frame pixel (i, j), and
-			// the frame is cut to the Z shape's frame (421B60), possibly to start inside it. The plain
-			// path keeps only that cut; 437A10 reads the Z shape's raw frame data, which for an RLE Z
-			// shape is its encoded stream, from a pointer that starts at (funX + SourceX, funY +
-			// SourceY + row) and stays behind by each row's prefix overshoot. False where the data
-			// cannot be read; an empty cut leaves the draw's size 0.
-			bool ZShape(const Call& call, const Shape& shape, Draw& draw) const
+			// the frame is cut to the Z shape's frame (421B60), possibly to start inside it.
+			struct Cut
+			{
+				ShapeDepth::Rect Part {};
+				int FunX = 0, FunY = 0, Pitch = 0;
+				// The Z shape's raw frame data: GetPixels (69E740) does not decode an RLE frame.
+				const std::uint8_t* Pixels = nullptr;
+			};
+
+			static bool CutByZShape(const Call& call, const Shape& shape, Cut& cut)
 			{
 				const auto* zshape = ShapeData(call.ZShape);
 				if (!zshape || zshape->Frames <= 0) return false;
@@ -63,20 +70,20 @@ namespace OverlaySnapshot
 				if (!CursorSnapshot::Readable(reinterpret_cast<const void*>(base + sizeof(SHPStruct)), sizeof(SHPFrame))) return false;
 				const auto header = zshape->AsFile()->GetFrameHeader(0);
 				if (header.Offset <= 0) return false;
-				const int funX = call.ZShapeX - (shape.CanvasWidth / 2 - shape.Frame.Left) + header.Left;
-				const int funY = call.ZShapeY - (shape.CanvasHeight / 2 - shape.Frame.Top) + header.Top;
-				const auto cut = ShapeDepth::Intersect({0, 0, shape.Frame.Width, shape.Frame.Height}, {-funX, -funY, header.Width, header.Height});
-				draw.Width = cut.Width;
-				draw.Height = cut.Height;
-				draw.SourceX = cut.X;
-				draw.SourceY = cut.Y;
-				if (!cut.Width || !draw.Compressed) return true;
-				const ShapeDepth::Rect dest {draw.X - Clip.X, draw.Y - Clip.Y, cut.Width, cut.Height};
-				const auto clipped = ShapeDepth::Clip(dest, cut, cut, Clip.Width, Clip.Height, true);
-				draw.ZShaped = true;
-				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) return true;
-				draw.ZBytes.assign(size_t(clipped.Width) * clipped.Rows, 0);
-				const auto* pixels = reinterpret_cast<const std::uint8_t*>(base + header.Offset);
+				cut.FunX = call.ZShapeX - (shape.CanvasWidth / 2 - shape.Frame.Left) + header.Left;
+				cut.FunY = call.ZShapeY - (shape.CanvasHeight / 2 - shape.Frame.Top) + header.Top;
+				cut.Part = ShapeDepth::Intersect({0, 0, shape.Frame.Width, shape.Frame.Height}, {-cut.FunX, -cut.FunY, header.Width, header.Height});
+				cut.Pitch = header.Width;
+				cut.Pixels = reinterpret_cast<const std::uint8_t*>(base + header.Offset);
+				return true;
+			}
+
+			// 437A10's Z adjust bytes: per drawn row the pointer starts at Z shape pixel (funX + FrameX,
+			// funY + FrameY + row) and stays behind by the row's prefix overshoot, the pixels the
+			// blitter's whole tokens skip beyond FrameX. False where the data cannot be read.
+			static bool ReadZBytes(const Shape& shape, const Cut& cut, Draw& draw)
+			{
+				draw.ZBytes.assign(size_t(draw.Width) * draw.Height, 0);
 				const auto* row = reinterpret_cast<const std::uint8_t*>(shape.Data + shape.Frame.Offset);
 				const auto lineLength = [](const std::uint8_t* line) -> size_t
 				{
@@ -84,18 +91,17 @@ namespace OverlaySnapshot
 					const size_t length = line[0] | (size_t(line[1]) << 8);
 					return length >= 2 && CursorSnapshot::Readable(line, length) ? length : 0;
 				};
-				for (int y = 0; y < clipped.SourceY; ++y)
+				for (int y = 0; y < draw.FrameY; ++y)
 				{
 					const auto length = lineLength(row);
 					if (!length) return false;
 					row += length;
 				}
-				for (int r = 0; r < clipped.Rows; ++r)
+				for (int r = 0; r < draw.Height; ++r)
 				{
 					const auto length = lineLength(row);
 					if (!length) return false;
-					// The blitter consumes whole tokens until SourceX pixels are skipped.
-					int skip = clipped.SourceX;
+					int skip = draw.FrameX;
 					size_t token = 2;
 					while (skip > 0)
 					{
@@ -108,18 +114,19 @@ namespace OverlaySnapshot
 						else --skip;
 					}
 					const int lag = -std::min(skip, 0);
-					const auto* z = pixels + std::ptrdiff_t(funY + clipped.SourceY + r) * header.Width + funX + clipped.SourceX;
-					if (clipped.Width > lag)
+					const auto* z = cut.Pixels + std::ptrdiff_t(cut.FunY + draw.FrameY + r) * cut.Pitch + cut.FunX + draw.FrameX;
+					if (draw.Width > lag)
 					{
-						if (!CursorSnapshot::Readable(z, size_t(clipped.Width - lag))) return false;
-						std::memcpy(draw.ZBytes.data() + size_t(r) * clipped.Width + lag, z, size_t(clipped.Width - lag));
+						if (!CursorSnapshot::Readable(z, size_t(draw.Width - lag))) return false;
+						std::memcpy(draw.ZBytes.data() + size_t(r) * draw.Width + lag, z, size_t(draw.Width - lag));
 					}
 					row += length;
 				}
 				return true;
 			}
 
-			// 4AED70 with flag 200 for one call: the frame centered on center, cut by its Z shape.
+			// 4AED70 with flag 200 for one call: the frame centered on center, cut by its Z shape, then
+			// clipped and given its row depths by 4373B0 or 437A10.
 			void Place(const CellClass* cell, int index, const Call& call, Point center, bool shadow)
 			{
 				auto& count = Current.Count;
@@ -142,28 +149,51 @@ namespace OverlaySnapshot
 				if (!TerrainSnapshot::Intersects(Clip, boundsAt.X, boundsAt.Y, bounds.Frame.Width, bounds.Frame.Height)) { ++count.Outside; return; }
 				const auto at = OverlayImage::FrameOrigin(center, shape.CanvasWidth, shape.CanvasHeight, shape.Frame.Left, shape.Frame.Top);
 				if (shape.Frame.Width <= 0 || shape.Frame.Height <= 0) { ++count.Empty; return; }
-				if (!Representable(at)) { ++count.Outside; return; }
+				if (!Representable({at.X - Clip.X, at.Y - Clip.Y})) { ++count.Outside; return; }
+				const bool compressed = (shape.Frame.Flags & CompressedFrame) != 0;
+				Cut cut {{0, 0, shape.Frame.Width, shape.Frame.Height}};
+				if (call.ZShape && !CutByZShape(call, shape, cut)) { ++count.ZShape; return; }
+				if (!cut.Part.Width || !cut.Part.Height) { ++count.Empty; return; }
+				// The surface rectangle keeps the frame's place; only its size follows the cut.
+				const ShapeDepth::Rect dest {int(at.X - Clip.X), int(at.Y - Clip.Y), cut.Part.Width, cut.Part.Height};
+				const auto clipped = ShapeDepth::Clip(dest, cut.Part, compressed ? cut.Part : ShapeDepth::Rect {0, 0, shape.Frame.Width, shape.Frame.Height},
+					Clip.Width, Clip.Height, compressed);
+				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) { ++count.Outside; return; }
+				if (clipped.SourceX < 0 || clipped.SourceY < 0 || clipped.SourceX + clipped.Width > shape.Frame.Width
+					|| clipped.SourceY + clipped.Rows > shape.Frame.Height) { ++count.Unsupported; return; }
+				const auto* gradients = reinterpret_cast<const ShapeDepth::Gradient*>(Gradients);
+				if (call.Gradient < 0 || call.Gradient >= GradientCount || !ShapeDepth::Usable(gradients[call.Gradient])
+					|| !ShapeDepth::ClosedForm(gradients[call.Gradient])) { ++count.Unsupported; return; }
+				const bool zshaped = compressed && call.ZShape;
+				// Without a Z shape 437A10 reads FlatZShape from each row's first drawn pixel on.
+				if (compressed && !zshaped && clipped.Width > FlatZeros) { ++count.Unsupported; return; }
 				const auto table = Table(call.Convert);
 				if (!table) { ++count.Palette; return; }
 				Draw draw;
 				draw.ID = shape.ID;
 				draw.Table = table;
-				draw.X = int(at.X);
-				draw.Y = int(at.Y);
-				draw.Width = shape.Frame.Width;
-				draw.Height = shape.Frame.Height;
+				draw.X = Clip.X + clipped.Dest.X;
+				draw.Y = Clip.Y + clipped.Dest.Y;
+				draw.Width = clipped.Width;
+				draw.Height = clipped.Rows;
+				draw.FrameX = clipped.SourceX;
+				draw.FrameY = clipped.SourceY;
 				draw.LightRow = TerrainImage::LightRow(call.Brightness);
-				draw.ZAdjust = call.ZAdjust;
-				draw.Gradient = call.Gradient;
-				draw.Compressed = (shape.Frame.Flags & CompressedFrame) != 0;
+				draw.Gradient = gradients[call.Gradient];
+				draw.Rows = compressed
+					? ShapeDepth::RLE(draw.Gradient, MaxValue, BoundsY, Clip.Y, dest, clipped.Dest, call.ZAdjust, zshaped)
+					: ShapeDepth::Plain(draw.Gradient, MaxValue, BoundsY, Clip.Y, clipped.Dest, call.ZAdjust);
+				draw.Compressed = compressed;
 				draw.Shadow = shadow;
 				draw.Mask = call.Convert->HalfTranslucencyMask;
+				draw.ZShaped = zshaped;
+				if (zshaped && !ReadZBytes(shape, cut, draw)) { ++count.ZShape; return; }
+				draw.ZAdjust = call.ZAdjust;
+				draw.GradientIndex = call.Gradient;
 				draw.CellX = cell->MapCoords.X;
 				draw.CellY = cell->MapCoords.Y;
 				draw.Overlay = index;
-				if (call.ZShape && !ZShape(call, shape, draw)) { ++count.ZShape; return; }
-				if (!draw.Width || !draw.Height) { ++count.Empty; return; }
-				if (draw.Compressed) ++count.Compressed;
+				if (compressed) ++count.Compressed;
 				Current.Draws.push_back(std::move(draw));
 				++(shadow ? count.Shadows : count.Bodies);
 			}
@@ -285,7 +315,7 @@ namespace OverlaySnapshot
 		struct TileCheck
 		{
 			int Compared = 0, ColorCompared = 0, ColorMismatched = 0, DepthMismatched = 0, TerrainColor = 0, OverlayColor = 0, ShadowColor = 0,
-				Rejected = 0, Unknown = 0, Missing = 0, Unsupported = 0, FlatZ = 0, FirstFlatZ = -1, ZShaped = 0;
+				Rejected = 0, Unknown = 0, Missing = 0, ZShaped = 0;
 			int Left = INT_MAX, Top = INT_MAX, Right = INT_MIN, Bottom = INT_MIN;
 			int FirstX = -1, FirstY = -1, NativeColor = 0, ModelColor = 0, Owner = -1;
 			int DepthX = -1, DepthY = -1, NativeDepth = 0, ModelDepth = 0, DepthOwner = -1;
@@ -315,10 +345,6 @@ namespace OverlaySnapshot
 						alpha[size_t(row) * clip.Width + column] = *word;
 					}
 				}
-			const auto* flat = reinterpret_cast<const std::uint8_t*>(FlatZShape);
-			for (size_t i = 0; i < FlatZShapeChecked; ++i)
-				if (flat[i] && !check.FlatZ++) check.FirstFlatZ = int(i);
-
 			for (const auto& placement : TerrainSnapshot::Current.Placements)
 			{
 				const auto* frame = placement.Storage->Resolve(placement.ID);
@@ -347,41 +373,27 @@ namespace OverlaySnapshot
 					}
 			}
 
-			auto* zbuffer = ZBuffer::Instance;
-			const auto* gradients = reinterpret_cast<const ShapeDepth::Gradient*>(Gradients);
 			for (size_t drawIndex = 0; drawIndex < Current.Draws.size(); ++drawIndex)
 			{
 				const auto& draw = Current.Draws[drawIndex];
 				const auto* frame = ShapeFrameSource::Frames.Resolve(draw.ID);
 				if (!frame) { ++check.Missing; continue; }
-				const int pitch = frame->Geometry.Width, height = frame->Geometry.Height;
-				if (frame->Indices.size() < size_t(pitch) * height) { ++check.Missing; continue; }
-				if (draw.Gradient < 0 || draw.Gradient >= GradientCount || !ShapeDepth::Usable(gradients[draw.Gradient])) { ++check.Unsupported; continue; }
-				const auto& gradient = gradients[draw.Gradient];
-				const ShapeDepth::Rect dest {draw.X - clip.X, draw.Y - clip.Y, draw.Width, draw.Height};
-				const ShapeDepth::Rect source {draw.SourceX, draw.SourceY, draw.Width, draw.Height};
-				const auto clipped = ShapeDepth::Clip(dest, source, draw.Compressed ? source : ShapeDepth::Rect {0, 0, pitch, height},
-					clip.Width, clip.Height, draw.Compressed);
-				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) continue;
-				if (clipped.SourceX < 0 || clipped.SourceY < 0 || clipped.SourceX + clipped.Width > pitch || clipped.SourceY + clipped.Rows > height
-					|| (draw.ZShaped && draw.ZBytes.size() != size_t(clipped.Width) * clipped.Rows)) { ++check.Unsupported; continue; }
-				// Without a Z shape 437A10 reads FlatZShape from the row's first drawn pixel on.
-				if (draw.Compressed && !draw.ZShaped && check.FlatZ && clipped.Width > check.FirstFlatZ) { ++check.Unsupported; continue; }
+				const int pitch = frame->Geometry.Width;
+				if (frame->Indices.size() < size_t(pitch) * frame->Geometry.Height || draw.FrameX + draw.Width > pitch
+					|| draw.FrameY + draw.Height > frame->Geometry.Height) { ++check.Missing; continue; }
 				if (draw.ZShaped) ++check.ZShaped;
-				auto rows = draw.Compressed
-					? ShapeDepth::RLE(gradient, zbuffer->MaxValue, zbuffer->Bounds.Y, clip.Y, dest, clipped.Dest, draw.ZAdjust, draw.ZShaped)
-					: ShapeDepth::Plain(gradient, zbuffer->MaxValue, zbuffer->Bounds.Y, clip.Y, clipped.Dest, draw.ZAdjust);
 				const auto& colors = draw.Table->Colors;
-				for (int j = 0; j < clipped.Rows; ++j, ShapeDepth::Next(rows, gradient))
+				for (int j = 0; j < draw.Height; ++j)
 				{
-					const auto* indices = frame->Indices.data() + size_t(clipped.SourceY + j) * pitch + clipped.SourceX;
-					const auto* zrow = draw.ZShaped ? draw.ZBytes.data() + size_t(j) * clipped.Width : nullptr;
-					for (int i = 0; i < clipped.Width; ++i)
+					const auto base = ShapeDepth::RowBase(draw.Rows, draw.Gradient, j);
+					const auto* indices = frame->Indices.data() + size_t(draw.FrameY + j) * pitch + draw.FrameX;
+					const auto* zrow = draw.ZShaped ? draw.ZBytes.data() + size_t(j) * draw.Width : nullptr;
+					for (int i = 0; i < draw.Width; ++i)
 					{
 						const auto index = indices[i];
 						if (!index) continue;
-						const auto at = size_t(clipped.Dest.Y + j) * clip.Width + size_t(clipped.Dest.X + i);
-						const auto value = ShapeDepth::Depth(rows.Base, zrow ? zrow[i] : 0);
+						const auto at = size_t(draw.Y - clip.Y + j) * clip.Width + size_t(draw.X - clip.X + i);
+						const auto value = ShapeDepth::Depth(base, zrow ? zrow[i] : 0);
 						if (!ShapeDepth::Passes(value, depth[at])) { ++check.Rejected; continue; }
 						depth[at] = std::uint16_t(value);
 						if (draw.Shadow)
@@ -400,6 +412,7 @@ namespace OverlaySnapshot
 				}
 			}
 
+			auto* zbuffer = ZBuffer::Instance;
 			auto* tile = DSurface::Tile;
 			const auto* pixels = static_cast<const std::uint8_t*>(tile->Lock(clip.X, clip.Y));
 			if (!pixels) { check.Missing = -1; return check; }
@@ -443,9 +456,10 @@ namespace OverlaySnapshot
 			const auto& count = Current.Count;
 			++TraceCount;
 			Debug::Log("[TerrainGPU] overlay sample=%u ready=%d visited=%d legal=%d overlays=%d bodies=%d shadows=%d noBody=%d outside=%d empty=%d "
-				"rubble=%d tiberium=%d palette=%d frame=%d zshape=%d ramps=%d bridges=%d walls=%d compressed=%d noImage=%d unloaded=%d slopes=%d failure=%d:%d/%d\n",
+				"rubble=%d tiberium=%d palette=%d frame=%d zshape=%d ramps=%d bridges=%d walls=%d compressed=%d noImage=%d unloaded=%d slopes=%d unsupported=%d failure=%d:%d/%d gpu=%zu/%zu\n",
 				TraceCount, Current.Visible, count.Visited, count.Legal, count.Overlays, count.Bodies, count.Shadows, count.NoBody, count.Outside,
-				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, FirstFailure[0], FirstFailure[1], FirstFailure[2]);
+				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, count.Unsupported, FirstFailure[0], FirstFailure[1], FirstFailure[2],
+				TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
 			if (!Current.Visible) return;
 			// Each overlay type drawn: bodies, shadows, RLE frames and Z shapes.
 			std::map<int, std::array<int, 4>> types;
@@ -472,16 +486,16 @@ namespace OverlaySnapshot
 				else
 				{
 					const auto& draw = Current.Draws[size_t(owner)];
-					std::snprintf(text, sizeof(text), "%s:%d,%d:overlay=%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:source=%d,%d", draw.Shadow ? "shadow" : "body",
-						draw.CellX, draw.CellY, draw.Overlay, draw.ZAdjust, draw.Gradient, draw.Compressed, draw.ZShaped, draw.X, draw.Y, draw.Width, draw.Height,
-						draw.SourceX, draw.SourceY);
+					std::snprintf(text, sizeof(text), "%s:%d,%d:overlay=%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d", draw.Shadow ? "shadow" : "body",
+						draw.CellX, draw.CellY, draw.Overlay, draw.ZAdjust, draw.GradientIndex, draw.Compressed, draw.ZShaped, draw.X, draw.Y, draw.Width, draw.Height,
+						draw.FrameX, draw.FrameY);
 				}
 				return text;
 			};
 			Debug::Log("[TerrainGPU] tilecheck sample=%u compared=%d colorCompared=%d colorMismatched=%d terrain=%d body=%d shadow=%d unknown=%d "
-				"depthMismatched=%d rejected=%d missing=%d unsupported=%d flatZ=%d@%d zshaped=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",
+				"depthMismatched=%d rejected=%d missing=%d zshaped=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",
 				TraceCount, check.Compared, check.ColorCompared, check.ColorMismatched, check.TerrainColor, check.OverlayColor, check.ShadowColor,
-				check.Unknown, check.DepthMismatched, check.Rejected, check.Missing, check.Unsupported, check.FlatZ, check.FirstFlatZ, check.ZShaped,
+				check.Unknown, check.DepthMismatched, check.Rejected, check.Missing, check.ZShaped,
 				check.ColorMismatched ? check.Left : 0, check.ColorMismatched ? check.Top : 0, check.ColorMismatched ? check.Right : 0,
 				check.ColorMismatched ? check.Bottom : 0, check.FirstX, check.FirstY, check.NativeColor, check.ModelColor, describe(check.Owner));
 			std::string samples;
@@ -509,7 +523,11 @@ namespace OverlaySnapshot
 		{
 			const auto& clip = terrain.Clip;
 			const auto& view = DSurface::ViewBounds;
-			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.Y, {}};
+			const auto* flat = reinterpret_cast<const std::uint8_t*>(FlatZShape);
+			int zeros = 0;
+			while (zeros < int(FlatZShapeChecked) && !flat[zeros]) ++zeros;
+			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.Y, ZBuffer::Instance->MaxValue, ZBuffer::Instance->Bounds.Y,
+				zeros, {}};
 			const auto anchor = TerrainImage::ScanAnchor(capture.TacticalX + clip.X - view.X, capture.TacticalY + clip.Y - view.Y);
 			const int rows = OverlayImage::ScanRows(clip.Height), columns = OverlayImage::ScanColumns(clip.Width);
 			const int margin = TerrainSnapshot::ScanMargin;
