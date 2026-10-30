@@ -2,6 +2,8 @@
 #include "CompositeSnapshot.h"
 #include "TerrainPass.h"
 
+#include <AnimTypeClass.h>
+#include <GameOptionsClass.h>
 #include <Ext/BuildingType/Body.h>
 #include <Ext/Rules/Body.h>
 #include <Ext/Techno/Body.h>
@@ -47,6 +49,8 @@ namespace OverlaySnapshot
 			bool WritesDepth = true;
 			// 705E00's tint, which only an RLE frame's blitter applies.
 			int Tint = 0;
+			// 4D1890 cuts a fogged body's clip shorter.
+			int ClipHeight = INT_MAX;
 		};
 
 		struct Capture
@@ -173,7 +177,7 @@ namespace OverlaySnapshot
 				// The surface rectangle keeps the frame's place; only its size follows the cut.
 				const ShapeDepth::Rect dest {int(at.X - Clip.X), int(at.Y - Clip.Y), cut.Part.Width, cut.Part.Height};
 				const auto clipped = ShapeDepth::Clip(dest, cut.Part, compressed ? cut.Part : ShapeDepth::Rect {0, 0, shape.Frame.Width, shape.Frame.Height},
-					Clip.Width, Clip.Height, compressed);
+					Clip.Width, std::min(Clip.Height, call.ClipHeight), compressed);
 				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) { ++count.Outside; return; }
 				if (clipped.SourceX < 0 || clipped.SourceY < 0 || clipped.SourceX + clipped.Width > shape.Frame.Width
 					|| clipped.SourceY + clipped.Rows > shape.Frame.Height) { ++count.Unsupported; return; }
@@ -545,6 +549,115 @@ namespace OverlaySnapshot
 				{
 					++count.Doors;
 					part(door, BuildingImage::DoorFrame(healthy), BuildingImage::DoorDepth(height), int(ZGradient::Ground), light, nullptr, {});
+				}
+			}
+
+			// 4D1890's building branch (kind 6) for an enabled record whose saved rectangle meets the
+			// clip: the saved parts in order, each straight through 4AED70 with the owner's current color
+			// scheme, no flashing, tint or visual, and the shadow whatever bDrawShadow and NoShadow say.
+			void FoggedBuilding(const std::uint8_t* record)
+			{
+				auto& count = *Count;
+				const auto* owner = *reinterpret_cast<HouseClass* const*>(record + FoggedOwner);
+				const auto& location = *reinterpret_cast<const CoordStruct*>(record + FoggedLocation);
+				const auto* parts = *reinterpret_cast<const FoggedPart* const*>(record + FoggedParts);
+				const int partCount = *reinterpret_cast<const int*>(record + FoggedPartCount);
+				if (partCount <= 0) return;
+				if (!CursorSnapshot::Readable(owner, sizeof(HouseClass)) || !CursorSnapshot::Readable(parts, size_t(partCount) * sizeof(FoggedPart)))
+				{
+					++count.Frame;
+					return;
+				}
+				const auto* ownerConvert = SchemeConvert(owner->ColorSchemeIndex);
+				const auto* cell = MapClass::Instance.TryGetCellAt(location);
+				// The native draw ran first and made the cell's LightConvert where it was missing.
+				if (!cell || !cell->LightConvert) { ++count.Palette; return; }
+				const int height = reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(location.Z);
+				const CoordStruct origin {location.X - 128, location.Y - 128, location.Z};
+				Point2D client {};
+				reinterpret_cast<bool(__thiscall*)(const TacticalClass*, const CoordStruct*, Point2D*)>(CoordsToClient)(TacticalClass::Instance, &origin, &client);
+				const Point position {std::int64_t(client.X) + ViewX, std::int64_t(client.Y) + ViewY};
+				for (int i = 0; i < partCount; ++i)
+				{
+					const auto& part = parts[i];
+					auto* object = static_cast<ObjectTypeClass*>(part.Type);
+					// 4D204D: an anim part without a type draws nothing.
+					if (!object && i) continue;
+					if (!CursorSnapshot::Readable(object, sizeof(AbstractTypeClass))) { ++count.Frame; continue; }
+					const auto* image = object->GetImage();
+					if (i)
+					{
+						if (object->WhatAmI() != AbstractType::AnimType) continue;
+						const auto* type = static_cast<const AnimTypeClass*>(object);
+						if (type->DetailLevel > GameOptionsClass::Instance.DetailLevel) { ++count.FoggedDetail; continue; }
+						if (!image) continue;
+						++count.FoggedAnims;
+						Call call;
+						call.Image = image;
+						call.Frame = part.Frame;
+						call.Convert = ownerConvert && type->ShouldUseCellDrawer ? ownerConvert : FileSystem::ANIM_PAL;
+						call.Brightness = type->UseNormalLight ? FullBrightness : std::int16_t(cell->Intensity_Normal);
+						call.ZAdjust = BuildingImage::FoggedAnimDepth(part.ZAdjust, height);
+						call.Gradient = int(type->Flat ? ZGradient::Ground : ZGradient::Deg90);
+						call.Bounded = false;
+						call.WritesDepth = false;
+						Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::FoggedAnim, type->ArrayIndex, call, position, false);
+						continue;
+					}
+					const auto* type = static_cast<const BuildingTypeClass*>(object);
+					if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
+					// 4D1D5F: the whole record, anims included.
+					if (type->InvisibleInGame) { ++count.FoggedInvisible; return; }
+					const int light = std::int16_t(cell->Intensity_Normal) + std::int16_t(type->ExtraLight);
+					const ConvertClass* convert = type->TerrainPalette ? cell->LightConvert : ownerConvert;
+					Call call;
+					call.Image = image;
+					call.Frame = part.Frame;
+					call.Convert = convert;
+					call.Brightness = light;
+					call.Bounded = false;
+					if (image && CursorSnapshot::Readable(image, sizeof(SHPStruct)))
+					{
+						// The body and its shadow are cut at the image's bottom; 4D1890 reads the shape's own
+						// header, as for the shadow frame.
+						call.ClipHeight = BuildingImage::FoggedClipHeight(Clip.Height, image->Height, int(position.Y - Clip.Y));
+						if (call.ClipHeight > 0)
+						{
+							call.ZAdjust = BuildingImage::FoggedBodyDepth(type->NormalZAdjust, height, part.Flat);
+							call.Gradient = int(part.Flat ? ZGradient::Ground : ZGradient::Deg90);
+							if (!part.Flat)
+							{
+								const int width = reinterpret_cast<int(__thiscall*)(const BuildingTypeClass*)>(FoundationWidth)(type);
+								const int depthCells = reinterpret_cast<int(__thiscall*)(const BuildingTypeClass*, bool)>(FoundationHeight)(type, false);
+								const Point2D corner {BuildingImage::CornerLeptons(width), BuildingImage::CornerLeptons(depthCells)};
+								Point2D move {};
+								reinterpret_cast<Point2D*(__thiscall*)(const TacticalClass*, Point2D*, const Point2D*)>(ZShapeMove)(TacticalClass::Instance, &move, &corner);
+								const auto offset = BuildingImage::FoggedZShapeOffset(type->ZShapePointMove.X, type->ZShapePointMove.Y, move.X, move.Y);
+								call.ZShape = *reinterpret_cast<SHPStruct* const*>(BuildingZShape);
+								call.ZShapeX = offset.X;
+								call.ZShapeY = offset.Y;
+							}
+							Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Fogged, type->ArrayIndex, call, position, false);
+							call.Frame = BuildingImage::Add32(image->Frames / 2, part.Frame);
+							call.Brightness = FullBrightness;
+							call.ZAdjust = BuildingImage::FoggedShadowDepth(height);
+							call.Gradient = int(ZGradient::Ground);
+							call.ZShape = nullptr;
+							Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Fogged, type->ArrayIndex, call, position, true);
+						}
+					}
+					else ++count.NoImage;
+					if (!type->BibShape) continue;
+					++count.Bibs;
+					Call bib;
+					bib.Image = type->BibShape;
+					bib.Frame = part.Frame;
+					bib.Convert = convert;
+					bib.Brightness = light;
+					bib.ZAdjust = BuildingImage::BibDepth(height);
+					bib.Gradient = int(ZGradient::Ground);
+					bib.Bounded = false;
+					Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Fogged, type->ArrayIndex, bib, position, false);
 				}
 			}
 
@@ -927,7 +1040,18 @@ namespace OverlaySnapshot
 			return check;
 		}
 
-		char LayerLetter(Layer layer) { return layer == Layer::Overlay ? 'o' : layer == Layer::Terrain ? 't' : layer == Layer::Cliff ? 'c' : 'b'; }
+		char LayerLetter(Layer layer)
+		{
+			switch (layer)
+			{
+			case Layer::Overlay: return 'o';
+			case Layer::Terrain: return 't';
+			case Layer::Cliff: return 'c';
+			case Layer::Building: return 'b';
+			case Layer::Fogged: return 'f';
+			default: return 'a';
+			}
+		}
 
 		void Trace()
 		{
@@ -940,10 +1064,13 @@ namespace OverlaySnapshot
 				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, count.Unsupported, FirstFailure[0], FirstFailure[1], FirstFailure[2],
 				FirstFailure[3], count.Terrains, count.Dynamic, count.TerrainOutside, count.Damaged, count.Casters,
 				count.Fogged, count.FoggedBuildings, count.FoggedBuildingsInView, count.FoggedOthersInView, TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
-			Debug::Log("[TerrainGPU] buildings sample=%u buildings=%d fogged=%d outside=%d unsupported=%d gates=%d unloading=%d bibs=%d doors=%d\n", TraceCount,
-				count.Buildings, count.BuildingsFogged, count.BuildingsOutside, count.BuildingsUnsupported, count.Gates, count.Unloading, count.Bibs, count.Doors);
+			Debug::Log("[TerrainGPU] buildings sample=%u buildings=%d fogged=%d outside=%d unsupported=%d gates=%d unloading=%d bibs=%d doors=%d "
+				"foggedAnims=%d foggedDetail=%d foggedInvisible=%d foggedUnsorted=%d\n", TraceCount,
+				count.Buildings, count.BuildingsFogged, count.BuildingsOutside, count.BuildingsUnsupported, count.Gates, count.Unloading, count.Bibs, count.Doors,
+				count.FoggedAnims, count.FoggedDetail, count.FoggedInvisible, count.FoggedUnsorted);
 			if (!Current.Visible) return;
-			// Each overlay (o), Terrain (t), cliff tile (c) and building (b) type drawn: bodies, shadows, RLE frames and Z shapes.
+			// Each overlay (o), Terrain (t), cliff tile (c), building (b), fogged building (f) and fogged anim (a) type drawn: bodies,
+			// shadows, RLE frames and Z shapes.
 			std::map<std::pair<Layer, int>, std::array<int, 4>> types;
 			for (const auto& draw : Current.Draws)
 			{
@@ -960,6 +1087,17 @@ namespace OverlaySnapshot
 				list += item;
 			}
 			Debug::Log("[TerrainGPU] overlaytypes sample=%u%s\n", TraceCount, list.c_str());
+			// D1c: each draw of 4D1890's building records (f: building part, a: anim) with its Tile rectangle.
+			std::string fogged;
+			for (const auto& draw : Current.Draws)
+			{
+				if (draw.Source != Layer::Fogged && draw.Source != Layer::FoggedAnim) continue;
+				char item[64];
+				std::snprintf(item, sizeof(item), " %c%d:%d%s@%d,%d,%dx%d", LayerLetter(draw.Source), draw.Index, draw.ShapeFrame, draw.Shadow ? "s" : "",
+					draw.X, draw.Y, draw.Width, draw.Height);
+				fogged += item;
+			}
+			if (!fogged.empty()) Debug::Log("[TerrainGPU] foggeddraws sample=%u%s\n", TraceCount, fogged.c_str());
 			const auto check = Replay(TerrainSnapshot::Current.Clip);
 			const auto describe = [](int owner, const std::vector<Draw>& draws = Current.Draws)
 			{
@@ -1048,6 +1186,33 @@ namespace OverlaySnapshot
 			const int rows = OverlayImage::ScanRows(clip.Height), columns = OverlayImage::ScanColumns(clip.Width);
 			const int margin = TerrainSnapshot::ScanMargin;
 			auto& count = Current.Count;
+			// 4D1890 (step 4, before the overlays): the records in their sorted order, those enabled whose
+			// saved rectangle, moved by the view, meets the clip.
+			{
+				const auto* pairs = *reinterpret_cast<const std::uint32_t* const*>(FoggedPairs);
+				count.Fogged = *reinterpret_cast<const int*>(FoggedCount);
+				std::vector<std::array<std::uint32_t, 2>> records;
+				for (int i = 0; i < count.Fogged && CursorSnapshot::Readable(pairs + 2 * i, 2 * sizeof(std::uint32_t)); ++i)
+					records.push_back({pairs[2 * i], pairs[2 * i + 1]});
+				// A record made after this frame's draw unsorts them; 4D1890 sorts them by key next time.
+				if (!*reinterpret_cast<const bool*>(FoggedSorted))
+				{
+					++count.FoggedUnsorted;
+					std::qsort(records.data(), records.size(), sizeof(records[0]), reinterpret_cast<int(__cdecl*)(const void*, const void*)>(FoggedCompare));
+				}
+				for (const auto& [key, address] : records)
+				{
+					const auto* record = reinterpret_cast<const std::uint8_t*>(std::uintptr_t(address));
+					if (!CursorSnapshot::Readable(record, FoggedRecordSize)) continue;
+					const bool building = *reinterpret_cast<const int*>(record + FoggedKind) == FoggedBuilding;
+					count.FoggedBuildings += building;
+					const auto& bounds = *reinterpret_cast<const RectangleStruct*>(record + FoggedBounds);
+					if (!record[FoggedEnabled] || !TerrainSnapshot::Intersects(clip, std::int64_t(bounds.X) - capture.TacticalX + capture.ViewX,
+						std::int64_t(bounds.Y) - capture.TacticalY + capture.ViewY, bounds.Width, bounds.Height)) continue;
+					++(building ? count.FoggedBuildingsInView : count.FoggedOthersInView);
+					if (building) capture.FoggedBuilding(record);
+				}
+			}
 			// 6D6D10: the bodies of all cells, then their shadows in the same order.
 			for (int pass = 0; pass < 2; ++pass)
 				for (int r = rows - 1 + margin; r >= -margin; --r)
@@ -1096,21 +1261,6 @@ namespace OverlaySnapshot
 				auto* object = ground.Items[i];
 				if (!CursorSnapshot::Readable(object, sizeof(BuildingClass)) || object->WhatAmI() != AbstractType::Building) continue;
 				capture.Building(static_cast<BuildingClass*>(object));
-			}
-			// 4D1890 (drawn before the overlays): a record draws where it is enabled and its saved
-			// rectangle, moved by the view, meets the clip.
-			const auto* pairs = *reinterpret_cast<const std::uint32_t* const*>(FoggedPairs);
-			count.Fogged = *reinterpret_cast<const int*>(FoggedCount);
-			for (int i = 0; i < count.Fogged && CursorSnapshot::Readable(pairs + 2 * i, 2 * sizeof(std::uint32_t)); ++i)
-			{
-				const auto* record = reinterpret_cast<const std::uint8_t*>(std::uintptr_t(pairs[2 * i + 1]));
-				if (!CursorSnapshot::Readable(record, FoggedRecordSize)) continue;
-				const bool building = *reinterpret_cast<const int*>(record + FoggedKind) == FoggedBuilding;
-				count.FoggedBuildings += building;
-				const auto& bounds = *reinterpret_cast<const RectangleStruct*>(record + FoggedBounds);
-				if (!record[FoggedEnabled] || !TerrainSnapshot::Intersects(clip, std::int64_t(bounds.X) - capture.TacticalX + capture.ViewX,
-					std::int64_t(bounds.Y) - capture.TacticalY + capture.ViewY, bounds.Width, bounds.Height)) continue;
-				++(building ? count.FoggedBuildingsInView : count.FoggedOthersInView);
 			}
 			CaptureComposite(capture, *tactical);
 			Current.Visible = true;

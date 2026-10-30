@@ -23,10 +23,11 @@
 // and the cliff shadows (6D7C00, 547230) of gamemd-reverse #19 follow in the same list, in the native
 // order (C6). TerrainPass draws the list after the tiles (C5.2c); the trace replays the captured
 // tiles, smudges and draws in software and compares the result with the native Tile and ZBuffer
-// (C5.2b). Rubble and the deferred records of 6D3470 are absent. The animated or crumbling Terrain
+// (C5.2b). Rubble and the deferred records of 6D3470 other than buildings are absent. The animated or crumbling Terrain
 // objects RenderLayers (6D8DB0) draws on Composite in mode 2 (gamemd-reverse #23) are captured in the
 // same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
-// The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1).
+// The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1);
+// the building records of 4D1890 (step 4) come first, before the overlays (D1c).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -50,13 +51,25 @@ namespace OverlaySnapshot
 	constexpr std::uintptr_t AdjustForZ = 0x6D20E0, CoordsToClient = 0x6D2140;
 	// 6D97D0 draws the objects of this layer.
 	constexpr int GroundLayer = 2;
-	// 4D1890's FoggedObject records: the (key, record) pairs and their count, and a record's kind, saved
-	// rectangle and enabled byte. Of its kinds, buildings belong to stage D; with FogOfWar on, the copy
-	// makes no overlay (14h), smudge (1Dh) or Terrain (24h) record, so none is drawn and the trace only
-	// counts them.
-	constexpr std::uintptr_t FoggedPairs = 0x8B3CC0, FoggedCount = 0x8B3CC4;
-	constexpr size_t FoggedKind = 0x30, FoggedBounds = 0x40, FoggedEnabled = 0x74, FoggedRecordSize = 0x78;
+	// 4D1890's FoggedObject records: the (key, record) pairs, their count and whether they are sorted
+	// (else it sorts them with 4D2ED0 first), and a record's owner, kind, saved Location, rectangle,
+	// parts, part count and enabled byte. Only the building records (kind 6) are drawn (D1c); with
+	// FogOfWar on, the copy makes no overlay (14h), smudge (1Dh) or Terrain (24h) record, so the trace
+	// only counts them.
+	constexpr std::uintptr_t FoggedPairs = 0x8B3CC0, FoggedCount = 0x8B3CC4, FoggedSorted = 0x8B3CCC, FoggedCompare = 0x4D2ED0;
+	constexpr size_t FoggedOwner = 0x28, FoggedKind = 0x30, FoggedLocation = 0x34, FoggedBounds = 0x40, FoggedParts = 0x60, FoggedPartCount = 0x6C,
+		FoggedEnabled = 0x74, FoggedRecordSize = 0x78;
 	constexpr int FoggedBuilding = 6;
+	// A record's part: the building type and its frame, then each anim's type, frame and ZAdjust; the
+	// flag marks a laser fence or firestorm body.
+	struct FoggedPart
+	{
+		void* Type;
+		int Frame;
+		bool Flat;
+		int ZAdjust;
+	};
+	static_assert(sizeof(FoggedPart) == 0x10 && offsetof(FoggedPart, ZAdjust) == 0xC);
 	// 6D8DB0 walks the layers at 8A0360 and bounds the Terrain objects it draws by Locations that
 	// 5AFB80 (the matrix applied to a vector) gives for its corners.
 	constexpr int LayerCount = 5;
@@ -66,9 +79,9 @@ namespace OverlaySnapshot
 	// as the whole EAX.
 	constexpr std::uintptr_t BuildingZShape = 0x89DDBC, ZShapeMove = 0x6D1FE0, FoundationWidth = 0x45EC90, FoundationHeight = 0x45ECA0;
 
-	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00) or a
-	// building (6D9920).
-	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building };
+	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00), a
+	// building (6D9920), or a fogged building record's building or anim part (4D1890).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -106,8 +119,10 @@ namespace OverlaySnapshot
 		// the static ones drawn with their damaged frame, and the cells whose tile casts a cliff shadow.
 		int Terrains = 0, Dynamic = 0, TerrainOutside = 0, Damaged = 0, Casters = 0;
 		// 4D1890's records, the building ones and the others, and the enabled ones whose saved rectangle
-		// meets the clip.
-		int Fogged = 0, FoggedBuildings = 0, FoggedBuildingsInView = 0, FoggedOthersInView = 0;
+		// meets the clip; the anim parts of the building records drawn, those above the detail level, the
+		// records of an InvisibleInGame type, and the captures where the records were not sorted.
+		int Fogged = 0, FoggedBuildings = 0, FoggedBuildingsInView = 0, FoggedOthersInView = 0, FoggedAnims = 0, FoggedDetail = 0,
+			FoggedInvisible = 0, FoggedUnsorted = 0;
 		// 6D8DB0: the objects of its layers, the Terrain ones it selects (animated or crumbling), those
 		// outside its view range or at a fogged Location, and the other objects with those in the range.
 		int LayerObjects = 0, Animated = 0, OutOfRange = 0, LocationFogged = 0, Others = 0, OthersInRange = 0;

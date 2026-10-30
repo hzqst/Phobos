@@ -57,7 +57,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
 - 动画/崩塌 Terrain（D2）：只画 Terrain，对象层中的单位、建筑、动画（如矿石闪光）、粒子与 Extras 都不画（阶段 D3 起）；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
-- `4D1890` deferred 记录不画：开 FogOfWar 实测只出现建筑记录（阶段 D1，#22）；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾中的建筑（`4D1890` 类型 6，阶段 D1c）尚未画；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
+- `4D1890` deferred 记录只画建筑（D1c）：开 FogOfWar 实测只出现建筑记录；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾建筑的保存动画在原生按格重画后可能缺失，快照按全量重画画出（见“迷雾建筑”）；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
 - Debug 构建每帧采集约 1 ms（下表），加 ABuffer 快照后约 1.4 ms，尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
@@ -161,6 +161,23 @@ Tile 的第 8 步（`6D3870 → 6D9920`）在 Terrain 对象与悬崖投影之�
 | 不画 | 另一种 visual（`VisualCharacter≠Normal`）、正在折跃、对当前玩家不可见、伪装中的建筑计为 `unsupported`，不画 |
 
 Ares 的 `437CCC` 把无 ZShape 的 RLE blitter 默认读取的 Z 调整行换成与帧同宽的全 0 缓冲，所以宽阴影等无 ZShape 的 RLE 帧没有逐像素调整。trace 在 `overlay` 行后加 `buildings`：Ground 层建筑数 `buildings`、`fogged`、`outside`、`unsupported`、开关中的大门 `gates`、卸载中的 `unloading`、画出的底座 `bibs` 与门 `doors`；`overlaytypes` 的键前缀 `b` 为建筑类型号。
+
+## 迷雾建筑（Tile 第 4 步）
+
+Tile 第 4 步（`6D3470`）在弹坑之后、overlay 之前调 `4D1890`。快照在 overlay 之前按原生顺序采集：全局 key+record 表 `[8B3CC0]`（个数 `[8B3CC4]`）；`[8B3CCC]` 为假（本帧绘制后又生成了记录）时用原生比较函数 `4D2ED0` 对副本 qsort 并计 `foggedUnsorted`；记录须启用（`+74h`）、保存的矩形（`+40h`，减 TacticalPos 加 ViewBounds 原点）与 clip 相交，类型 6 才画（规则在 `BuildingImage::Fogged*`，有单元测试；采集 `Capture::FoggedBuilding`）。parts（`+60h`，个数 `+6Ch`，每个 10h：类型、帧、+8 标志、ZAdjust）按保存顺序：
+
+| 项 | 规则 |
+| --- | --- |
+| 位置 | `CoordsToClient(Location−(128,128,0))` 加 ViewBounds 原点；`h = 6D20E0(Location.Z)`；格子为 Location 所在格（原生先画，LightConvert 已建好）|
+| 颜色 | Owner（`+28h`，House 指针）当前 `ColorSchemeIndex` 的 LightConvert；类型 TerrainPalette 时用格子 LightConvert，但亮度仍为 `int16(Intensity_Normal)+int16(ExtraLight)`；没有闪烁、铁幕、tint、visual |
+| part0 本体 | 类型 InvisibleInGame 时整条记录（含动画）不画。帧为保存值（不截断）；clip 高度截到 `int16(image.Height)/2 + 中心Y − clip.Y`（不大于 0 时本体与阴影都不画）。标志为假：`4E00`、`N−h−2`、梯度 2、ZShape BUILDNGZ，偏移 `(144,172)+ZShapePointMove−6D1FE0(远角)`，没有宽度 ≥8 与建造/出售的条件；标志为真（LaserFence 帧 8/12 或 FirestormWall）：`−h−2`、梯度 0、无 ZShape |
+| part0 阴影 | 同一截短的 clip，帧 `本体帧 + int16(Frames)/2`（读 `GetImage()` 返回的 SHP 头），`4E01`、`−h−2`、梯度 0、亮度 1000；不看 bDrawShadow 与 NoShadow |
+| 底座 | 类型有 BibShape 即画（无 BState/ActuallyPlaced 条件），原 clip，帧为保存帧，`4E00`、`−h−3`、梯度 0，没有阴影 |
+| 动画 part | 类型须为 AnimType、`DetailLevel ≤ GameOptions.DetailLevel`、`GetImage()` 非空；帧为保存值；Convert：有 Owner 配色且 ShouldUseCellDrawer 时用它，否则 `[87F6C0]`（ANIM_PAL）；亮度 UseNormalLight 时 1000，否则 `int16(Intensity_Normal)`；`2E00` 只测不写 Z（`Draw::WritesDepth=false`），`保存的ZAdjust−h−2`，梯度 Flat ? 0 : 2；没有阴影 |
+
+活建筑 `IsFogged` 时第 8 步跳过它，记录与活建筑靠这个互斥（Armageddon 时两者都画），不按位置去重。trace 的 `buildings` 行另有 `foggedAnims`（画出的动画 part）、`foggedDetail`（超出细节等级）、`foggedInvisible`、`foggedUnsorted`，`bibs` 含记录的底座；`foggeddraws` 列出每次记录绘制 `f类型:帧[s]@x,y,宽x高`（建筑 part）与 `a类型:帧@…`（动画 part），坐标为 Tile 坐标；`overlaytypes` 的键前缀 `f`/`a` 同此。
+
+**原生增量缓存的差异**：`6D3470` 在增量重画时，除滚屏条带与脏区外，还对每个 VisibleCell 以该格的 60×30 矩形为 clip 调 `4D1890`（第 8 步的 `6D3870` 同样按格重画）。RLE 帧的行深度依赖 clip 顶行（`ShapeDepth::RLE`）：带 ZShape 的本体基值随 clip.Y 以 −1 变化，不带 ZShape 的 gradient2 动画约为 −2/3，所以按格重画时，只读 Z 的动画可能被本体刚写的 Z 拒绝，而全量重画（clip 顶行为 0）时能通过。快照按当前状态整屏重建，等于全量重画的结果；暂停帧的原生 Tile 可能缺少这些动画，见“D1c”。
 
 ## 动画 Terrain（mode 2）
 
@@ -382,3 +399,14 @@ HEAD `d507b7de` + 本批未提交改动，DLL SHA256 `933132e2…8d7d`，1024×7
 | Vulkan | 开局、Buildup、上滚 | 全一致 | 只有光标 0–188 像素 |
 
 同次 `compositecheck` 的 `unexplained` 只在画面顶边（`y≤3`，对象层），`body=0 shadow=0`。未实测：tint（需铁幕/空袭/Phobos Tint）、大门开关、卸载与门、出售、`TerrainPalette` 建筑、`unsupported` 各状态；第一次实测时曾因按 `[89C568]` 首字节判定无 ZShape 宽阴影为不支持而差 559 像素，按 Ares `437CCC` 去掉该判定后一致。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d1a`。回归新增 `BuildingImageTests`，全部通过；Debug 构建无警告。
+
+### D1c 迷雾建筑（2026-10-30）
+
+HEAD `5851ff0b` + 本批未提交改动，DLL SHA256 `3a5f5ef7…`；最终 DLL `67d520c7…`（只多了动画 part 类型为空时跳过）在 D3D12 上滚、静止 4 秒补测，14 个样本 `tilecheck` 全一致，GPU 差异同下表，1024×768。GPUBLD 同 D1a（开局 `(117,75)`，加 5 栋），`spawn.ini` 加 FogOfWar：开局约 3 秒后迷雾回长，记录从 0 增至 26–50 条（全是建筑），视野内最多 10 条、13 个保存的动画（雷达盘、旗、吊臂、灯等）。
+
+| 后端 | 状态 | `tilecheck`（强制全量重画） | GPU 对暂停帧 Tile（`scripts/infog.py`） |
+| --- | --- | --- | --- |
+| D3D12 | 开局、上滚、左滚、静止 3/6/10 秒、滚出再滚回，共 4 次启动 50+ 个样本 | 颜色、Z 全一致（含 foggedAnims=3–13） | 光标 188 像素；其余 43–1426 像素全部落在迷雾动画 part 的矩形内，建筑 part 内 0 |
+| Vulkan | 上滚、左滚 | 12 个样本全一致 | 同上（690、43 像素在动画内，建筑 part 内 0） |
+
+差异处原生屏幕（`ddraw`）也没有这些动画：原生按格重画时动画被 Z 拒绝（见“迷雾建筑”末），全量重画时才画出；建筑本体、阴影、底座与 GPU 一致。这是原生增量缓存的历史状态，不按当前状态复现。未实测：Armageddon、LaserFence/FirestormWall 的平铺本体、TerrainPalette 记录、InvisibleInGame、超出细节等级的动画、未排序的记录表。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d1c`（`fog`、`fog2`–`fog4`、`vk`、`final`；`fog3` 之前的 DLL 没有 `foggeddraws`）。回归 `BuildingImageTests` 新增迷雾规则，全部通过；Debug 构建无警告。

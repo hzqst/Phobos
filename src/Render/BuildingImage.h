@@ -55,4 +55,25 @@ namespace BuildingImage
 
 	// 43D290's door below: frame 1 unless healthier than ConditionYellow.
 	constexpr int DoorFrame(bool healthy) { return healthy ? 0 : 1; }
+
+	// 4D1890's building records (kind 6, step 4, gamemd-reverse #22 §6.2) call 4AED70 directly, with
+	// h of the saved Location: the body N - h - 2 with gradient 2 and the Z shape at its own offset
+	// (no width guard, no mission condition), or -h - 2 with gradient 0 and none for a laser fence or
+	// firestorm part; its shadow -h - 2; the bib -h - 3 (BibDepth); a saved anim its saved ZAdjust - h - 2,
+	// testing Z only.
+	constexpr int FoggedZShapeX = 144, FoggedZShapeY = 172;
+	constexpr int FoggedBodyDepth(int normalZAdjust, int height, bool flat) { return flat ? DoorDepth(height) : BodyDepth(normalZAdjust, height); }
+	constexpr int FoggedShadowDepth(int height) { return DoorDepth(height); }
+	constexpr int FoggedAnimDepth(int savedZAdjust, int height) { return BodyDepth(savedZAdjust, height); }
+	constexpr Offset FoggedZShapeOffset(int moveX, int moveY, int cornerX, int cornerY)
+	{
+		return {Sub32(Add32(moveX, FoggedZShapeX), cornerX), Sub32(Add32(moveY, FoggedZShapeY), cornerY)};
+	}
+	// 4D1890 cuts the clip of a record's body and shadow at the image's bottom: half its (signed) height
+	// below the center, given relative to the clip's top. Nothing of them draws where this is not positive.
+	constexpr int FoggedClipHeight(int clipHeight, std::int16_t imageHeight, int centerY)
+	{
+		const int bottom = Add32(imageHeight / 2, centerY);
+		return clipHeight > bottom ? bottom : clipHeight;
+	}
 }

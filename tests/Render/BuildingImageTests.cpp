@@ -35,7 +35,18 @@ int main()
 	Check(GateFrame(2, 4, false, false, false, true) == 7 && GateFrame(-1, 4, false, false, false, false) == 0, "damaged gates, lower clamp");
 	Check(DoorFrame(true) == 0 && DoorFrame(false) == 1, "door frames");
 
+	Check(FoggedBodyDepth(-20, 15, false) == -37 && FoggedBodyDepth(-20, 15, true) == -17 && FoggedShadowDepth(30) == -32,
+		"fogged body depths ignore N for a flat part, the shadow sits at -h - 2");
+	Check(FoggedAnimDepth(5, 10) == -7 && FoggedAnimDepth(INT_MIN, 1) == INT_MAX - 2, "fogged anim depths, wrapping");
+	{
+		const auto offset = FoggedZShapeOffset(10, -5, 60, 30);
+		Check(offset.X == 94 && offset.Y == 137, "fogged Z shape offset");
+	}
+	Check(FoggedClipHeight(736, 100, 600) == 650 && FoggedClipHeight(736, 100, 700) == 736 && FoggedClipHeight(736, 100, -60) == -10,
+		"fogged clip cut at the image's bottom");
+	Check(FoggedClipHeight(736, -101, 0) == -50, "fogged clip with a negative image height");
+
 	if (Failures) return 1;
-	std::puts("BuildingImage: frames, depths, Z shape offsets and gate frames passed.");
+	std::puts("BuildingImage: frames, depths, Z shape offsets, gate frames and fogged records passed.");
 	return 0;
 }
