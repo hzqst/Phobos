@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。C5.2a 把战术区改画进与 ViewBounds 同尺寸的离屏目标，带深度缓冲，地块按 `547CF0` 测试并写 Z（见“深度”），为 #18/#19 中会被地块 Z 遮挡的 overlay、Terrain 对象与悬崖投影做准备。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序与原生 Z，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。overlay 及其阴影、deferred 记录、Terrain 对象、建筑底座、地块阴影、alpha shape 都不在本层。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 每次采集重建 ABuffer 的 shroud/fog（C4.1 在 trace 中与原生 ABuffer 核对），C4.2 在 GPU 上画成 ABuffer 纹理，地形 PS 逐像素取 a（见“ABuffer”）。C5.1 依据 Issue #18 / `af42121` 的 `smudge-overlay-gpu-handoff.md`，在每格 TMP 之后画该格的弹坑（见“弹坑”）。C5.2a 把战术区改画进与 ViewBounds 同尺寸的离屏目标，带深度缓冲，地块按 `547CF0` 测试并写 Z（见“深度”），为 #18/#19 中会被地块 Z 遮挡的 overlay、Terrain 对象与悬崖投影做准备。C5.2b 采集 overlay 本体与阴影（`OverlaySnapshot`），只在 trace 中用 CPU 重放整个 Tile 层并与原生 Tile、ZBuffer 逐像素核对，GPU 尚未画 overlay（见“Overlay”）。目前画 TMP 地块（主菱形与 extra 图）与逐格弹坑，按原生顺序与原生 Z，颜色按每格 `Intensity_Terrain` 与逐像素 ABuffer 值（shroud/fog）。overlay 及其阴影、deferred 记录、Terrain 对象、建筑底座、地块阴影、alpha shape 都不在本层。
 
 ## 采集
 
@@ -53,10 +53,10 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 ## 未支持与边界
 
-- 深度只实现了地块 `547CF0` 的规则（旧值 ≥ 新值时画并写）；overlay、Terrain 对象、阴影用的严格 `<` 规则、ZGradient、ZShape 在 C5.2/C6 实现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
+- GPU 深度只实现了地块 `547CF0` 的规则（旧值 ≥ 新值时画并写）；overlay 的严格 `<` 规则、ZGradient、ZShape 已有 CPU 模型（`ShapeDepth`，C5.2b），GPU 在 C5.2c 实现，Terrain 对象与悬崖投影在 C6。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- overlay 及其阴影（C5.2，严格测试并写 Z，需要先有 GPU 深度）、`4D1890` deferred 记录（Fogged overlay/smudge）、Terrain 对象、建筑底座、地块阴影不画（C5.2/C6/阶段 D）。
+- overlay 及其阴影只采集未画（C5.2c）；`4D1890` deferred 记录（Fogged overlay/smudge）、Terrain 对象、建筑底座、地块阴影不画（C5.2/C6/阶段 D）。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
 - Debug 构建每帧采集约 1 ms（下表），加 ABuffer 快照后约 1.4 ms，尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
@@ -111,6 +111,21 @@ GPU（`ABufferPass.h`、`ABufferFrame.ps.hlsl`，顶点着色器复用 `TerrainT
 弹坑帧在 `ShapeFrameSource` 的共用缓存（与侧栏相同，SHP 析构时失效），地块 piece 仍在 `TerrainSnapshot::Frames`；`Placement::Storage` 记录实例的帧来自哪个缓存，atlas 请求与 `depthcheck` 都按它解析。trace 主行新增 `smudges`（提交的弹坑实例数）与 `smudgeMissing`。
 
 范围外：`4D1890` 的 smudge `1Dh` deferred 分支（帧取记录 `+58`、位置取保存矩形）不画；`6D7F20` 可见格队列的增量重画用完整 ViewBounds 作 clip，整屏重建不复现这种历史。
+
+## Overlay
+
+`6D6D10` 在 TMP/弹坑与 deferred 记录之后扫描：锚点同地块扫描，起点再移 `(−4,−2)`，`m=H/15+20`、`n=W/60+4`，行 `r=m+1…0` 由近到远，格 `= 起点 + (⌊r/2⌋+c, ⌊(r+1)/2⌋−c)`；先画全部本体（`47F6A0`），再按同序画全部阴影（`47F510`）。格合法、`OverlayTypeIndex≠−1` 且 `47FB90` 的外接矩形与 clip 相交才画。快照多扫 2 行/列，规则在 `OverlayImage`（有单元测试），采集在 `OverlaySnapshot`（每次 `4F4583` 回调、地形采集之后）。
+
+| 项 | 规则 |
+| --- | --- |
+| 中心 | `(tileX+30, tileY+15+b−lift)`：`b`（`5FDCC0`）Tiberium/墙/索引 126/箱子 −12，`LandType=9` 再 −1，索引 126 再 −1；`lift` 桥格（`Flags&0x80`）16、Data 9–17 再加 15，索引 239 为 15。阴影在桥格 Data 9–17 时再移 `(−15,+7)`。`4AED70` 居中后加帧 `Left/Top` |
+| 本体 | 索引 167/178 无本体。`h=15·(Level+4·桥)−ZAdjust(Phobos)`。桥：帧 Data（0/9 加 `81CC30` 图案），`Color1_Blue`，`z=−2−h`，梯度 0。Tiberium：变体类型 `Image.ArrayIndex+p%NumImages`（`p=y·x`）；Phobos `AllowRamps`+ramp 图且坡 1–4 时取坡图 `+NumImages+(s−1)Q+p%Q`（`Q=max(NumSlopes,8)/4`）；`x.pal` Convert、亮度 1000、`z=−2−h`、梯度 0，坡格（`SlopeIndex≠0`）带 `AA105C[坡]` 的 Z shape。墙（Phobos `47F974`）：所有者配色（或类型 Palette）的 LightConvert，`Intensity_Normal`（零扩展），梯度 Deg90。其他：本格 LightConvert、`Intensity_Terrain`，`z=e−h−2`（DrawFlat 或岩石 `e=0`，否则 −15），DrawFlat 梯度 0 否则 Deg90，箱子帧 0；Rubble 不支持 |
+| 阴影 | 类型自身图（Tiberium 也不换变体）的帧 `Frames/2+Data`（箱子 `Frames/2`），本格 LightConvert，flags `4601`，`z=−2−15·Level`，梯度 0 |
+| 深度 | `ShapeDepth`：`7BBE20` 裁剪后，平铺帧按 `4373B0`、RLE 帧按 `437A10` 求每行基值（`817710` 梯度记录，Deg90 每 3 行 +1，梯度 0 每行 −1），像素 `int32 深度 < uint16 旧值` 才画并写低 16 位（相等不画）。阴影像素把旧色 `(c>>1)&HalfTranslucencyMask` |
+| Z shape | 帧被裁到 Z shape 帧的范围（`421B60`）。若裁剪起点落在帧内，RLE 路径仍从帧第 0 列读、宽度从右侧减去该偏移（Ramp Tiberium 常见，可能一列都不画）；`437A10` 以 Z shape 帧的**原始数据**为 Z 字节（RLE 的 Z shape 读到的是编码流），指针还会因每行前缀跳过的零串落后。快照在采集时按原生指针算出每个像素实际读到的字节（`Draw::ZBytes`） |
+| 空帧 | 帧号越界（`69E7E0` 返回空矩形）、宽或高为 0、引用在原生绘制后仍未加载（文件不存在）时原生不画，快照同样不画 |
+
+trace（`PHOBOS_TERRAIN_TRACE=1`）在地形 trace 输出的视角上调用 `MarkNeedsRedraw(1)`，下一次采集再输出 `overlay`（各类计数）、`overlaytypes`（每种 overlay 的本体/阴影/RLE/Z shape 数）、`tilecheck`（重放 TMP、弹坑、overlay 本体与阴影后的颜色与 Z 对照）、`tiledepth` 与不一致时的 `tilesamples`。等完整重画是因为纵向滚屏时原生只重画露出的条带，而带 Z shape 的 Flag=1 梯度绘制没有逐行步进、基值取自 clip 顶行，条带重画的结果与完整重画不同；GPU 每次完整重画，只与原生完整重画的结果相同。
 
 ## 验收（2026-10-30）
 
@@ -209,3 +224,16 @@ HEAD `10948817` + 本批未提交改动，1024×768，D3D12 选中 `D32_FLOAT`�
 | D3D12 GPUTOMB，比较方向临时改为 `GREATER_OR_EQUAL` | 开局 | 97.85% 像素不同，证明深度测试确实生效；实验后已改回 |
 
 最终 DLL SHA256 `6958cf5f…76a3` 复测 GPUTOMB 开局与悬崖视角，结果同上。D16_UNORM 后备路径未实测。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52`、`c52v`、`c52x`、`c52f`。回归新增 `TerrainBatchTests` 深度字段与按深度模式分段用例；Debug 构建无警告（含 `TerrainComposite.ps` 的 DXIL/SPIR-V）。
+
+### C5.2b overlay CPU 模型（2026-10-30）
+
+HEAD `09cf144e` + 本批未提交改动，DLL SHA256 `90a8aed3…c630`，1024×768，D3D12，只看 trace 的 `tilecheck`（每次 630016 像素）。新增受控地图（只在 `Debug/AutomationGame`）：`GPUOVX.MAP`（`GPUOVER` 加墙 `GAWALL/NAWALL/CAFNCB`、`TIB01`、箱子、岩石、`GEM01` 条带，悬崖视角坡格周围填 `TIB01`，并在地图里给 `[Riparius]` 开 `AllowRamps`）；`GPUARCO.MAP`、`GPULIBO.MAP` 为 `GPUARCF`、`GPULIBF` 去掉 Terrain 对象。
+
+| 地图 | 状态 | 覆盖 | 结果 |
+| --- | --- | --- | --- |
+| GPUOVER | 开局、上、右、下 | Tiberium/宝石（RLE）、岩石本体与阴影 | 颜色、Z 全部一致 |
+| GPULIBF | 开局、上、左 | 宝石 165–384 个 | 全部一致 |
+| GPUARCO | 开局、上、右、下 | 宝石本体与 97 个阴影、Tiberium | 全部一致（带树的 GPUARCF 只在树处不同，属 C6） |
+| GPUOVX | 开局、两次上滚、下、左（完整重画后） | 墙 147 个（Deg90）及其阴影、岩石、宝石；19 个 ramp Tiberium，其中 18 个带 Z shape | 全部一致，`rejected` 最多 47420 |
+
+未覆盖：平铺（非 RLE）帧（测试中所有 overlay 帧都是 RLE）、桥格（`Flags&0x80`）、veins（本 mod 的 126 不是 veins）、Rubble、Vulkan。没有完整重画时，纵向滚屏后 ramp Tiberium 处曾有 8 像素颜色、34 像素 Z 不同，原因见“Overlay”。`89C568`（无 Z shape 时 RLE 读的 Z 字节）前 256 字节为 0，帧宽超过时计为 `unsupported`（未出现）。临时改 `spawn.ini` 的 Scenario，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52b`。回归新增 `ShapeDepthTests`、`OverlayImageTests`；Debug 构建无警告。

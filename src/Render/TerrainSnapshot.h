@@ -21,7 +21,7 @@
 // default ABuffer value. Stage C3 adds each image's Z plane and base depth, which the GPU tests and
 // writes since stage C5.2a. Stage C4.2 captures the ABuffer's shroud and fog with each capture (ABufferSnapshot) for
 // the shader's light. Stage C5.1 adds each cell's smudge (480350 -> 6B55F0) right after its tile.
-// Overlays and every later Tile layer are absent.
+// OverlaySnapshot captures the overlays after this capture; every later Tile layer is absent.
 namespace TerrainSnapshot
 {
 	using namespace TerrainImage;

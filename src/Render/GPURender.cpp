@@ -8,6 +8,7 @@
 #include "SidebarSnapshot.h"
 #include "CommandBarSnapshot.h"
 #include "ABufferPass.h"
+#include "OverlaySnapshot.h"
 #include "TerrainPass.h"
 #include "Tooltip.h"
 #include "FrameAtlas.h"
@@ -427,6 +428,7 @@ void GPURender::OnVideoModeSet()
 	SidebarSnapshot::Invalidate();
 	CommandBarSnapshot::Invalidate();
 	TerrainSnapshot::Invalidate();
+	OverlaySnapshot::Invalidate();
 	const int width = DSurface::WindowBounds.Width;
 	const int height = DSurface::WindowBounds.Height;
 
@@ -621,6 +623,7 @@ void GPURender::ReleaseResources()
 		SidebarSnapshot::Invalidate();
 		CommandBarSnapshot::Invalidate();
 		TerrainSnapshot::Clear();
+		OverlaySnapshot::Invalidate();
 
 		if (WindowClaimed)
 		{
@@ -786,7 +789,10 @@ void GPURender::OnToolTipsDrawn()
 	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
 	{
 		Tooltip::PublishTopLevel();
+		const auto traced = TerrainSnapshot::TraceCount;
 		TerrainSnapshot::CaptureAfterDraw();
+		// The overlay trace follows the terrain trace's settled, changed views.
+		OverlaySnapshot::CaptureAfterDraw(TerrainSnapshot::TraceCount != traced);
 	}
 }
 
@@ -794,6 +800,7 @@ void GPURender::InvalidateTerrain(bool resources)
 {
 	if (resources) TerrainSnapshot::Clear();
 	else TerrainSnapshot::Invalidate();
+	OverlaySnapshot::Invalidate();
 }
 
 void GPURender::OnCameoState(int index, bool darken, bool progress, bool completed, int stage)

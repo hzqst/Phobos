@@ -326,6 +326,7 @@
     <ClCompile Include="src\Render\ShapeFrameSource.cpp" />
     <ClCompile Include="src\Render\SidebarSnapshot.cpp" />
     <ClCompile Include="src\Render\TerrainPass.cpp" />
+    <ClCompile Include="src\Render\OverlaySnapshot.cpp" />
     <ClCompile Include="src\Render\TerrainSnapshot.cpp" />
     <!-- src\Utilities -->
     <ClCompile Include="src\Utilities\Anchor.cpp" />
