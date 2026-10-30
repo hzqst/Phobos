@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4.1 ABuffer 对照）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。目前只画 TMP 地块：主菱形与 extra 图，按原生顺序、GPU 不用 Z buffer，颜色按每格 `Intensity_Terrain` 与默认 ABuffer 值。弹坑、overlay、Terrain 对象、建筑底座、地块阴影、迷雾与逐像素 ABuffer、TMP 自身的 Z 遮挡都不在本层。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。C3 采集每个地块图的 Z 字节与基准深度，并用原生 ZBuffer 逐像素核对；GPU 暂不做深度测试（见“深度”）。C4.1 依据 Issue #17 / `5ad221c` 的 `abuffer-gpu-handoff.md` 在 CPU 上重建 ABuffer 的 shroud/fog，只在 trace 中与原生 ABuffer 核对，GPU 仍用默认值（见“ABuffer”）。目前只画 TMP 地块：主菱形与 extra 图，按原生顺序、GPU 不用 Z buffer，颜色按每格 `Intensity_Terrain` 与默认 ABuffer 值。弹坑、overlay、Terrain 对象、建筑底座、地块阴影、迷雾与逐像素 ABuffer、TMP 自身的 Z 遮挡都不在本层。
 
 ## 采集
 
@@ -46,12 +46,12 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 ## 日志
 
-`PHOBOS_TERRAIN_TRACE=1` 时输出 `[TerrainGPU]`，最多 64 条，内容相同时不重复，且只在镜头停住（TacticalPos 与上次采集相同）时输出：`ready/reason`、ViewBounds、画布原点、TacticalPos、锚点与扫描行列数、遍历/合法/提交格数、extra 数、各类失败计数（`tile/image/variant/empty/palette/frame`）、本次 piece 数、颜色表数与占用行数、缓存规模，以及视口中心格的索引、子块、Level、变体、实际地块、piece、亮度与 shade。每条后接 `depth`（`[ABC55C]` 加速开关、ZBuffer 地址/Bounds/MaxValue/尺寸、无深度数据的格数、最高 Level）与 `depthcheck`（见“深度”）。另每 600 次采集输出一条 `perf`：采集平均/最大耗时，以及期间每次 present 的地形绘制次数与实例数（最多 64 条）。
+`PHOBOS_TERRAIN_TRACE=1` 时输出 `[TerrainGPU]`，最多 64 条，内容相同时不重复，且只在镜头停住（TacticalPos 与上次采集相同）时输出：`ready/reason`、ViewBounds、画布原点、TacticalPos、锚点与扫描行列数、遍历/合法/提交格数、extra 数、各类失败计数（`tile/image/variant/empty/palette/frame`）、本次 piece 数、颜色表数与占用行数、缓存规模，以及视口中心格的索引、子块、Level、变体、实际地块、piece、亮度与 shade。每条后接 `depth`（`[ABC55C]` 加速开关、ZBuffer 地址/Bounds/MaxValue/尺寸、无深度数据的格数、最高 Level）、`depthcheck`（见“深度”）、`abuffer` 与 `abuffercheck`（见“ABuffer”）。另每 600 次采集输出一条 `perf`：采集平均/最大耗时，以及期间每次 present 的地形绘制次数与实例数（最多 64 条）。
 
 ## 未支持与边界
 
 - GPU 不做深度测试，只按绘制顺序覆盖；已测地图上原生 Z 测试从不挡色（见“深度”），对象遮挡需要的 GPU 深度留到阶段 D。
-- 颜色只用默认 ABuffer 127：迷雾/未探索的渐变带与 alpha shape 区域颜色不同（C4/阶段 E）。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
+- 颜色只用默认 ABuffer 127：迷雾/未探索的渐变带、地图外轮廓暗边与 alpha shape 区域颜色不同（C4.2/阶段 E）。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
 - 弹坑（`480350` 尾部）、overlay、Terrain 对象、建筑底座、地块阴影不画（C5/阶段 D）。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -64,6 +64,24 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 `depthcheck` 是只在 trace 中运行的对照：用 `TerrainImage::DrawDepth` 按快照顺序在 CPU 上模拟 Z（初值 `FFFF`），再经 `ZBuffer::GetBuffer(x, y−ViewBounds.Y)` 与 `AdjustPointer` 读原生环形缓冲逐像素比较，输出比较数、不一致数及范围、被 Z 测试挡住的像素数（`rejected`）、未画像素数与缺帧数。原生 ZBuffer 只在本帧整体重画或滚屏后、且没有其他东西写 Z 的区域才等于纯地形结果。
 
 把 tile 的 y 代入 b，Level 两项抵消，`b = 常数 − 15·(x+y)`：后画的行 b 更小，原生 Z 测试几乎总放行，与按顺序覆盖结果相同。因此地形颜色对照无法区分有无 Z；GPU 深度缓冲（已定 D32_FLOAT 为主、D16_UNORM 后备，PS 写 `SV_Depth`，地形与对象共用渲染通道）在阶段 D 对象需要被悬崖遮挡时实现并验证。
+
+## ABuffer
+
+ABuffer（`[87E8A4]`）是 ViewBounds 大小的 16 位 WORD 环形缓冲，清空值 127；`547CF0` 用它的值 a 选 shade。mode 1 中 `6D3660` 在 `6D2DE0` 画地块之前更新它，所以地块读到的是本帧 shroud/fog 写完后的值。`ABufferImage.h` 为纯函数并有单元测试，`ABufferSnapshot.h` 采集与对照。
+
+| 步骤 | 规则 |
+| --- | --- |
+| 遍历 | `6D71E0` 按整屏重画：矩形取 ViewBounds，锚点、行列与地块遍历相同（`TerrainImage::ScanCell`），只处理 `CoordinatesLegal` 的格，无窗口（`Game::hWnd` 为空）时不写 |
+| 位置与裁剪 | 每格框 `(30(cx−cy)−T.X−30, 15(cx+cy)−T.Y+V.Y, 60, 30)`，不含 Level；与 ViewBounds 求交为裁剪框；绘制原点为框左上加 V.X。写入按 `GetBuffer(x, y−V.Y)` 定位，不减 V.X，因此只支持 `V.X=0`（否则 `reason=view`） |
+| 取帧 | `6D8700`：第一遍看 `AltFlags+12C` bit3，第二遍看 `CellFlags+140` bit1；本格无该位时返回回退值（第一遍 `AltFlags&18h`、第二遍 `CellFlags&3` 为零得 −2，否则 −1）；否则按 8 邻格（地图坐标，邻格只读低字节）该位**未置位**组掩码查 `7F4194`。`4801F0` 把 −2 映射为 15 号帧、−1 为 0 号帧。邻格按 `TryGetCellAt` 的线性索引查，落空时读共享 `InvalidCell` 的当前标志，不写它的坐标 |
+| 素材 | 第一遍用 `[89E790]`（FogOfWar 开）或 `[89E794]`（SHROUD），第二遍用 `[89E760]`；`[89E7C5]`/`[89E7C6]` 未置位或引用未加载时不采（`reason=shape`），不触发加载。按帧头取边界与 `Offset`，直接复制 Width×Height 原始字节，不做 RLE 解码 |
+| 写入 | `47EFE0` 覆盖：源字节不等于 `[7E4EB8]`（须为 `FE`，否则 `reason=transparent`）就写零扩展值，0 与 `FF` 都写；`47F250` 变暗：源字节 ≤127 时写 `uint16(max(0, old+v−127))`，无上界。第二遍只在 `SpecialFlags&1000h` 且当前玩家未战败时执行。原生在通过“原点在裁剪内”的检查后若区间为空仍会进循环，模型把这种情况计为 `unsupported` |
+
+`abuffer` 行输出：FogOfWar、玩家战败、窗口、两个素材的指针与数据地址及帧数、AlphaShape 数量、写入格数、回退帧 15/0 与边缘帧的格数、落到 InvalidCell 的查询数、缺帧数、`stale`、MapRect、VisibleRect、原生 ABuffer 的地址/Bounds/尺寸/环形偏移/字节数，以及第一个非 0 号帧格子的坐标、标志、掩码与帧号。`abuffercheck` 把快照画到填满 127 的 ViewBounds 上，经 `ABuffer::GetBuffer(V.X, 行)` 与 `AdjustPointer` 读原生环形缓冲逐像素比较，输出比较数、不一致数及范围、模型与原生的非 127 像素数，以及首个不一致像素所属格子的标志、掩码、帧号、当前取帧结果与 `Visibility+120`/`Foggedness+121`。
+
+`4801F0` 每次执行都会把两次取帧的原始结果存进 `Visibility`/`Foggedness`。`stale` 是这两个字节与当前结果不同的格数，即原生增量缓存尚未重画的格子。模型每次按当前标志完整重建，原生只重画 VisibleCells 中的格子；一个格子自身标志不变、只是邻格被揭开时不会进入该队列，旧帧会保留到之后被重画。这类格子上的差异属于原生缓存滞后，不是模型错误。
+
+首期不建模 alpha shape（`AlphaShapeClass::Array` 数量记录在 `abuffer` 行）与地形之后其他写 Alpha 的 blitter；`4F4583` 时的原生 ABuffer 只在这些都不存在时等于地块读取时的值。
 
 ## 验收（2026-10-30）
 
@@ -112,3 +130,17 @@ DLL SHA256 `df95642d…c6c6`（HEAD `f39de890` + 本批未提交改动），D3D1
 | GPUTERR | 4 个视角（完整雪地高台、四面悬崖、坡道） | `mismatched=0`、`rejected=0` |
 
 所有样本 `accelerated=0`、无深度数据格数 0；ZBuffer `Bounds=0,0,856,736`，`MaxValue` 随滚屏变化（32768 起）。颜色对照与 C2.5 相同：除光标外最大差 1；GPUTOMB 视野到达地图上边缘时，边缘的扇形变暗带（ABuffer，C4）约 4900 像素不同。回归新增 `TerrainImageTests` 深度用例，`test_gpu_capture.cmd` 通过；Debug 构建无警告。
+
+### C4.1 ABuffer 对照（2026-10-30）
+
+D3D12 1024×768，ViewBounds `0,0,856,736`，原生 ABuffer `Bounds=0,0,856,736`、`Width=856`、`Height=736`。新增受控地图 `GPUSHRD.MAP`：与 `GPUTOMB.MAP` 相同但不加“揭示全图”触发器。运行时 SHROUD/FOG 均经 SHPReference 加载、各 96 帧；FogOfWar 开时第一遍与第二遍绑定同一个 FOG 资源。所有样本 `alpha=0`、`missing=0`、`unsupported=0`。
+
+| 地图/设置 | 状态 | abuffercheck |
+| --- | --- | --- |
+| GPUTOMB（揭示全图） | 开局；向上滚屏 3 次（环形偏移推进）；地图上边缘；左上角 | 每次 630016 像素 `mismatched=0`；上边缘 16 个边缘格（邻格落到 InvalidCell），模型与原生各 4721 个非 127 像素，左上角各 4812 个 |
+| GPUSHRD（不揭示） | 开局黑幕；MCV 移动途中 5 次逐格揭开；展开基地；向右滚进黑幕 2 次 | `mismatched=0`；开局 669 格 15 号帧、48 个边缘格，非 127 像素 560598 |
+| GPUSHRD + `FogOfWar=Yes` | 开局；MCV 两段移动（共 49 次采样） | `stale=0` 的全部采样 `mismatched=0`；MCV 移动途中有 `stale` 1–23 格时出现 745–18153 个不一致像素，首个不一致像素都属于 `stale` 格（如当前 `occlusion=-1/1`、存储 `stored=-1/3`），MCV 停下后回到 0 |
+
+上边缘颜色对照：`native_terrain` 与 `gpu` 差 >1 的像素 4905 个，除光标 188 个外约 4717 个，即这些暗边像素（GPU 仍用 127，C4.2 处理）。这条暗带来自地图外轮廓：边缘格的上方邻格不存在（落到 InvalidCell），掩码取到暗边帧，原生行为如此，不是 Phobos 的问题。
+
+DLL SHA256：GPUTOMB 与 GPUSHRD 两轮为 `a4b07dc4…ef31`，FogOfWar 一轮为 `d89cd0f5…3482`（只多了 `stale` 诊断，模型相同）；HEAD `de06e8dd` + 本批未提交改动。回归新增 `ABufferImageTests` 与 `TerrainImageTests` 的 `ScanCell` 用例，`test_gpu_capture.cmd` 通过；Debug 构建无警告。临时改 `spawn.ini` 的 Scenario 与 FogOfWar，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c41`、`c41s`、`c41f`、`c41f2`。

@@ -80,6 +80,11 @@ int main()
 	Check(ScanRows(736) == 49 + 17 && ScanColumns(856) == 14 + 4, "1024x768 scan");
 	Check(ScanRows(568) == 37 + 17 && ScanColumns(632) == 10 + 4, "800x600 scan");
 	Check(FloorHalf(-3) == -2 && FloorHalf(-2) == -1 && FloorHalf(-1) == -1 && FloorHalf(3) == 1, "floor half");
+	// Rows start 2 left of the anchor and step down alternately in y and x; columns walk (+1,-1).
+	static_assert(ScanCell({10, 20}, 0, 0).X == 8 && ScanCell({10, 20}, 0, 0).Y == 20);
+	static_assert(ScanCell({10, 20}, 1, 0).X == 8 && ScanCell({10, 20}, 1, 0).Y == 21);
+	static_assert(ScanCell({10, 20}, 2, 3).X == 12 && ScanCell({10, 20}, 2, 3).Y == 18);
+	static_assert(ScanCell({10, 20}, -1, 0).X == 7 && ScanCell({10, 20}, -1, 0).Y == 20, "margin rows floor toward minus");
 	bool anchors = true;
 	for (int x = 0; x < 64; ++x)
 		for (int y = 0; y < 64; ++y)

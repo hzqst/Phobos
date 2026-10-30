@@ -168,6 +168,12 @@ namespace TerrainImage
 
 	struct Cell { int X, Y; };
 
+	// The cell at a row and column of the scan, both counted from 0 at the native start.
+	constexpr Cell ScanCell(Cell anchor, int row, int column)
+	{
+		return {anchor.X - 2 + FloorHalf(row) + column, anchor.Y + FloorHalf(row + 1) - column};
+	}
+
 	// The cell under a tactical pixel. The native anchor inverts the projection in floats
 	// (IsoTransformMatrix and 7C5F00); this exact inverse may differ by one cell on a
 	// boundary, which the caller's scan margin absorbs.

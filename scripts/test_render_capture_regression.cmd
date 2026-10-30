@@ -6,7 +6,7 @@ if errorlevel 1 exit /b 1
 if not exist Debug\RenderTests mkdir Debug\RenderTests
 set "_CL_=/D_CRT_SECURE_NO_WARNINGS"
 set "_LINK_=/MANIFEST:EMBED /MANIFESTUAC:level='asInvoker'"
-for %%T in (Atlas ButtonImage CameoLayout CursorImage FrameCache GlyphCache ShapeImage ShapeFrameSource CursorTrace Tooltip TerrainImage TerrainBatch) do (
+for %%T in (Atlas ButtonImage CameoLayout CursorImage FrameCache GlyphCache ShapeImage ShapeFrameSource CursorTrace Tooltip TerrainImage TerrainBatch ABufferImage) do (
     call :unit %%T
     if errorlevel 1 exit /b 1
 )

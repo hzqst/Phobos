@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ABufferSnapshot.h"
 #include "SidebarSnapshot.h"
 #include "TerrainBatch.h"
 #include "TerrainImage.h"
@@ -16,7 +17,8 @@
 // DSurface::Tile, captured in the 4F4583 callback as a full redraw of the visible cells.
 // Stage C2: main diamond and extra image in native order, lit by Intensity_Terrain with the
 // default ABuffer value. Stage C3 adds each image's Z plane and base depth; the GPU does not test
-// them yet. Smudges and every later Tile layer are absent.
+// them yet. Stage C4.1 traces the ABuffer's shroud and fog against the native buffer (ABufferSnapshot).
+// Smudges and every later Tile layer are absent.
 namespace TerrainSnapshot
 {
 	using namespace TerrainImage;
@@ -406,7 +408,7 @@ namespace TerrainSnapshot
 			for (int r = -ScanMargin; r < rows + ScanMargin; ++r)
 				for (int c = -ScanMargin; c < columns + ScanMargin; ++c)
 				{
-					const int cellX = anchor.X - 2 + FloorHalf(r) + c, cellY = anchor.Y + FloorHalf(r + 1) - c;
+					const auto [cellX, cellY] = ScanCell(anchor, r, c);
 					if (cellX < INT16_MIN || cellX > INT16_MAX || cellY < INT16_MIN || cellY > INT16_MAX) continue;
 					++count.Visited;
 					const CellStruct coords {std::int16_t(cellX), std::int16_t(cellY)};
@@ -505,6 +507,7 @@ namespace TerrainSnapshot
 		const bool settled = tacticalNow.X == LastTactical.X && tacticalNow.Y == LastTactical.Y;
 		LastTactical = tacticalNow;
 		if (!settled) return;
+		auto abuffer = ABufferSnapshot::Capture(ScanMargin);
 		// Stage C3 probe: which 547CF0 Z path runs and the values its base depth starts from.
 		const int accelerated = *reinterpret_cast<const std::uint8_t*>(AcceleratedDepth);
 		const bool zvalid = CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer));
@@ -514,6 +517,7 @@ namespace TerrainSnapshot
 			count.Palette, count.Frame, int(pieces), int(tables), sample.X, sample.Y};
 		auto hash = SidebarSnapshot::Hash(state, sizeof(state));
 		hash = SidebarSnapshot::Hash(&reason, sizeof(reason), hash);
+		hash = SidebarSnapshot::Hash(&abuffer.Hash, sizeof(abuffer.Hash), hash);
 		if (hash == LastTraceHash) return;
 		LastTraceHash = hash;
 		++TraceCount;
@@ -531,6 +535,7 @@ namespace TerrainSnapshot
 			TraceCount, accelerated, zbuffer, zvalid ? zbuffer->Bounds.X : 0, zvalid ? zbuffer->Bounds.Y : 0,
 			zvalid ? zbuffer->Bounds.Width : 0, zvalid ? zbuffer->Bounds.Height : 0, zvalid ? zbuffer->MaxValue : 0,
 			zvalid ? zbuffer->Width : 0, zvalid ? zbuffer->Height : 0, count.NoDepth, count.MaxLevel);
+		ABufferSnapshot::Trace(abuffer, TraceCount);
 		if (!Current.Visible) return;
 		const auto check = CheckDepth(zbuffer, view);
 		Debug::Log("[TerrainGPU] depthcheck sample=%u compared=%d mismatched=%d rejected=%d untouched=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%d:model=%d\n",
