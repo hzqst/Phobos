@@ -5,6 +5,7 @@
 #include "TerrainImage.h"
 #include <CellClass.h>
 #include <ConvertClass.h>
+#include <Drawing.h>
 #include <IsometricTileTypeClass.h>
 #include <MapClass.h>
 #include <TacticalClass.h>
@@ -13,8 +14,9 @@
 
 // The TMP tiles the terrain pass (6D2DE0 -> 6D7560 -> 480350 -> 547CF0) draws into
 // DSurface::Tile, captured in the 4F4583 callback as a full redraw of the visible cells.
-// Stage C2: main diamond and extra image in native order without the Z buffer, lit by
-// Intensity_Terrain with the default ABuffer value. Smudges and every later Tile layer are absent.
+// Stage C2: main diamond and extra image in native order, lit by Intensity_Terrain with the
+// default ABuffer value. Stage C3 adds each image's Z plane and base depth; the GPU does not test
+// them yet. Smudges and every later Tile layer are absent.
 namespace TerrainSnapshot
 {
 	using namespace TerrainImage;
@@ -26,6 +28,8 @@ namespace TerrainSnapshot
 	// 4814F0: the fixed 4x4 table and the 8x8 table with its one-time setup flag.
 	constexpr std::uintptr_t VariantTable4 = 0x81CCA8, VariantTable8 = 0x89E620, VariantTable8Ready = 0x89E7C7;
 	constexpr std::uint32_t AlternateVariantFlag = 1u << 13;
+	// 547CF0 skips its Z loops for an accelerated blitter when this byte is set.
+	constexpr std::uintptr_t AcceleratedDepth = 0xABC55C;
 	// Rows of the color table texture: 19 tables of 53 shades, or 37 of 27.
 	constexpr std::uint32_t TableRows = 1024;
 	static_assert(offsetof(ObjectTypeClass, Image) == 0xA4);
@@ -40,6 +44,8 @@ namespace TerrainSnapshot
 	static_assert(offsetof(CellClass, Flags) == 0x140);
 	static_assert(offsetof(ConvertClass, ShadeCount) == 0x16C);
 	static_assert(offsetof(ConvertClass, FullColorData) == 0x170);
+	static_assert(offsetof(ZBuffer, Bounds) == 0x00);
+	static_assert(offsetof(ZBuffer, MaxValue) == 0x24);
 
 	// A loaded TMP: grid size and nominal pixel size, then one absolute piece pointer per cell.
 	struct TileImageHeader { std::int32_t GridWidth, GridHeight, PixelWidth, PixelHeight; };
@@ -62,6 +68,10 @@ namespace TerrainSnapshot
 		// 547CF0's row of the alpha lighting remap; the shader combines it with the ABuffer value.
 		int LightRow;
 		bool Diamond;
+		// The frame's Z plane lies below its index plane. Without it the image neither tests nor
+		// writes the ZBuffer; with it each pixel's depth is Depth plus its Z byte.
+		bool UsesZ = false;
+		std::uint16_t Depth = 0;
 	};
 	struct Frame
 	{
@@ -88,6 +98,8 @@ namespace TerrainSnapshot
 	};
 	inline Perf Stats;
 	inline std::uint64_t LastTraceHash = 0;
+	// The trace waits until the view stops scrolling, so its lines go to settled views.
+	inline Point LastTactical {INT64_MIN, INT64_MIN};
 
 	inline void Invalidate()
 	{
@@ -142,8 +154,8 @@ namespace TerrainSnapshot
 		return reinterpret_cast<const Piece* const*>(image + 1)[index];
 	}
 
-	struct PieceFrames { FrameCache::FrameID Main, Extra; const char* Reason = nullptr; };
-	struct Counters { int Visited = 0, Legal = 0, Drawn = 0, Extras = 0, Tile = 0, Image = 0, Variant = 0, Empty = 0, Palette = 0, Frame = 0; };
+	struct PieceFrames { FrameCache::FrameID Main, Extra; const char* Reason = nullptr; bool UsesZ = false; };
+	struct Counters { int Visited = 0, Legal = 0, Drawn = 0, Extras = 0, Tile = 0, Image = 0, Variant = 0, Empty = 0, Palette = 0, Frame = 0, NoDepth = 0, MaxLevel = 0; };
 	// The drawn cell nearest the view center, for the trace.
 	struct Sample
 	{
@@ -152,22 +164,43 @@ namespace TerrainSnapshot
 		const void* Piece = nullptr;
 	};
 
+	// Piece data at an offset relative to the piece, or null when it cannot be read.
+	inline const std::uint8_t* PieceData(const Piece* piece, std::uint32_t offset, size_t size)
+	{
+		const auto base = reinterpret_cast<std::uintptr_t>(piece);
+		if (offset > UINTPTR_MAX - base) return nullptr;
+		const auto* data = reinterpret_cast<const std::uint8_t*>(base + offset);
+		return CursorSnapshot::Readable(data, size) ? data : nullptr;
+	}
+
 	// Copies the piece into the frame cache. A changed piece at the same address replaces the old frames.
+	// A piece with depth data stores its Z bytes as a second plane below the indices of each frame:
+	// the packed main Z expanded like the pixels, the extra Z as its rectangle.
 	inline PieceFrames AcquirePiece(const Piece* piece)
 	{
 		const auto* packed = reinterpret_cast<const std::uint8_t*>(piece + 1);
-		const std::uint8_t* extra = nullptr;
-		const bool hasExtra = piece->Flags & HasExtra;
+		const std::uint8_t *extra = nullptr, *depth = nullptr, *extraDepth = nullptr;
+		const bool hasExtra = piece->Flags & HasExtra, hasDepth = piece->Flags & HasDepth;
+		size_t extraSize = 0;
 		if (hasExtra)
 		{
-			const auto base = reinterpret_cast<std::uintptr_t>(piece);
 			if (piece->ExtraWidth <= 0 || piece->ExtraHeight <= 0 || piece->ExtraWidth > ShapeImage::MaxDimension
-				|| piece->ExtraHeight > ShapeImage::MaxDimension || piece->ExtraData > UINTPTR_MAX - base) return {{}, {}, "extra"};
-			extra = reinterpret_cast<const std::uint8_t*>(base + piece->ExtraData);
-			if (!CursorSnapshot::Readable(extra, size_t(piece->ExtraWidth) * piece->ExtraHeight)) return {{}, {}, "extra"};
+				|| piece->ExtraHeight > ShapeImage::MaxDimension) return {{}, {}, "extra"};
+			extraSize = size_t(piece->ExtraWidth) * piece->ExtraHeight;
+			extra = PieceData(piece, piece->ExtraData, extraSize);
+			if (!extra) return {{}, {}, "extra"};
 		}
+		if (hasDepth)
+		{
+			depth = PieceData(piece, piece->Depth, DiamondPixels);
+			if (hasExtra) extraDepth = PieceData(piece, piece->ExtraDepth, extraSize);
+			if (!depth || (hasExtra && !extraDepth)) return {{}, {}, "depth"};
+		}
+		const int planes = hasDepth ? 2 : 1;
 		auto hash = SidebarSnapshot::Hash(piece, sizeof(*piece) + DiamondPixels);
-		if (extra) hash = SidebarSnapshot::Hash(extra, size_t(piece->ExtraWidth) * piece->ExtraHeight, hash);
+		if (extra) hash = SidebarSnapshot::Hash(extra, extraSize, hash);
+		if (depth) hash = SidebarSnapshot::Hash(depth, DiamondPixels, hash);
+		if (extraDepth) hash = SidebarSnapshot::Hash(extraDepth, extraSize, hash);
 		const auto identity = reinterpret_cast<std::uintptr_t>(piece);
 		auto resource = Frames.LookupResource(identity);
 		if (const auto known = PieceHashes.find(identity); known != PieceHashes.end() && known->second != hash && resource)
@@ -177,8 +210,8 @@ namespace TerrainSnapshot
 		}
 		if (!resource)
 		{
-			resource = Frames.Register(identity, {TileWidth, DiamondRows, {{0, 0, TileWidth, DiamondRows},
-				{0, 0, hasExtra ? piece->ExtraWidth : 0, hasExtra ? piece->ExtraHeight : 0}}});
+			resource = Frames.Register(identity, {TileWidth, DiamondRows * planes, {{0, 0, TileWidth, DiamondRows * planes},
+				{0, 0, hasExtra ? piece->ExtraWidth : 0, hasExtra ? piece->ExtraHeight * planes : 0}}});
 			if (!resource)
 			{
 				// Over budget: start again from the pieces later captures still use. Pieces placed
@@ -188,19 +221,21 @@ namespace TerrainSnapshot
 			}
 		}
 		PieceHashes[identity] = hash;
-		const auto main = Frames.GetOrDecode(resource, 0, [packed](const auto&, auto& indices)
+		const auto main = Frames.GetOrDecode(resource, 0, [packed, depth, planes](const auto&, auto& indices)
 		{
-			indices.resize(size_t(TileWidth) * DiamondRows);
+			indices.resize(size_t(TileWidth) * DiamondRows * planes);
 			ExpandDiamond(packed, indices.data());
+			if (depth) ExpandDiamond(depth, indices.data() + size_t(TileWidth) * DiamondRows);
 			return FrameCache::Status::Ready;
 		});
 		if (main.State != FrameCache::Status::Ready) return {{}, {}, "frame"};
-		PieceFrames result {main.Frame->ID};
+		PieceFrames result {main.Frame->ID, {}, nullptr, hasDepth};
 		if (extra)
 		{
-			const auto copy = Frames.GetOrDecode(resource, 1, [extra](const auto& d, auto& indices)
+			const auto copy = Frames.GetOrDecode(resource, 1, [extra, extraDepth, extraSize](const auto&, auto& indices)
 			{
-				indices.assign(extra, extra + size_t(d.Width) * d.Height);
+				indices.assign(extra, extra + extraSize);
+				if (extraDepth) indices.insert(indices.end(), extraDepth, extraDepth + extraSize);
 				return FrameCache::Status::Ready;
 			});
 			if (copy.State != FrameCache::Status::Ready) return {{}, {}, "frame"};
@@ -270,6 +305,49 @@ namespace TerrainSnapshot
 		}
 	};
 
+	// Trace only: the software model of 547CF0's Z test over the snapshot, against the native
+	// ZBuffer. Equal where Tile was redrawn and nothing later wrote Z; Rejected counts the pixels
+	// whose color the Z test kept from being overwritten.
+	struct DepthCheck
+	{
+		int Compared = 0, Mismatched = 0, Rejected = 0, Untouched = 0, Missing = 0;
+		int Left = INT_MAX, Top = INT_MAX, Right = INT_MIN, Bottom = INT_MIN;
+		int FirstX = -1, FirstY = -1, Native = 0, Model = 0;
+	};
+
+	inline DepthCheck CheckDepth(ZBuffer* zbuffer, const RectangleStruct& view)
+	{
+		DepthCheck check;
+		const auto& clip = Current.Clip;
+		std::vector<std::uint16_t> model(size_t(clip.Width) * clip.Height, 0xFFFF);
+		for (const auto& placement : Current.Placements)
+		{
+			const auto* frame = Frames.Resolve(placement.ID);
+			const auto plane = size_t(placement.Width) * placement.Height;
+			if (!frame || frame->Indices.size() < plane * (placement.UsesZ ? 2 : 1)) { ++check.Missing; continue; }
+			const auto* indices = frame->Indices.data();
+			check.Rejected += DrawDepth(model.data(), clip.X, clip.Y, clip.Width, clip.Height, {placement.X, placement.Y,
+				placement.Width, placement.Height, indices, placement.UsesZ ? indices + plane : nullptr, placement.Depth, placement.Diamond});
+		}
+		for (int row = 0; row < clip.Height; ++row)
+		{
+			// 547CF0 addresses the ring buffer by the draw position minus ViewBounds.Y.
+			auto* native = static_cast<std::uint16_t*>(zbuffer->GetBuffer(clip.X, clip.Y + row - view.Y));
+			for (int column = 0; column < clip.Width; ++column, ++native)
+			{
+				zbuffer->AdjustPointer(native);
+				const auto expected = model[size_t(row) * clip.Width + column];
+				++check.Compared;
+				if (expected == 0xFFFF) ++check.Untouched;
+				if (*native == expected) continue;
+				if (!check.Mismatched++) { check.FirstX = column; check.FirstY = row; check.Native = *native; check.Model = expected; }
+				check.Left = std::min(check.Left, column); check.Right = std::max(check.Right, column);
+				check.Top = std::min(check.Top, row); check.Bottom = std::max(check.Bottom, row);
+			}
+		}
+		return check;
+	}
+
 	inline void CaptureAfterDraw()
 	{
 		const CaptureTimer timer;
@@ -279,6 +357,7 @@ namespace TerrainSnapshot
 		const TacticalClass* tactical = TacticalClass::Instance;
 		const auto& view = DSurface::ViewBounds;
 		const auto& types = IsometricTileTypeClass::Array;
+		ZBuffer* zbuffer = ZBuffer::Instance;
 		if (!TemplateState)
 			TemplateState = TemplateMatches(reinterpret_cast<const std::uint8_t*>(RowTemplate),
 				reinterpret_cast<const std::int32_t*>(RowOffsets)) ? 1 : 2;
@@ -286,6 +365,7 @@ namespace TerrainSnapshot
 		else if (TemplateState != 1) reason = "template";
 		else if (view.Width <= 0 || view.Height <= 0 || view.Width > SidebarSnapshot::MaxCanvasDimension
 			|| view.Height > SidebarSnapshot::MaxCanvasDimension) reason = "view";
+		else if (!CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer))) reason = "zbuffer";
 		Counters count;
 		Sample sample;
 		std::int64_t sampleDistance = INT64_MAX;
@@ -391,6 +471,8 @@ namespace TerrainSnapshot
 					if (frames->second.Reason) { ++count.Frame; continue; }
 					if (position.X < INT_MIN || position.X > INT_MAX || position.Y < INT_MIN || position.Y > INT_MAX) continue;
 					++count.Drawn;
+					if (!frames->second.UsesZ) ++count.NoDepth;
+					count.MaxLevel = std::max(count.MaxLevel, int(cell->Level));
 					const auto dx = position.X + TileWidth / 2 - (std::int64_t(view.X) + view.Width / 2);
 					const auto dy = position.Y + CellHeight / 2 - (std::int64_t(view.Y) + view.Height / 2);
 					if (dx * dx + dy * dy < sampleDistance)
@@ -399,14 +481,18 @@ namespace TerrainSnapshot
 						sample = {cellX, cellY, cell->IsoTileTypeIndex, typeIndex, height, cell->Level, variants, variant,
 							drawn->ArrayIndex, std::int16_t(cell->Intensity_Terrain), convert->ShadeCount, shade, piece};
 					}
-					Current.Placements.push_back({frames->second.Main, table->second, int(position.X), int(position.Y), TileWidth, DiamondRows, lightRow, true});
+					const auto depth = BaseDepth(zbuffer->MaxValue, zbuffer->Bounds.Y, int(position.Y), drawnImage->PixelHeight, cell->Level);
+					const bool usesZ = frames->second.UsesZ;
+					Current.Placements.push_back({frames->second.Main, table->second, int(position.X), int(position.Y), TileWidth, DiamondRows,
+						lightRow, true, usesZ, depth});
 					if (frames->second.Extra)
 					{
 						const auto x = position.X + std::int64_t(piece->ExtraX) - piece->X;
 						const auto y = position.Y + std::int64_t(piece->ExtraY) - piece->Y;
 						if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
 						++count.Extras;
-						Current.Placements.push_back({frames->second.Extra, table->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight, lightRow, false});
+						Current.Placements.push_back({frames->second.Extra, table->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight,
+							lightRow, false, usesZ, depth});
 					}
 				}
 			pieces = captured.size();
@@ -415,7 +501,14 @@ namespace TerrainSnapshot
 			reason = "ready";
 		}
 		if (!Trace || TraceCount >= 64) return;
-		const int state[] {Current.Visible, view.X, view.Y, view.Width, view.Height, Current.OriginX,
+		const Point tacticalNow {tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0};
+		const bool settled = tacticalNow.X == LastTactical.X && tacticalNow.Y == LastTactical.Y;
+		LastTactical = tacticalNow;
+		if (!settled) return;
+		// Stage C3 probe: which 547CF0 Z path runs and the values its base depth starts from.
+		const int accelerated = *reinterpret_cast<const std::uint8_t*>(AcceleratedDepth);
+		const bool zvalid = CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer));
+		const int state[] {accelerated, zvalid ? zbuffer->MaxValue : 0, zvalid ? zbuffer->Bounds.Y : 0, count.NoDepth, count.MaxLevel, Current.Visible, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,
 			count.Palette, count.Frame, int(pieces), int(tables), sample.X, sample.Y};
@@ -434,5 +527,15 @@ namespace TerrainSnapshot
 			count.Palette, count.Frame, pieces, tables, Tables.UsedRows(), stats.Resources, stats.Frames, stats.IndexBytes, sample.X, sample.Y, sample.Index,
 			sample.Type, sample.Height, sample.Level, sample.Variants, sample.Variant, sample.Drawn, sample.Piece, sample.Intensity,
 			sample.Shade, sample.Shades);
+		Debug::Log("[TerrainGPU] depth sample=%u accelerated=%d zbuffer=%p bounds=%d,%d,%d,%d maxValue=%d width=%d height=%d noDepth=%d maxLevel=%d\n",
+			TraceCount, accelerated, zbuffer, zvalid ? zbuffer->Bounds.X : 0, zvalid ? zbuffer->Bounds.Y : 0,
+			zvalid ? zbuffer->Bounds.Width : 0, zvalid ? zbuffer->Bounds.Height : 0, zvalid ? zbuffer->MaxValue : 0,
+			zvalid ? zbuffer->Width : 0, zvalid ? zbuffer->Height : 0, count.NoDepth, count.MaxLevel);
+		if (!Current.Visible) return;
+		const auto check = CheckDepth(zbuffer, view);
+		Debug::Log("[TerrainGPU] depthcheck sample=%u compared=%d mismatched=%d rejected=%d untouched=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%d:model=%d\n",
+			TraceCount, check.Compared, check.Mismatched, check.Rejected, check.Untouched, check.Missing,
+			check.Mismatched ? check.Left : 0, check.Mismatched ? check.Top : 0, check.Mismatched ? check.Right : 0, check.Mismatched ? check.Bottom : 0,
+			check.FirstX, check.FirstY, check.Native, check.Model);
 	}
 }

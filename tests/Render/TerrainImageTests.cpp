@@ -88,6 +88,37 @@ int main()
 			anchors &= cell.X == x && cell.Y == y;
 		}
 	Check(anchors, "anchor of a pixel just inside a cell corner");
+
+	// Base depth: uint16(MaxValue + Bounds.Y - y - PixelHeight), then trunc0(PixelHeight * level / -2).
+	static_assert(BaseDepth(32768, 0, 100, 30, 0) == 32768 - 130);
+	static_assert(BaseDepth(32768, 0, 100, 30, 3) == 32768 - 130 - 45);
+	static_assert(BaseDepth(32768, 0, 100, 29, 1) == 32768 - 129 - 14, "odd product truncates toward zero");
+	static_assert(BaseDepth(10, 0, 100, 30, 0) == 65536 - 120, "16-bit wrap below zero");
+	static_assert(BaseDepth(65535, 40, 0, 30, 0) == 9, "16-bit wrap above 0xFFFF");
+	static_assert(PixelDepth(0xFFF0, 0x20) == 0x10 && PixelDepth(100, 5) == 105);
+	// Moving a row of cells down 15 pixels and up one level keeps the depth: the level cancels.
+	static_assert(BaseDepth(32768, 0, 100 - 15, 30, 1) == BaseDepth(32768, 0, 100, 30, 0));
+
+	// The Z test: draw when the old depth is not smaller, equal depth overwrites.
+	std::array<std::uint8_t, TileWidth * DiamondRows> zeros {}, depths;
+	depths.fill(5);
+	std::array<std::uint16_t, TileWidth * DiamondRows> buffer;
+	buffer.fill(0xFFFF);
+	Check(DrawDepth(buffer.data(), 0, 0, TileWidth, DiamondRows, {0, 0, TileWidth, DiamondRows, zeros.data(), depths.data(), 100, true}) == 0,
+		"first diamond draws everywhere");
+	Check(buffer[14 * TileWidth] == 105 && buffer[0] == 0xFFFF, "diamond covers index 0 inside, nothing outside");
+	Check(DrawDepth(buffer.data(), 0, 0, TileWidth, DiamondRows, {0, 0, TileWidth, DiamondRows, zeros.data(), depths.data(), 100, true}) == 0,
+		"equal depth overwrites");
+	Check(DrawDepth(buffer.data(), 0, 0, TileWidth, DiamondRows, {0, 0, TileWidth, DiamondRows, zeros.data(), depths.data(), 101, true}) == DiamondPixels,
+		"farther diamond is rejected");
+	Check(DrawDepth(buffer.data(), 0, 0, TileWidth, DiamondRows, {0, 0, TileWidth, DiamondRows, zeros.data(), nullptr, 200, true}) == 0
+		&& buffer[14 * TileWidth] == 105, "no depth data neither tests nor writes");
+	std::array<std::uint8_t, 4> extraIndices {0, 7, 7, 0}, extraDepths {0, 0, 9, 9};
+	Check(DrawDepth(buffer.data(), 0, 0, TileWidth, DiamondRows, {28, 13, 2, 2, extraIndices.data(), extraDepths.data(), 96, false}) == 0
+		&& buffer[13 * TileWidth + 28] == 105 && buffer[13 * TileWidth + 29] == 96 && buffer[14 * TileWidth + 28] == 105
+		&& buffer[14 * TileWidth + 29] == 105, "extra image skips index 0");
+	Check(DrawDepth(buffer.data(), 10, 10, 4, 4, {-5, -5, TileWidth, DiamondRows, zeros.data(), depths.data(), 0, true}) == 0 && buffer[0] == 5,
+		"clipped to the buffer rectangle");
 	if (Failures) return 1;
-	std::puts("TerrainImage: diamond, template, lighting, variant, position and scan rules passed.");
+	std::puts("TerrainImage: diamond, template, lighting, variant, position, scan and depth rules passed.");
 }

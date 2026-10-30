@@ -109,6 +109,57 @@ namespace TerrainImage
 		return difference < 0 ? 0 : difference;
 	}
 
+	// 547CF0's depth: smaller is nearer and the cleared ZBuffer holds 0xFFFF. The base starts from
+	// the ZBuffer's MaxValue and Bounds.Y, the draw y and the image's PixelHeight, then rises with
+	// the level; a pixel's depth is the base plus its Z byte, both modulo 2^16.
+	constexpr std::uint16_t BaseDepth(int maxValue, int boundsY, int y, int pixelHeight, int level)
+	{
+		const auto start = std::uint16_t(std::uint32_t(maxValue) + std::uint32_t(boundsY) - std::uint32_t(y) - std::uint32_t(pixelHeight));
+		return std::uint16_t(start + std::int32_t(std::uint32_t(pixelHeight) * std::uint32_t(level)) / -2);
+	}
+
+	constexpr std::uint16_t PixelDepth(std::uint16_t base, std::uint8_t z) { return std::uint16_t(base + z); }
+
+	constexpr bool InsideDiamond(std::int64_t column, std::int64_t row)
+	{
+		return row >= 0 && row < DiamondRows && column >= DiamondStart(int(row)) && column < DiamondStart(int(row)) + DiamondLength(int(row));
+	}
+
+	// One tile image for the software model of 547CF0's Z test. Depths is null for a piece without
+	// depth data; such an image neither tests nor writes the ZBuffer.
+	struct DepthImage
+	{
+		int X, Y, Width, Height;
+		const std::uint8_t* Indices;
+		const std::uint8_t* Depths;
+		std::uint16_t Base;
+		bool Diamond;
+	};
+
+	// Draws an image's depth into buffer, which covers the rectangle (left, top, width, height): a
+	// main diamond tests every diamond pixel, an extra image its nonzero pixels, and a pixel is drawn
+	// when the old depth is not smaller. Returns the pixels the test rejected.
+	inline int DrawDepth(std::uint16_t* buffer, int left, int top, int width, int height, const DepthImage& image)
+	{
+		if (!image.Depths) return 0;
+		const auto x0 = std::max<std::int64_t>(image.X, left), y0 = std::max<std::int64_t>(image.Y, top);
+		const auto x1 = std::min<std::int64_t>(std::int64_t(image.X) + image.Width, std::int64_t(left) + width);
+		const auto y1 = std::min<std::int64_t>(std::int64_t(image.Y) + image.Height, std::int64_t(top) + height);
+		int rejected = 0;
+		for (auto y = y0; y < y1; ++y)
+			for (auto x = x0; x < x1; ++x)
+			{
+				const auto column = x - image.X, row = y - image.Y;
+				const auto source = size_t(row) * image.Width + size_t(column);
+				if (image.Diamond ? !InsideDiamond(column, row) : image.Indices[source] == 0) continue;
+				const auto depth = PixelDepth(image.Base, image.Depths[source]);
+				auto& old = buffer[size_t(y - top) * width + size_t(x - left)];
+				if (old >= depth) old = depth;
+				else ++rejected;
+			}
+		return rejected;
+	}
+
 	// 6D7560's scan of a rectangle: rows of constant x+y from far to near, each walked by
 	// (+1,-1) from base + (floor(r/2), floor((r+1)/2)), where base is the anchor minus 2 in x.
 	constexpr int ScanRows(int height) { return height / 15 + 17; }
