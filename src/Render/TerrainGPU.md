@@ -1,4 +1,4 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象 / C7 桥格与平铺帧）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- `4D1890` deferred 记录（Fogged overlay/smudge/Terrain）、建筑底座不画（阶段 D）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
+- `4D1890` deferred 记录不画：开 FogOfWar 实测只出现建筑记录（阶段 D1，#22）；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。建筑底座不画（阶段 D）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
 - Debug 构建每帧采集约 1 ms（下表），加 ABuffer 快照后约 1.4 ms，尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
@@ -141,7 +141,7 @@ overlay 之后，`6D97D0` 逆序遍历 `ObjectsInLayers[2]`，对 `WhatAmI=Terra
 | 悬崖投影 | 锚点同 overlay，起点再移 `(−2,+3)`，`H/15+20` 行、`W/60+7` 列，由远到近（快照多扫 2 行/列）；不做逐格外接矩形测试。`4802A0`：`IsoTileTypeIndex=0xFFFF` 用 Clear 类型、子块 0，否则子块为 `uint8(Height)`；类型须 ShadowCaster。`547230`：类型号先查 `[ABC1F8]`、再查 `[AA1098]` 起的 10 个特殊类型（记录表 `ABC210`），否则查 `AA102C` 起 5 个区间各 40 个类型（共用记录表 `ABC2D0`）；记录为 16 字节（帧+1、子块、dx、dy），子块不同或帧为 0 不画。图为 `C_SHADOW.SHP`（`[ABC554]`），中心 `(tileX+30+dx+ViewBounds.X, tileY+15+dy)`，`z=58−15·Level`，梯度 0，flags `4601`，Convert 为 `LightConvertClass::Array[0]` |
 | 深度与颜色 | 同 overlay（`ShapeDepth`）：`4E00`/`4E01`/`4601` 都是严格 `<` 测试并写低 16 位；阴影 `(c>>1)&HalfTranslucencyMask` |
 
-trace 的 `overlay` 行加 `terrains`（层内 Terrain 数）、`dynamic`（动画或崩塌，归 Composite）、`terrainOutside`、`damaged`（取受损帧的静态对象）、`casters`（扫描到的 ShadowCaster 格）；`overlaytypes` 的键前缀 `o`/`t`/`c` 分别为 overlay 类型、Terrain 类型、tile 类型。
+trace 的 `overlay` 行加 `terrains`（层内 Terrain 数）、`dynamic`（动画或崩塌，归 Composite）、`terrainOutside`、`damaged`（取受损帧的静态对象）、`casters`（扫描到的 ShadowCaster 格）、`fogged`/`foggedBuildings`（`4D1890` 的记录数与其中的建筑记录数，pair 数组 `[8B3CC0]`、个数 `[8B3CC4]`，记录类型 `+30`）、`foggedInView=建筑/其他`（启用 `+74` 且保存矩形 `+40` 按 `rect−TacticalPos+ViewBounds` 平移后与 clip 相交的记录；“其他”非 0 说明 Tile 上有未画的 deferred 记录）；`overlaytypes` 的键前缀 `o`/`t`/`c` 分别为 overlay 类型、Terrain 类型、tile 类型。
 
 ## 验收（2026-10-30）
 
@@ -252,7 +252,7 @@ HEAD `09cf144e` + 本批未提交改动，DLL SHA256 `90a8aed3…c630`，1024×7
 | GPUARCO | 开局、上、右、下 | 宝石本体与 97 个阴影、Tiberium | 全部一致（带树的 GPUARCF 只在树处不同，属 C6） |
 | GPUOVX | 开局、两次上滚、下、左（完整重画后） | 墙 147 个（Deg90）及其阴影、岩石、宝石；19 个 ramp Tiberium，其中 18 个带 Z shape | 全部一致，`rejected` 最多 47420 |
 
-未覆盖：平铺（非 RLE）帧（测试中所有 overlay 帧都是 RLE）、桥格（`Flags&0x80`）、veins（本 mod 的 126 不是 veins）、Rubble、Vulkan。没有完整重画时，纵向滚屏后 ramp Tiberium 处曾有 8 像素颜色、34 像素 Z 不同，原因见“Overlay”。`89C568`（无 Z shape 时 RLE 读的 Z 字节）前 256 字节为 0，帧宽超过时计为 `unsupported`（未出现）。临时改 `spawn.ini` 的 Scenario，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52b`。回归新增 `ShapeDepthTests`、`OverlayImageTests`；Debug 构建无警告。
+未覆盖：平铺（非 RLE）帧（测试中所有 overlay 帧都是 RLE）、桥格（这两项见“C7”）（`Flags&0x80`）、veins（本 mod 的 126 不是 veins）、Rubble、Vulkan。没有完整重画时，纵向滚屏后 ramp Tiberium 处曾有 8 像素颜色、34 像素 Z 不同，原因见“Overlay”。`89C568`（无 Z shape 时 RLE 读的 Z 字节）前 256 字节为 0，帧宽超过时计为 `unsupported`（未出现）。临时改 `spawn.ini` 的 Scenario，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52b`。回归新增 `ShapeDepthTests`、`OverlayImageTests`；Debug 构建无警告。
 
 ### C5.2c GPU overlay（2026-10-30）
 
@@ -265,7 +265,7 @@ HEAD `e5aee069` + 本批未提交改动，DLL SHA256 `12fd290c…627a`（复测 
 | D3D12 GPULIBF | 开局、上（宝石 165、360 个） | 同上 |
 | Vulkan GPUOVX | 开局、上滚 | 同上 |
 
-CPU 重放同时保持 `tilecheck` 全部一致。D16_UNORM 后备路径、平铺帧、桥格未实测。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52c`。回归新增 `TerrainBatchTests` 的 shape 实例与半透明掩码用例、`ShapeDepthTests` 的闭式行基值用例；Debug 构建无警告（含 `TerrainShape.ps` 的 DXIL/SPIR-V）。
+CPU 重放同时保持 `tilecheck` 全部一致。D16_UNORM 后备路径未实测；平铺帧与桥格见“C7”。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c52c`。回归新增 `TerrainBatchTests` 的 shape 实例与半透明掩码用例、`ShapeDepthTests` 的闭式行基值用例；Debug 构建无警告（含 `TerrainShape.ps` 的 DXIL/SPIR-V）。
 
 ### C6 Terrain 对象（2026-10-30）
 
@@ -282,3 +282,18 @@ HEAD `43d1f790` + 本批未提交改动，最终 DLL SHA256 `04516151…a7f5`（
 | D3D12 GPUDMG | 开局（9 段墙、3 棵树、玩家坦克）；坦克强制攻击后墙出现受损帧、再打掉两段（相邻墙段连接帧随之改变），树被打掉一棵；途中矿石生长 | 同上（打掉墙后的一次） | 只有光标（移动光标 284–411 像素） |
 
 C5.2b 时 GPUARCF 只在树处不同，现已一致。`GPUDMG.MAP`（`scripts/make_dmg.py`，只在 `Debug/AutomationGame`）为 GPUTREE 加墙、树与 `<Player @ A>` 的坦克，trace 的 `damaged` 为 0：原版树不开受损帧（Phobos `HasDamagedFrames`）。悬崖投影无法动态核对（见“未支持与边界”）；`HasDamagedFrames`、SpawnsTiberium 与扩展 Palette 类型未在 Tile 上实测。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c6`。回归新增 `TerrainObjectImageTests`（帧、深度、悬崖扫描、记录选择、中心）；Debug 构建无警告。
+
+### C7 桥格、平铺帧与 deferred 记录（2026-10-30）
+
+HEAD `811e3492` + 本批未提交改动，最终 DLL SHA256 `dbd936ec…626c`（GPUBRDG 的 D3D12 开局与上滚、XMP30S6 + FogOfWar；GPUBRDG 的左滚与 Vulkan 用只多了临时探测日志的 DLL，采集代码相同），1024×768。
+
+受控地图 `GPUBRDG.MAP`（`scripts/make_brdg.py`，只在 `Debug/AutomationGame`）取自雪地图 `sov01umd.map`：保留地形、overlay 与 Terrain，开局点移到高桥旁（BRIDGE2，`x=65`、`y=73…95` 共 22 格，格子 `Flags&0x80`，Data 9），去掉单位、建筑、触发与规则覆盖并揭示全图。另在开局视野附近加平铺帧素材：探测各类型 SHP 的帧头，平铺帧只有宝石 GEM04 的 20–23 帧、GEM09 的 21–22 帧、GEM11 的 22 帧（都是 8–11 级的阴影帧），TROCK02/03/05、SROCK04/05 的 1 帧（阴影），路牌 SIGN03–06 的 0 帧（Terrain 本体），以及弹坑 CRATER03 的 0 帧（C5.1 的 GPUSMUD 已含）。于是加 127 格宝石（`x·y mod 12` 取 3/8/10 使画出的变体为 GEM04/09/11，生长 8–11）、两种岩石各两个、SIGN03–06 各一个。
+
+| 后端/地图 | 状态 | 绘制 | `tilecheck` | GPU 对原生 |
+| --- | --- | --- | --- | --- |
+| D3D12 GPUBRDG | 开局 | 桥格 22；本体 170、阴影 163，其中平铺 99（宝石阴影 91、岩石阴影 4、路牌本体 4） | 颜色、Z 全部一致（`rejected` 87755） | 只有光标 188 像素 |
+| D3D12 GPUBRDG | 上滚、左滚 | 上滚桥格 10–12、平铺 2–3；左滚桥格 3、平铺 0 | 同上 | 只有光标 187–188 像素 |
+| Vulkan GPUBRDG | 开局、上滚 | 同 D3D12 | 同上 | 只有光标 188 像素 |
+| D3D12 XMP30S6 + FogOfWar | 开局；MCV 两段移动后已探索区变为迷雾（共 44–59 次采样） | `fogged` 39–42，全部是建筑记录，视野内 0 | 同上 | — |
+
+`4D1890` 的结论：#18/#19 指出 overlay（`4D0980`）、smudge（`4D0C40`）、Terrain（`4D1370`）记录的构造入口在原版里没有调用者；运行副本（原版 + Ares + Phobos + Spawner）开 FogOfWar 后也只有建筑记录，三类记录从未出现，所以不画，只在 trace 里计数。建筑记录随阶段 D1 接入。低桥（LOBRDG）、桥被打坏后的 Data 变化未实测。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-c/c7`。回归通过；Debug 构建无警告。

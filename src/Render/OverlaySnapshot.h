@@ -48,6 +48,13 @@ namespace OverlaySnapshot
 	constexpr std::uintptr_t AdjustForZ = 0x6D20E0, CoordsToClient = 0x6D2140;
 	// 6D97D0 draws the objects of this layer.
 	constexpr int GroundLayer = 2;
+	// 4D1890's FoggedObject records: the (key, record) pairs and their count, and a record's kind, saved
+	// rectangle and enabled byte. Of its kinds, buildings belong to stage D; with FogOfWar on, the copy
+	// makes no overlay (14h), smudge (1Dh) or Terrain (24h) record, so none is drawn and the trace only
+	// counts them.
+	constexpr std::uintptr_t FoggedPairs = 0x8B3CC0, FoggedCount = 0x8B3CC4;
+	constexpr size_t FoggedKind = 0x30, FoggedBounds = 0x40, FoggedEnabled = 0x74, FoggedRecordSize = 0x78;
+	constexpr int FoggedBuilding = 6;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0) or a cliff (6D7C00).
 	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff };
@@ -83,6 +90,9 @@ namespace OverlaySnapshot
 		// Ground layer objects that are Terrain, those drawn later on Composite, those off the clip,
 		// the static ones drawn with their damaged frame, and the cells whose tile casts a cliff shadow.
 		int Terrains = 0, Dynamic = 0, TerrainOutside = 0, Damaged = 0, Casters = 0;
+		// 4D1890's records, the building ones and the others, and the enabled ones whose saved rectangle
+		// meets the clip.
+		int Fogged = 0, FoggedBuildings = 0, FoggedBuildingsInView = 0, FoggedOthersInView = 0;
 	};
 	struct Frame
 	{

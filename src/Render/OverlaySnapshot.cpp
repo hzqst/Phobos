@@ -564,10 +564,11 @@ namespace OverlaySnapshot
 			++TraceCount;
 			Debug::Log("[TerrainGPU] overlay sample=%u ready=%d visited=%d legal=%d overlays=%d bodies=%d shadows=%d noBody=%d outside=%d empty=%d "
 				"rubble=%d tiberium=%d palette=%d frame=%d zshape=%d ramps=%d bridges=%d walls=%d compressed=%d noImage=%d unloaded=%d slopes=%d unsupported=%d failure=%d:%d/%d@%d "
-				"terrains=%d dynamic=%d terrainOutside=%d damaged=%d casters=%d gpu=%zu/%zu\n",
+				"terrains=%d dynamic=%d terrainOutside=%d damaged=%d casters=%d fogged=%d foggedBuildings=%d foggedInView=%d/%d gpu=%zu/%zu\n",
 				TraceCount, Current.Visible, count.Visited, count.Legal, count.Overlays, count.Bodies, count.Shadows, count.NoBody, count.Outside,
 				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, count.Unsupported, FirstFailure[0], FirstFailure[1], FirstFailure[2],
-				FirstFailure[3], count.Terrains, count.Dynamic, count.TerrainOutside, count.Damaged, count.Casters, TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
+				FirstFailure[3], count.Terrains, count.Dynamic, count.TerrainOutside, count.Damaged, count.Casters,
+				count.Fogged, count.FoggedBuildings, count.FoggedBuildingsInView, count.FoggedOthersInView, TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
 			if (!Current.Visible) return;
 			// Each overlay (o), Terrain (t) and cliff tile (c) type drawn: bodies, shadows, RLE frames and Z shapes.
 			std::map<std::pair<Layer, int>, std::array<int, 4>> types;
@@ -682,6 +683,21 @@ namespace OverlaySnapshot
 					if (!MapClass::Instance.CoordinatesLegal(coords)) continue;
 					if (const auto* cell = MapClass::Instance.TryGetCellAt(coords)) capture.Cliff(cell, cellX, cellY);
 				}
+			// 4D1890 (drawn before the overlays): a record draws where it is enabled and its saved
+			// rectangle, moved by the view, meets the clip.
+			const auto* pairs = *reinterpret_cast<const std::uint32_t* const*>(FoggedPairs);
+			count.Fogged = *reinterpret_cast<const int*>(FoggedCount);
+			for (int i = 0; i < count.Fogged && CursorSnapshot::Readable(pairs + 2 * i, 2 * sizeof(std::uint32_t)); ++i)
+			{
+				const auto* record = reinterpret_cast<const std::uint8_t*>(std::uintptr_t(pairs[2 * i + 1]));
+				if (!CursorSnapshot::Readable(record, FoggedRecordSize)) continue;
+				const bool building = *reinterpret_cast<const int*>(record + FoggedKind) == FoggedBuilding;
+				count.FoggedBuildings += building;
+				const auto& bounds = *reinterpret_cast<const RectangleStruct*>(record + FoggedBounds);
+				if (!record[FoggedEnabled] || !TerrainSnapshot::Intersects(clip, std::int64_t(bounds.X) - capture.TacticalX + capture.ViewX,
+					std::int64_t(bounds.Y) - capture.TacticalY + capture.ViewY, bounds.Width, bounds.Height)) continue;
+				++(building ? count.FoggedBuildingsInView : count.FoggedOthersInView);
+			}
 			Current.Visible = true;
 		}
 		// The native Tile keeps what scrolling redrew in strips, and a Z-shaped draw's depth depends
