@@ -7,6 +7,7 @@
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
 #include "CommandBarSnapshot.h"
+#include "ABufferPass.h"
 #include "TerrainPass.h"
 #include "Tooltip.h"
 #include "FrameAtlas.h"
@@ -144,8 +145,11 @@ namespace
 		const bool barVisible = bar.Visible && CommandBarSnapshot::Eligible();
 		std::vector<FrameAtlas::Request> requests;
 		if (terrainVisible)
+		{
 			for (const auto& placement : terrain.Placements)
 				requests.push_back(TerrainPass::Request(placement));
+			ABufferPass::AppendRequests(ABufferSnapshot::Current, requests);
+		}
 		if (barVisible)
 			for (const auto& placement : bar.Placements)
 				requests.push_back(SpriteRequest(placement, bar.Assets.data()));
@@ -161,7 +165,9 @@ namespace
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
 		if (result != FrameAtlas::BeginResult::Ready) return result;
 		// The terrain cache is the bottom of Composite, drawn by TerrainPass before these sprites.
-		if (!TerrainPass::Prepare(Device, Atlas, terrainVisible ? &terrain : nullptr)) return FrameAtlas::BeginResult::Failed;
+		if (!TerrainPass::Prepare(Device, Atlas, terrainVisible ? &terrain : nullptr)
+			|| !ABufferPass::Prepare(Device, Atlas, terrainVisible ? &ABufferSnapshot::Current : nullptr, terrain.Clip.Width, terrain.Clip.Height))
+			return FrameAtlas::BeginResult::Failed;
 		if (terrainVisible) TerrainSnapshot::RecordPresent(TerrainPass::DrawCount(), TerrainPass::InstanceCount());
 		// Composite and the sidebar do not overlap; the bar keeps Tab's order before the sidebar.
 		if (barVisible)
@@ -572,7 +578,8 @@ void GPURender::Initialize(int width, int height)
 	if (!PresentPass::Create(Device, SecondaryWindow::Get()))
 		return Fail("Creating the present pipeline");
 	if (!MirrorMode && !Atlas.Create(Device, {})) return Fail("Creating the indexed frame atlas");
-	if (!MirrorMode && !TerrainPass::Create(Device, SDL_GetGPUSwapchainTextureFormat(Device, SecondaryWindow::Get())))
+	if (!MirrorMode && (!TerrainPass::Create(Device, SDL_GetGPUSwapchainTextureFormat(Device, SecondaryWindow::Get()))
+		|| !ABufferPass::Create(Device)))
 		return Fail("Creating the terrain pipeline");
 	AtlasTraceCount = 0;
 	LastAtlasIndexBytes = LastAtlasPaletteBytes = 0;
@@ -606,6 +613,7 @@ void GPURender::ReleaseResources()
 		Readback.Reset(Device, "gpu_device_destroyed");
 		if (PendingCapture) { PendingCapture->Error = "gpu_device_destroyed"; PendingCapture.reset(); }
 		PresentPass::Release(Device);
+		ABufferPass::Release(Device);
 		TerrainPass::Release(Device);
 		SurfaceMirror::Release(Device);
 		ReleaseCursorResources();
@@ -659,7 +667,7 @@ void GPURender::Present()
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
-	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || Atlas.HasUploads() || TerrainPass::HasUploads()))
+	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || Atlas.HasUploads() || TerrainPass::HasUploads() || ABufferPass::HasUploads()))
 	{
 		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
 		if (!pCopyPass)
@@ -672,7 +680,7 @@ void GPURender::Present()
 		else
 		{
 			Atlas.EncodeUploads(pCopyPass);
-			if (!TerrainPass::Upload(Device, pCopyPass))
+			if (!TerrainPass::Upload(Device, pCopyPass) || !ABufferPass::Upload(Device, pCopyPass))
 			{
 				SDL_EndGPUCopyPass(pCopyPass);
 				SDL_CancelGPUCommandBuffer(pCommandBuffer);
@@ -682,6 +690,15 @@ void GPURender::Present()
 			if (CursorDirty) UploadCursor(pCopyPass);
 		}
 		SDL_EndGPUCopyPass(pCopyPass);
+	}
+
+	// The terrain reads the ABuffer texture in both draws below; until the swapchain is acquired a
+	// failed pass can still cancel the command buffer.
+	if (!MirrorMode && !ABufferPass::Render(pCommandBuffer))
+	{
+		SDL_CancelGPUCommandBuffer(pCommandBuffer);
+		Atlas.CancelBatch();
+		return Fail("Drawing the terrain ABuffer");
 	}
 
 	// Does not wait; there is no texture while the window is minimized or too many frames are queued
@@ -699,7 +716,8 @@ void GPURender::Present()
 	bool captureDrawn = false;
 	const PresentPass::Underlay terrain = [pCommandBuffer](SDL_GPURenderPass* pass, const SDL_GPUViewport& viewport)
 	{
-		TerrainPass::Draw(pass, pCommandBuffer, viewport, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height);
+		TerrainPass::Draw(pass, pCommandBuffer, viewport, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height,
+			ABufferPass::Texture, ABufferPass::Width, ABufferPass::Height);
 	};
 	if (pSwapchainTexture)
 	{

@@ -17,8 +17,8 @@
 // DSurface::Tile, captured in the 4F4583 callback as a full redraw of the visible cells.
 // Stage C2: main diamond and extra image in native order, lit by Intensity_Terrain with the
 // default ABuffer value. Stage C3 adds each image's Z plane and base depth; the GPU does not test
-// them yet. Stage C4.1 traces the ABuffer's shroud and fog against the native buffer (ABufferSnapshot).
-// Smudges and every later Tile layer are absent.
+// them yet. Stage C4.2 captures the ABuffer's shroud and fog with each capture (ABufferSnapshot) for
+// the shader's light. Smudges and every later Tile layer are absent.
 namespace TerrainSnapshot
 {
 	using namespace TerrainImage;
@@ -107,6 +107,7 @@ namespace TerrainSnapshot
 	{
 		Current.Visible = false;
 		Current.Placements.clear();
+		ABufferSnapshot::Current = {};
 		LastTraceHash = 0;
 	}
 
@@ -122,6 +123,7 @@ namespace TerrainSnapshot
 		Invalidate();
 		ClearPieces();
 		Tables.Clear();
+		ABufferSnapshot::Clear();
 	}
 
 	inline void InitializeTrace()
@@ -502,12 +504,13 @@ namespace TerrainSnapshot
 			Current.Visible = true;
 			reason = "ready";
 		}
+		ABufferSnapshot::Current = ABufferSnapshot::Capture(ScanMargin);
 		if (!Trace || TraceCount >= 64) return;
 		const Point tacticalNow {tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0};
 		const bool settled = tacticalNow.X == LastTactical.X && tacticalNow.Y == LastTactical.Y;
 		LastTactical = tacticalNow;
 		if (!settled) return;
-		auto abuffer = ABufferSnapshot::Capture(ScanMargin);
+		const auto& abuffer = ABufferSnapshot::Current;
 		// Stage C3 probe: which 547CF0 Z path runs and the values its base depth starts from.
 		const int accelerated = *reinterpret_cast<const std::uint8_t*>(AcceleratedDepth);
 		const bool zvalid = CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer));

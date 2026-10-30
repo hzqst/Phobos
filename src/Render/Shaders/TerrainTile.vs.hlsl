@@ -1,4 +1,5 @@
-// One clipped TMP tile image per instance, expanded from SV_VertexID into two triangles.
+// One clipped image per instance, expanded from SV_VertexID into two triangles: the TMP tiles,
+// and the shroud and fog frames of the ABuffer pass.
 // The viewport selects the letterboxed area of the window; positions are logical canvas pixels.
 
 // Matches TerrainBatch::Instance; pairs pack X in the low 16 bits.
@@ -26,6 +27,7 @@ struct VSOutput
 	float2 Local : TEXCOORD0; // Pixels into the clipped rectangle.
 	nointerpolation uint4 Data : TEXCOORD1; // Atlas texel, frame texel, table, light.
 	nointerpolation uint2 Size : TEXCOORD2;
+	nointerpolation int2 Origin : TEXCOORD3; // Canvas position of the clipped rectangle.
 };
 
 VSOutput main(uint vertexId : SV_VertexID)
@@ -39,5 +41,6 @@ VSOutput main(uint vertexId : SV_VertexID)
 	output.Position = float4(pixel / float2(View.xy) * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 	output.Data = uint4(tile.Atlas, tile.Frame, tile.Table, tile.Light);
 	output.Size = size;
+	output.Origin = tile.Position;
 	return output;
 }

@@ -15,12 +15,14 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 // The shroud and fog the terrain pass writes into the ABuffer (6D3660 -> 6D71E0 -> 4801F0) before
-// 547CF0 reads it, rebuilt from the current cell flags as a full redraw of ViewBounds. Stage C4.1:
-// built for the trace only and checked in the 4F4583 callback against the native ABuffer, which
-// still holds what the tiles read while no alpha shape or later Alpha writer has touched it.
+// 547CF0 reads it, rebuilt from the current cell flags as a full redraw of ViewBounds with each
+// terrain capture; ABufferPass draws it for the terrain shader. The trace checks it in the 4F4583
+// callback against the native ABuffer, which still holds what the tiles read while no alpha shape
+// or later Alpha writer has touched it.
 namespace ABufferSnapshot
 {
 	using namespace ABufferImage;
@@ -40,32 +42,25 @@ namespace ABufferSnapshot
 	static_assert(offsetof(ABuffer, BufferPosition) == 0x10 && offsetof(ABuffer, Width) == 0x28);
 	static_assert(sizeof(SHPStruct) == 8 && sizeof(SHPFrame) == 0x18);
 
-	// One cell 4801F0 draws. Frame[1] is -1 where the darken pass does not run. For the trace: the
-	// neighbour mask, the cell's own flags and 6D8700's result of each pass, and the results 4801F0
-	// stored in Visibility and Foggedness when it last drew the cell.
+	// One cell 4801F0 draws. ID[1] is empty where the darken pass does not run. For the trace: the
+	// frame, neighbour mask, the cell's own flags and 6D8700's result of each pass, and the results
+	// 4801F0 stored in Visibility and Foggedness when it last drew the cell.
 	struct Write
 	{
 		int X, Y;
 		Rect Clip;
 		int CellX, CellY;
+		FrameCache::FrameID ID[Passes];
 		int Frame[Passes], Mask[Passes], Occlusion[Passes], Stored[Passes];
 		std::uint32_t Flags[Passes];
 	};
 
-	// A copied frame of a shape: the header's bounds and its raw bytes.
-	struct FrameCopy
-	{
-		bool Tried = false, Ready = false;
-		int Left = 0, Top = 0, Width = 0, Height = 0;
-		std::vector<std::uint8_t> Pixels;
-	};
-
 	struct Shape
 	{
-		// The pointer the global holds and the file data behind it.
+		// The pointer the global holds and the file data behind it, registered by the data address.
 		const SHPStruct* Pointer = nullptr;
 		const SHPStruct* Data = nullptr;
-		std::vector<FrameCopy> Frames;
+		FrameCache::ResourceID Resource;
 	};
 
 	struct Snapshot
@@ -81,7 +76,20 @@ namespace ABufferSnapshot
 		// model has no alpha shapes; AlphaShapes counts the native ones.
 		int Visited = 0, Legal = 0, Covered = 0, Uncovered = 0, Edges = 0, Invalid = 0, Missing = 0, Stale = 0, AlphaShapes = 0;
 		std::uint64_t Hash = 0;
+		bool Ready() const { return std::strcmp(Reason, "ready") == 0; }
 	};
+
+	// The frames of the shroud and fog shapes, each 60x30 here; checked by their headers on every capture.
+	inline FrameCache::Cache Frames({4 * 1024 * 1024, 1024, 16});
+	inline std::unordered_map<std::uintptr_t, std::uint64_t> HeaderHashes;
+	inline Snapshot Current;
+
+	inline void Clear()
+	{
+		Current = {};
+		Frames.Clear();
+		HeaderHashes.clear();
+	}
 
 	// The file data behind a shape, without loading a reference that is not loaded yet.
 	inline const SHPStruct* ShapeData(const SHPStruct* shape)
@@ -94,36 +102,61 @@ namespace ABufferSnapshot
 		return CursorSnapshot::Readable(data, sizeof(SHPStruct)) && !data->IsReference() ? data : nullptr;
 	}
 
-	// 69E7E0 and 69E740 without their loading: the frame's bounds and Width*Height bytes at its offset.
-	inline const FrameCopy* FrameAt(Shape& shape, int index)
-	{
-		if (index < 0 || size_t(index) >= shape.Frames.size()) return nullptr;
-		auto& copy = shape.Frames[index];
-		if (copy.Tried) return copy.Ready ? &copy : nullptr;
-		copy.Tried = true;
-		const auto base = reinterpret_cast<std::uintptr_t>(shape.Data);
-		const auto* header = reinterpret_cast<const SHPFrame*>(base + sizeof(SHPStruct)) + index;
-		if (!CursorSnapshot::Readable(header, sizeof(*header)) || header->Offset <= 0 || header->Width <= 0 || header->Height <= 0)
-			return nullptr;
-		const auto size = size_t(header->Width) * size_t(header->Height);
-		const auto* pixels = reinterpret_cast<const std::uint8_t*>(base + std::uint32_t(header->Offset));
-		if (!CursorSnapshot::Readable(pixels, size)) return nullptr;
-		copy.Ready = true;
-		copy.Left = header->Left;
-		copy.Top = header->Top;
-		copy.Width = header->Width;
-		copy.Height = header->Height;
-		copy.Pixels.assign(pixels, pixels + size);
-		return &copy;
-	}
-
+	// 69E7E0 and 69E740 without their loading: each frame's bounds, and its Width*Height bytes at its
+	// offset copied without RLE decoding. A frame without an offset or size has no data.
 	inline bool BindShape(Shape& shape, std::uintptr_t global)
 	{
 		shape.Pointer = *reinterpret_cast<const SHPStruct* const*>(global);
 		shape.Data = ShapeData(shape.Pointer);
 		if (!shape.Data || shape.Data->Frames <= 0) return false;
-		shape.Frames.resize(size_t(shape.Data->Frames));
+		const auto headers = sizeof(SHPStruct) + size_t(shape.Data->Frames) * sizeof(SHPFrame);
+		if (!CursorSnapshot::Readable(shape.Data, headers)) return false;
+		const auto identity = reinterpret_cast<std::uintptr_t>(shape.Data);
+		const auto hash = SidebarSnapshot::Hash(shape.Data, headers);
+		shape.Resource = Frames.LookupResource(identity);
+		if (const auto known = HeaderHashes.find(identity); known != HeaderHashes.end() && known->second != hash && shape.Resource)
+		{
+			Frames.Invalidate(shape.Resource);
+			shape.Resource = {};
+		}
+		if (!shape.Resource)
+		{
+			FrameCache::ResourceInfo info {shape.Data->Width, shape.Data->Height, {}};
+			for (int i = 0; i < shape.Data->Frames; ++i)
+			{
+				const auto& header = shape.Data->AsFile()->GetFrameHeader(i);
+				const bool valid = header.Offset > 0 && header.Width > 0 && header.Height > 0;
+				info.Frames.push_back({header.Left, header.Top, valid ? header.Width : 0, valid ? header.Height : 0, 0,
+					valid ? size_t(header.Offset) : 0, 0});
+			}
+			shape.Resource = Frames.Register(identity, info);
+			if (!shape.Resource) return false;
+		}
+		HeaderHashes[identity] = hash;
 		return true;
+	}
+
+	inline int FrameCount(const Shape& shape)
+	{
+		const auto* info = Frames.Describe(shape.Resource);
+		return info ? int(info->Frames.size()) : 0;
+	}
+
+	inline FrameCache::FrameID FrameAt(const Shape& shape, int index)
+	{
+		const auto* info = Frames.Describe(shape.Resource);
+		if (!info || index < 0 || size_t(index) >= info->Frames.size()) return {};
+		const auto base = reinterpret_cast<std::uintptr_t>(shape.Data);
+		const auto result = Frames.GetOrDecode(shape.Resource, unsigned(index), [base](const FrameCache::Descriptor& d, auto& indices)
+		{
+			if (d.Width <= 0 || d.Height <= 0) return FrameCache::Status::InvalidData;
+			const auto* pixels = reinterpret_cast<const std::uint8_t*>(base + d.Offset);
+			const auto size = size_t(d.Width) * size_t(d.Height);
+			if (!CursorSnapshot::Readable(pixels, size)) return FrameCache::Status::InvalidData;
+			indices.assign(pixels, pixels + size);
+			return FrameCache::Status::Ready;
+		});
+		return result.State == FrameCache::Status::Ready ? result.Frame->ID : FrameCache::FrameID {};
 	}
 
 	// 5657A0: a cell outside the storage falls back to the shared InvalidCell, whose flags are read
@@ -166,6 +199,20 @@ namespace ABufferSnapshot
 			return snapshot;
 		}
 		const auto* table = reinterpret_cast<const std::int8_t*>(OcclusionTable);
+		// Each frame is looked up once per capture; most cells share a few frames.
+		std::array<std::vector<FrameCache::FrameID>, Passes> ids;
+		std::array<std::vector<bool>, Passes> looked;
+		for (int pass = 0; pass < Passes; ++pass)
+		{
+			ids[pass].resize(size_t(FrameCount(snapshot.Shapes[pass])));
+			looked[pass].resize(ids[pass].size());
+		}
+		const auto frameID = [&](int pass, int frame)
+		{
+			if (frame < 0 || size_t(frame) >= ids[pass].size()) return FrameCache::FrameID {};
+			if (!looked[pass][frame]) { looked[pass][frame] = true; ids[pass][frame] = FrameAt(snapshot.Shapes[pass], frame); }
+			return ids[pass][frame];
+		};
 		const Rect viewRect {view.X, view.Y, view.Width, view.Height};
 		const auto tacticalX = tactical->TacticalPos.X, tacticalY = tactical->TacticalPos.Y;
 		const auto anchor = ScanAnchor(tacticalX, tacticalY);
@@ -209,7 +256,7 @@ namespace ABufferSnapshot
 				else if (write.Frame[0] == UncoveredFrame) ++snapshot.Uncovered;
 				else ++snapshot.Edges;
 				for (int pass = 0; pass < Passes; ++pass)
-					if (write.Frame[pass] >= 0 && !FrameAt(snapshot.Shapes[pass], write.Frame[pass])) ++snapshot.Missing;
+					if (write.Frame[pass] >= 0 && !(write.ID[pass] = frameID(pass, write.Frame[pass]))) ++snapshot.Missing;
 				const int key[] {cellX, cellY, write.Frame[0], write.Frame[1]};
 				hash = SidebarSnapshot::Hash(key, sizeof(key), hash);
 				snapshot.Writes.push_back(write);
@@ -220,43 +267,51 @@ namespace ABufferSnapshot
 	}
 
 	// Trace only: the snapshot drawn over a cleared view against the native words at the same
-	// logical position. Owner is the write whose active pixel covers the first mismatch.
+	// logical position. Owner is the write whose active pixel covers the first mismatch. Split counts
+	// the pixels where the GPU's order, every overwrite before every darken, differs from the native
+	// order of both passes per cell.
 	struct Check
 	{
-		int Compared = 0, Mismatched = 0, Unsupported = 0, ModelShaded = 0, NativeShaded = 0;
+		int Compared = 0, Mismatched = 0, Unsupported = 0, ModelShaded = 0, NativeShaded = 0, Split = 0;
 		int Left = INT_MAX, Top = INT_MAX, Right = INT_MIN, Bottom = INT_MIN;
 		int FirstX = -1, FirstY = -1, Native = 0, Model = 0, Owner = -1;
 	};
 
-	inline Check CheckNative(Snapshot& snapshot, ABuffer* buffer)
+	// One pass of a write into buffer; owner, if given, takes index where the frame's pixel is active.
+	inline Drawn DrawWrite(std::uint16_t* buffer, const Rect& area, const Write& write, int pass, int* owner, int index)
+	{
+		const auto* record = Frames.Resolve(write.ID[pass]);
+		if (!record) return Drawn::Nothing;
+		const auto& g = record->Geometry;
+		const Frame frame {g.Left, g.Top, g.Width, g.Height, record->Indices.data()};
+		const auto drawn = Draw(buffer, area, write.X, write.Y, write.Clip, frame, pass ? Pass::Darken : Pass::Overwrite);
+		if (drawn != Drawn::Pixels || !owner) return drawn;
+		const auto span = Intersect(write.Clip, {write.X + frame.Left, write.Y + frame.Top, frame.Width, frame.Height});
+		for (int y = span.Y; y < span.Y + span.Height; ++y)
+			for (int x = span.X; x < span.X + span.Width; ++x)
+			{
+				const auto value = frame.Pixels[size_t(y - write.Y - frame.Top) * frame.Width + size_t(x - write.X - frame.Left)];
+				if (pass ? value <= MaxDarken : value != Transparent)
+					owner[size_t(y - area.Y) * area.Width + size_t(x - area.X)] = index;
+			}
+		return drawn;
+	}
+
+	inline Check CheckNative(const Snapshot& snapshot, ABuffer* buffer)
 	{
 		Check check;
 		const auto& view = snapshot.View;
 		const Rect area {view.X, view.Y, view.Width, view.Height};
-		std::vector<std::uint16_t> model(size_t(view.Width) * view.Height, ClearValue);
+		std::vector<std::uint16_t> model(size_t(view.Width) * view.Height, ClearValue), split = model;
 		std::vector<int> owner(model.size(), -1);
 		for (size_t index = 0; index < snapshot.Writes.size(); ++index)
-		{
-			const auto& write = snapshot.Writes[index];
 			for (int pass = 0; pass < Passes; ++pass)
-			{
-				if (write.Frame[pass] < 0) continue;
-				const auto* copy = FrameAt(snapshot.Shapes[pass], write.Frame[pass]);
-				if (!copy) continue;
-				const Frame frame {copy->Left, copy->Top, copy->Width, copy->Height, copy->Pixels.data()};
-				const auto drawn = Draw(model.data(), area, write.X, write.Y, write.Clip, frame, pass ? Pass::Darken : Pass::Overwrite);
-				if (drawn == Drawn::Unsupported) ++check.Unsupported;
-				if (drawn != Drawn::Pixels) continue;
-				const auto span = Intersect(write.Clip, {write.X + frame.Left, write.Y + frame.Top, frame.Width, frame.Height});
-				for (int y = span.Y; y < span.Y + span.Height; ++y)
-					for (int x = span.X; x < span.X + span.Width; ++x)
-					{
-						const auto value = frame.Pixels[size_t(y - write.Y - frame.Top) * frame.Width + size_t(x - write.X - frame.Left)];
-						if (pass ? value <= MaxDarken : value != Transparent)
-							owner[size_t(y - area.Y) * area.Width + size_t(x - area.X)] = int(index);
-					}
-			}
-		}
+				if (DrawWrite(model.data(), area, snapshot.Writes[index], pass, owner.data(), int(index)) == Drawn::Unsupported)
+					++check.Unsupported;
+		for (int pass = 0; pass < Passes; ++pass)
+			for (const auto& write : snapshot.Writes)
+				DrawWrite(split.data(), area, write, pass, nullptr, 0);
+		for (size_t i = 0; i < model.size(); ++i) check.Split += model[i] != split[i];
 		for (int row = 0; row < view.Height; ++row)
 		{
 			// 47EFE0 and 47F250 address the ring buffer by x and the row below ViewBounds.Y.
@@ -285,7 +340,7 @@ namespace ABufferSnapshot
 		return check;
 	}
 
-	inline void Trace(Snapshot& snapshot, unsigned sample)
+	inline void Trace(const Snapshot& snapshot, unsigned sample)
 	{
 		auto* buffer = ABuffer::Instance;
 		const bool readable = CursorSnapshot::Readable(buffer, sizeof(ABuffer));
@@ -299,19 +354,19 @@ namespace ABufferSnapshot
 			"visited=%d legal=%d covered=%d uncovered=%d edges=%d invalid=%d missing=%d stale=%d map=%d,%d,%d,%d visible=%d,%d,%d,%d "
 			"buffer=%p bounds=%d,%d,%d,%d width=%d height=%d position=%d size=%d shaded=%d,%d:flags=%X/%X:mask=%02X/%02X:frame=%d/%d\n",
 			sample, snapshot.Reason, snapshot.Fog, snapshot.Defeated, snapshot.Window, snapshot.Shapes[0].Pointer, snapshot.Shapes[0].Data,
-			snapshot.Shapes[1].Pointer, snapshot.Shapes[1].Data, int(snapshot.Shapes[0].Frames.size()), int(snapshot.Shapes[1].Frames.size()),
+			snapshot.Shapes[1].Pointer, snapshot.Shapes[1].Data, FrameCount(snapshot.Shapes[0]), FrameCount(snapshot.Shapes[1]),
 			snapshot.AlphaShapes, snapshot.Writes.size(), snapshot.Visited, snapshot.Legal, snapshot.Covered, snapshot.Uncovered, snapshot.Edges, snapshot.Invalid,
 			snapshot.Missing, snapshot.Stale, map.MapRect.X, map.MapRect.Y, map.MapRect.Width, map.MapRect.Height, map.VisibleRect.X, map.VisibleRect.Y,
 			map.VisibleRect.Width, map.VisibleRect.Height, buffer, readable ? buffer->Bounds.X : 0, readable ? buffer->Bounds.Y : 0,
 			readable ? buffer->Bounds.Width : 0, readable ? buffer->Bounds.Height : 0, readable ? buffer->Width : 0, readable ? buffer->Height : 0,
 			readable ? buffer->BufferPosition : 0, readable ? buffer->BufferSize : 0, edge.CellX, edge.CellY, edge.Flags[0], edge.Flags[1],
 			edge.Mask[0], edge.Mask[1], edge.Frame[0], edge.Frame[1]);
-		if (std::strcmp(snapshot.Reason, "ready") || !readable || buffer->Width < snapshot.View.Width || buffer->Height < snapshot.View.Height) return;
+		if (!snapshot.Ready() || !readable || buffer->Width < snapshot.View.Width || buffer->Height < snapshot.View.Height) return;
 		const auto check = CheckNative(snapshot, buffer);
 		const auto& owner = check.Owner >= 0 ? snapshot.Writes[size_t(check.Owner)] : none;
-		Debug::Log("[TerrainGPU] abuffercheck sample=%u compared=%d mismatched=%d unsupported=%d modelShaded=%d nativeShaded=%d box=%d,%d,%d,%d "
+		Debug::Log("[TerrainGPU] abuffercheck sample=%u compared=%d mismatched=%d unsupported=%d split=%d modelShaded=%d nativeShaded=%d box=%d,%d,%d,%d "
 			"first=%d,%d:native=%d:model=%d:cell=%d,%d:flags=%X/%X:mask=%02X/%02X:frame=%d/%d:occlusion=%d/%d:stored=%d/%d\n",
-			sample, check.Compared, check.Mismatched, check.Unsupported, check.ModelShaded, check.NativeShaded,
+			sample, check.Compared, check.Mismatched, check.Unsupported, check.Split, check.ModelShaded, check.NativeShaded,
 			check.Mismatched ? check.Left : 0, check.Mismatched ? check.Top : 0, check.Mismatched ? check.Right : 0, check.Mismatched ? check.Bottom : 0,
 			check.FirstX, check.FirstY, check.Native, check.Model, owner.CellX, owner.CellY, owner.Flags[0], owner.Flags[1],
 			owner.Mask[0], owner.Mask[1], owner.Frame[0], owner.Frame[1], owner.Occlusion[0], owner.Occlusion[1], owner.Stored[0], owner.Stored[1]);
