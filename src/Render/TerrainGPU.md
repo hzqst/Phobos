@@ -56,8 +56,8 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 动画/崩塌 Terrain（D2）：只画 Terrain，对象层中的单位、建筑、动画（如矿石闪光）、粒子与 Extras 都不画（阶段 D3 起）；崩塌中的对象、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
-- `4D1890` deferred 记录不画：开 FogOfWar 实测只出现建筑记录（阶段 D1，#22）；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。建筑底座不画（阶段 D）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
+- 动画/崩塌 Terrain（D2）：只画 Terrain，对象层中的单位、建筑、动画（如矿石闪光）、粒子与 Extras 都不画（阶段 D3 起）；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- `4D1890` deferred 记录不画：开 FogOfWar 实测只出现建筑记录（阶段 D1，#22）；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾中的建筑（`4D1890` 类型 6，阶段 D1c）尚未画；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
 - Debug 构建每帧采集约 1 ms（下表），加 ABuffer 快照后约 1.4 ms，尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
@@ -143,6 +143,24 @@ overlay 之后，`6D97D0` 逆序遍历 `ObjectsInLayers[2]`，对 `WhatAmI=Terra
 | 深度与颜色 | 同 overlay（`ShapeDepth`）：`4E00`/`4E01`/`4601` 都是严格 `<` 测试并写低 16 位；阴影 `(c>>1)&HalfTranslucencyMask` |
 
 trace 的 `overlay` 行加 `terrains`（层内 Terrain 数）、`dynamic`（动画或崩塌，归 Composite）、`terrainOutside`、`damaged`（取受损帧的静态对象）、`casters`（扫描到的 ShadowCaster 格）、`fogged`/`foggedBuildings`（`4D1890` 的记录数与其中的建筑记录数，pair 数组 `[8B3CC0]`、个数 `[8B3CC4]`，记录类型 `+30`）、`foggedInView=建筑/其他`（启用 `+74` 且保存矩形 `+40` 按 `rect−TacticalPos+ViewBounds` 平移后与 clip 相交的记录；“其他”非 0 说明 Tile 上有未画的 deferred 记录）；`overlaytypes` 的键前缀 `o`/`t`/`c` 分别为 overlay 类型、Terrain 类型、tile 类型。
+
+## 建筑（Tile 第 8 步）
+
+Tile 的第 8 步（`6D3870 → 6D9920`）在 Terrain 对象与悬崖投影之后、`4D1890` deferred 记录之前，正序遍历 Ground 层，对 RTTI 6、`!IsFogged || ArmageddonMode` 且 `455C20(GetRenderDimensions)` 加 ViewBounds 原点后与 clip 相交的建筑调用 `43CEA0`（跳过 `!IsOnMap || InLimbo`）→ `43D290`。每个部件经 `705E00` 先画本体、紧接自身阴影，全部走 `4AED70`，flags `6E00`/`6E01`（严格 `<` 测试并写 Z）。纯规则在 `BuildingImage`（有单元测试），采集 `OverlaySnapshot::Capture::Building` 接在同一绘制列表后（`Draw::Source` 为建筑），CPU 重放与 GPU 的 shape 管线直接复用；状态相关的量（当前帧、Foundation、闪烁亮度、配色、tint、`6D1FE0` 投影、坐标）都调原生函数取。
+
+| 项 | 规则 |
+| --- | --- |
+| 位置 | 同 Terrain 对象：`GetRenderCoords` 经 `CoordsToClient` 加 ViewBounds 原点；`h = 6D20E0(GetZ())` |
+| 本体 | `GetImage()`（建造/出售中为 Buildup）；帧 `min(43EF90 GetCurrentFrame, int16(Frames)/2)`；`z = NormalZAdjust−h−2`，梯度 Deg90；ZShape 为 `[89DDBC]`（BUILDNGZ），偏移 `(198,446)` 加 `ZShapePointMove`（建造/出售中不加，Phobos `43D6E5` 的 `ZShapePointMove.OnBuildup` 可保留）再减 `6D1FE0` 对 Foundation 远角 `((W−1)·256, (H−1)·256)` 的投影；Foundation 宽 ≥ 8 时无 ZShape |
+| 底座 | 有 `BibShape`、`BState` 非 0 且 `ActuallyPlacedOnMap`（Phobos `43D874`）；帧为当前帧（不截断），`z=−h−3`，梯度 0 |
+| 卸载（mission 16） | Phobos `43D363`：被链接单位的 `ExitThroughRoof`（默认 JumpJet 或 BalloonHover）为真时本体换 `RoofDeployingAnim`、`NormalZAdjust=−40`，否则换 `DeployingAnim`、`−20`（各自存在时）；再画 `UnderRoofDoorAnim`/`UnderDoorAnim`，帧为血量高于 `ConditionYellow` 时 0、否则 1，`z=−h−2`，梯度 0 |
+| 大门（mission 24 且 UnloadTimer 处于开关状态） | 只画本体：帧 `BuildingImage::GateFrame`（进度×GateStages 截断，关闭时反向，空闲 0、全开为最后一阶，受损再加 GateStages+1），亮度只用 `Intensity_Normal` |
+| 自身阴影 | 仅 `bDrawShadow` 且类型非 NoShadow：帧 `部件帧 + int16(Frames)/2`，`z=−h−4`，梯度 0，亮度 1000，无 tint，flags `6E01` |
+| 颜色 | Convert：类型 `TerrainPalette` 时中心格 LightConvert（亮度改为 `int16(Intensity_Terrain)`），否则 `GetRemapColour()`；亮度 `int16(Intensity_Normal)+ExtraLight` → `GetFlashingIntensity` → 铁幕 → 空袭标记 → 加 Phobos `CustomTintIntensity`（`70632E`/`706389`） |
+| tint | `GetTintColor(铁幕, 空袭, 狂暴=否) | GetCustomTintColor`，中心格 shroud 时为 0；只有 RLE 帧的 blitter 把它 OR 进 16 位颜色（`Draw::Tint`，GPU 在 `TerrainShape.ps` 里 OR 到查表结果）|
+| 不画 | 另一种 visual（`VisualCharacter≠Normal`）、正在折跃、对当前玩家不可见、伪装中的建筑计为 `unsupported`，不画 |
+
+Ares 的 `437CCC` 把无 ZShape 的 RLE blitter 默认读取的 Z 调整行换成与帧同宽的全 0 缓冲，所以宽阴影等无 ZShape 的 RLE 帧没有逐像素调整。trace 在 `overlay` 行后加 `buildings`：Ground 层建筑数 `buildings`、`fogged`、`outside`、`unsupported`、开关中的大门 `gates`、卸载中的 `unloading`、画出的底座 `bibs` 与门 `doors`；`overlaytypes` 的键前缀 `b` 为建筑类型号。
 
 ## 动画 Terrain（mode 2）
 
@@ -348,3 +366,19 @@ HEAD `d507b7de` + 本批未提交改动，DLL SHA256 `933132e2…8d7d`，1024×7
 | Vulkan | 左滚 | 光标 + 一个闪光动画 6 像素 | 同上 |
 
 闪光动画属对象层的 AnimClass，不在 D2 范围。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d2b`。Debug 构建无警告。
+
+### D1a/D1b 活建筑（2026-10-30）
+
+#22 交接 = gamemd-reverse PR #25。HEAD `15e41979` + 本批未提交改动，DLL SHA256 `5531665f…`，1024×768，D3D12 与 Vulkan。
+
+受控地图 `GPUBLD.MAP`（`scripts/make_bld.py`，只在 `Debug/AutomationGame`）取自 `ancient tomb.mpr`：保留地形、overlay、Terrain 与中立建筑，开局点 `(117,75)`，另加中立 GAWEAP、NAREFN、GADEPT（血量 90/256，受损帧）、AMRADR、GAAIRC；视野内 26 栋建筑，6 个底座（含原有 CAOUTP），25–26 个 ZShape。再点两下 MCV 展开建造厂，在 Buildup 中途与建成后各抓一次。
+
+对象层（单位、建筑动画、粒子）也画进 Composite，GPU 还不画，所以 GPU 与同帧 `native_terrain` 只在 `native_composite == native_terrain` 的像素上比较（`scripts/cmpbld.py`，约 60.4 万像素，其余 2.4–2.6 万像素被对象层覆盖）：
+
+| 后端 | 状态 | `tilecheck` | GPU 对 Tile |
+| --- | --- | --- | --- |
+| D3D12 | 原开局 `(108,74)`（20 栋，民用建筑） | 颜色、Z 全一致 | 只有光标 188 像素 |
+| D3D12 | `(117,75)` 开局、MCV 转向、Buildup 中途、建成 | 全一致 | 只有光标 0–188 像素 |
+| Vulkan | 开局、Buildup、上滚 | 全一致 | 只有光标 0–188 像素 |
+
+同次 `compositecheck` 的 `unexplained` 只在画面顶边（`y≤3`，对象层），`body=0 shadow=0`。未实测：tint（需铁幕/空袭/Phobos Tint）、大门开关、卸载与门、出售、`TerrainPalette` 建筑、`unsupported` 各状态；第一次实测时曾因按 `[89C568]` 首字节判定无 ZShape 宽阴影为不支持而差 559 像素，按 Ares `437CCC` 去掉该判定后一致。临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d1a`。回归新增 `BuildingImageTests`，全部通过；Debug 构建无警告。

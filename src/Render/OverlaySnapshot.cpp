@@ -2,7 +2,10 @@
 #include "CompositeSnapshot.h"
 #include "TerrainPass.h"
 
+#include <Ext/BuildingType/Body.h>
 #include <Ext/Rules/Body.h>
+#include <Ext/Techno/Body.h>
+#include <Ext/TechnoType/Body.h>
 #include <Utilities/Debug.h>
 
 #include <algorithm>
@@ -42,14 +45,16 @@ namespace OverlaySnapshot
 			bool Bounded = true;
 			// 2E00 and 2E01 (an animated or crumbling Terrain object) test Z without writing it.
 			bool WritesDepth = true;
+			// 705E00's tint, which only an RLE frame's blitter applies.
+			int Tint = 0;
 		};
 
 		struct Capture
 		{
 			const RectangleStruct& Clip;
 			int TacticalX, TacticalY, ViewX, ViewY;
-			// The ZBuffer's MaxValue and Bounds.Y, and how many of FlatZShape's first bytes are 0.
-			int MaxValue, BoundsY, FlatZeros;
+			// The ZBuffer's MaxValue and Bounds.Y.
+			int MaxValue, BoundsY;
 			std::unordered_map<const ConvertClass*, TerrainBatch::ColorTables::Handle> Tables;
 			// Where the draws and their counters go: the Tile pass, or 6D8DB0's on Composite.
 			std::vector<Draw>* Target = &Current.Draws;
@@ -176,8 +181,8 @@ namespace OverlaySnapshot
 				if (call.Gradient < 0 || call.Gradient >= GradientCount || !ShapeDepth::Usable(gradients[call.Gradient])
 					|| !ShapeDepth::ClosedForm(gradients[call.Gradient])) { ++count.Unsupported; return; }
 				const bool zshaped = compressed && call.ZShape;
-				// Without a Z shape 437A10 reads FlatZShape from each row's first drawn pixel on.
-				if (compressed && !zshaped && clipped.Width > FlatZeros) { ++count.Unsupported; return; }
+				// Without a Z shape 437A10 reads its default Z adjust row, which Ares' 437CCC replaces with
+				// zeros as wide as the frame (gamemd-reverse #19 §8.3): no adjustment.
 				const auto table = Table(call.Convert);
 				if (!table) { ++count.Palette; return; }
 				Draw draw;
@@ -199,6 +204,7 @@ namespace OverlaySnapshot
 				draw.Mask = call.Convert->HalfTranslucencyMask;
 				draw.ZShaped = zshaped;
 				draw.WritesDepth = call.WritesDepth;
+				draw.Tint = compressed ? std::uint16_t(call.Tint) : 0;
 				if (zshaped && !ReadZBytes(shape, cut, draw)) { ++count.ZShape; return; }
 				draw.ZAdjust = call.ZAdjust;
 				draw.GradientIndex = call.Gradient;
@@ -405,6 +411,143 @@ namespace OverlaySnapshot
 				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, true);
 			}
 
+			// 6D9920 and 43CEA0 (force 1, the clip ViewBounds) and 43D290 for a building of the ground
+			// layer, with Phobos' 43D363, 43D386, 43D6E5 and 43D874 and, through the native calls, Ares'
+			// frame and Foundation hooks: each part through 705E00, which draws it and its own shadow.
+			void Building(BuildingClass* building)
+			{
+				auto& count = *Count;
+				++count.Buildings;
+				if (building->IsFogged && !Unsorted::ArmageddonMode) { ++count.BuildingsFogged; return; }
+				if (!building->IsOnMap || building->InLimbo) return;
+				auto* type = building->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
+				// 6D9920 and 43CEA0: the building's rectangle (455C20) must meet the clip.
+				RectangleStruct dimensions {};
+				building->GetRenderDimensions(&dimensions);
+				if (!TerrainSnapshot::Intersects(Clip, std::int64_t(dimensions.X) + ViewX, std::int64_t(dimensions.Y) + ViewY, dimensions.Width, dimensions.Height))
+				{
+					++count.BuildingsOutside;
+					return;
+				}
+				auto* image = building->GetImage();
+				if (!image) { ++count.NoImage; return; }
+				if (type->InvisibleInGame) return;
+				// 705E00 draws the normal visual of a building that neither warps nor hides behind a disguise
+				// with these parameters; the others change its flags or palette.
+				if (building->VisualCharacter(VARIANT_FALSE, nullptr) != VisualType::Normal || building->IsBeingWarpedOut() || building->IsWarpingIn()
+					|| !building->IsClearlyVisibleTo(HouseClass::CurrentPlayer) || building->IsDisguised())
+				{
+					++count.BuildingsUnsupported;
+					return;
+				}
+				const auto mission = building->GetCurrentMission();
+				const auto mapCoords = building->GetMapCoords();
+				const auto* cell = MapClass::Instance.GetCellAt(mapCoords);
+				// 43D290 and 705E00 read the tint's shroud and the TerrainPalette from the center's cell.
+				const auto center = building->GetCoords();
+				auto* centerCell = MapClass::Instance.GetCellAt(CellStruct {std::int16_t(center.X / 256), std::int16_t(center.Y / 256)});
+				if (!cell || !centerCell) { ++count.Palette; return; }
+				const ConvertClass* convert = type->TerrainPalette ? centerCell->LightConvert : building->GetRemapColour();
+				if (!convert) { ++count.Palette; return; }
+				int tint = TechnoExt::GetTintColor(building, true, true, false) | TechnoExt::GetCustomTintColor(building);
+				if (centerCell->IsShrouded()) tint = 0;
+				// 705E00's intensity, with Phobos' 70632E and 706389.
+				const auto intensity = [&](int brightness)
+				{
+					if (type->TerrainPalette) brightness = std::int16_t(centerCell->Intensity_Terrain);
+					int value = building->GetFlashingIntensity(brightness);
+					if (building->IsIronCurtained()) value = building->GetInvulnerabilityTintIntensity(value);
+					if (TechnoExt::Fetch(building)->AirstrikeTargetingMe) value = building->GetAirstrikeTintIntensity(value);
+					return value + TechnoExt::GetCustomTintIntensity(building);
+				};
+				const bool drawShadow = Game::bDrawShadow && !type->NoShadow;
+				const int height = reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(building->GetZ());
+				const auto coords = building->GetRenderCoords();
+				Point2D client {};
+				reinterpret_cast<bool(__thiscall*)(const TacticalClass*, const CoordStruct*, Point2D*)>(CoordsToClient)(TacticalClass::Instance, &coords, &client);
+				const Point position {std::int64_t(client.X) + ViewX, std::int64_t(client.Y) + ViewY};
+				const int index = type->ArrayIndex;
+				const auto part = [&](const SHPStruct* shape, int frame, int depth, int gradient, int brightness, const SHPStruct* zshape, BuildingImage::Offset offset)
+				{
+					Call call;
+					call.Image = shape;
+					call.Frame = frame;
+					call.Convert = convert;
+					call.Brightness = intensity(brightness);
+					call.ZAdjust = depth;
+					call.Gradient = gradient;
+					call.Bounded = false;
+					call.Tint = tint;
+					call.ZShape = zshape;
+					call.ZShapeX = offset.X;
+					call.ZShapeY = offset.Y;
+					Place(mapCoords.X, mapCoords.Y, Layer::Building, index, call, position, false);
+					if (!drawShadow) return;
+					const int frames = FrameCount(shape);
+					if (frames == UnloadedShape) { ++count.Unloaded; return; }
+					if (frames < 0) { ++count.Frame; return; }
+					call.Frame = BuildingImage::Add32(std::int16_t(frames) / 2, frame);
+					call.Brightness = BuildingImage::FullBrightness;
+					call.ZAdjust = BuildingImage::ShadowDepth(height);
+					call.Gradient = int(ZGradient::Ground);
+					call.Tint = 0;
+					call.ZShape = nullptr;
+					Place(mapCoords.X, mapCoords.Y, Layer::Building, index, call, position, true);
+				};
+				const auto healthy = building->GetHealthPercentage() > RulesClass::Instance->ConditionYellow;
+				auto& timer = building->UnloadTimer;
+				if (mission == Mission::Open && (timer.AreStates11() || timer.AreStates10() || timer.AreStates01()))
+				{
+					++count.Gates;
+					const int frame = BuildingImage::GateFrame(int(timer.PercentageDone() * double(type->GateStages)), type->GateStages, timer.AreStates10(),
+						timer.AreStates00(), timer.AreStates01(), !healthy);
+					part(image, frame, BuildingImage::BodyDepth(type->NormalZAdjust, height), int(ZGradient::Deg90), std::int16_t(cell->Intensity_Normal), nullptr, {});
+					return;
+				}
+				const int light = std::int16_t(cell->Intensity_Normal) + std::int16_t(type->ExtraLight);
+				int normalZAdjust = type->NormalZAdjust;
+				bool roof = false;
+				if (mission == Mission::Unload)
+				{
+					++count.Unloading;
+					// Phobos' 43D363: ExitThroughRoof, by default for jumpjets and balloons.
+					if (const auto* linked = building->GetNthLink())
+					{
+						auto* linkedType = linked->GetTechnoType();
+						const auto* linkedExt = TechnoTypeExt::TryFetch(linkedType);
+						roof = linkedExt ? linkedExt->ExitThroughRoof.Get(linkedType->JumpJet || linkedType->BalloonHover) : linkedType->JumpJet || linkedType->BalloonHover;
+					}
+					if (roof && type->RoofDeployingAnim) { image = type->RoofDeployingAnim; normalZAdjust = BuildingImage::RoofZAdjust; }
+					else if (!roof && type->DeployingAnim) { image = type->DeployingAnim; normalZAdjust = BuildingImage::DeployingZAdjust; }
+				}
+				const auto* typeExt = BuildingTypeExt::TryFetch(type);
+				const bool pointMove = (mission != Mission::Construction && mission != Mission::Selling) || (typeExt && typeExt->ZShapePointMove_OnBuildup);
+				const int width = reinterpret_cast<int(__thiscall*)(const BuildingTypeClass*)>(FoundationWidth)(type);
+				const int depthCells = reinterpret_cast<int(__thiscall*)(const BuildingTypeClass*, bool)>(FoundationHeight)(type, false);
+				const Point2D corner {BuildingImage::CornerLeptons(width), BuildingImage::CornerLeptons(depthCells)};
+				Point2D move {};
+				reinterpret_cast<Point2D*(__thiscall*)(const TacticalClass*, Point2D*, const Point2D*)>(ZShapeMove)(TacticalClass::Instance, &move, &corner);
+				const auto offset = BuildingImage::ZShapeOffset(pointMove, type->ZShapePointMove.X, type->ZShapePointMove.Y, move.X, move.Y);
+				const auto* zshape = width >= BuildingImage::NoZShapeWidth ? nullptr : *reinterpret_cast<SHPStruct* const*>(BuildingZShape);
+				const int current = building->GetCurrentFrame();
+				const int frames = FrameCount(image);
+				if (frames < 0) { ++count.Frame; return; }
+				part(image, BuildingImage::BodyFrame(current, std::int16_t(frames)), BuildingImage::BodyDepth(normalZAdjust, height), int(ZGradient::Deg90), light, zshape, offset);
+				// Phobos' 43D874: no bib before the building is actually placed.
+				if (type->BibShape && building->BState && building->ActuallyPlacedOnMap)
+				{
+					++count.Bibs;
+					part(type->BibShape, current, BuildingImage::BibDepth(height), int(ZGradient::Ground), light, nullptr, {});
+				}
+				if (mission != Mission::Unload) return;
+				if (const auto* door = roof ? type->UnderRoofDoorAnim : type->UnderDoorAnim)
+				{
+					++count.Doors;
+					part(door, BuildingImage::DoorFrame(healthy), BuildingImage::DoorDepth(height), int(ZGradient::Ground), light, nullptr, {});
+				}
+			}
+
 			// 4802A0 and 547230 for a cell of 6D7C00's scan: the C_SHADOW.SHP frame its tile casts.
 			void Cliff(const CellClass* cell, int cellX, int cellY)
 			{
@@ -606,7 +749,7 @@ namespace OverlaySnapshot
 						else
 						{
 							const int shade = TerrainImage::ShadeRow(int(draw.Table->Shades), draw.LightRow, model.Alpha[at]);
-							model.Color[at] = colors[size_t(shade) * 256 + index];
+							model.Color[at] = colors[size_t(shade) * 256 + index] | draw.Tint;
 							model.Unknown[at] = 0;
 						}
 						model.Owner[at] = int(drawIndex);
@@ -784,7 +927,7 @@ namespace OverlaySnapshot
 			return check;
 		}
 
-		char LayerLetter(Layer layer) { return layer == Layer::Overlay ? 'o' : layer == Layer::Terrain ? 't' : 'c'; }
+		char LayerLetter(Layer layer) { return layer == Layer::Overlay ? 'o' : layer == Layer::Terrain ? 't' : layer == Layer::Cliff ? 'c' : 'b'; }
 
 		void Trace()
 		{
@@ -797,8 +940,10 @@ namespace OverlaySnapshot
 				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, count.Unsupported, FirstFailure[0], FirstFailure[1], FirstFailure[2],
 				FirstFailure[3], count.Terrains, count.Dynamic, count.TerrainOutside, count.Damaged, count.Casters,
 				count.Fogged, count.FoggedBuildings, count.FoggedBuildingsInView, count.FoggedOthersInView, TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
+			Debug::Log("[TerrainGPU] buildings sample=%u buildings=%d fogged=%d outside=%d unsupported=%d gates=%d unloading=%d bibs=%d doors=%d\n", TraceCount,
+				count.Buildings, count.BuildingsFogged, count.BuildingsOutside, count.BuildingsUnsupported, count.Gates, count.Unloading, count.Bibs, count.Doors);
 			if (!Current.Visible) return;
-			// Each overlay (o), Terrain (t) and cliff tile (c) type drawn: bodies, shadows, RLE frames and Z shapes.
+			// Each overlay (o), Terrain (t), cliff tile (c) and building (b) type drawn: bodies, shadows, RLE frames and Z shapes.
 			std::map<std::pair<Layer, int>, std::array<int, 4>> types;
 			for (const auto& draw : Current.Draws)
 			{
@@ -898,11 +1043,7 @@ namespace OverlaySnapshot
 		{
 			const auto& clip = terrain.Clip;
 			const auto& view = DSurface::ViewBounds;
-			const auto* flat = reinterpret_cast<const std::uint8_t*>(FlatZShape);
-			int zeros = 0;
-			while (zeros < int(FlatZShapeChecked) && !flat[zeros]) ++zeros;
-			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.X, view.Y, ZBuffer::Instance->MaxValue, ZBuffer::Instance->Bounds.Y,
-				zeros, {}};
+			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.X, view.Y, ZBuffer::Instance->MaxValue, ZBuffer::Instance->Bounds.Y, {}};
 			const auto anchor = TerrainImage::ScanAnchor(capture.TacticalX + clip.X - view.X, capture.TacticalY + clip.Y - view.Y);
 			const int rows = OverlayImage::ScanRows(clip.Height), columns = OverlayImage::ScanColumns(clip.Width);
 			const int margin = TerrainSnapshot::ScanMargin;
@@ -949,6 +1090,13 @@ namespace OverlaySnapshot
 					if (!MapClass::Instance.CoordinatesLegal(coords)) continue;
 					if (const auto* cell = MapClass::Instance.TryGetCellAt(coords)) capture.Cliff(cell, cellX, cellY);
 				}
+			// 6D9920: the buildings of the ground layer, first first.
+			for (int i = 0; i < ground.Count; ++i)
+			{
+				auto* object = ground.Items[i];
+				if (!CursorSnapshot::Readable(object, sizeof(BuildingClass)) || object->WhatAmI() != AbstractType::Building) continue;
+				capture.Building(static_cast<BuildingClass*>(object));
+			}
 			// 4D1890 (drawn before the overlays): a record draws where it is enabled and its saved
 			// rectangle, moved by the view, meets the clip.
 			const auto* pairs = *reinterpret_cast<const std::uint32_t* const*>(FoggedPairs);

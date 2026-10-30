@@ -1,9 +1,11 @@
 #pragma once
 
+#include "BuildingImage.h"
 #include "OverlayImage.h"
 #include "ShapeDepth.h"
 #include "TerrainObjectImage.h"
 #include "TerrainSnapshot.h"
+#include <BuildingClass.h>
 #include <ColorScheme.h>
 #include <FileSystem.h>
 #include <HouseClass.h>
@@ -24,13 +26,11 @@
 // (C5.2b). Rubble and the deferred records of 6D3470 are absent. The animated or crumbling Terrain
 // objects RenderLayers (6D8DB0) draws on Composite in mode 2 (gamemd-reverse #23) are captured in the
 // same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
+// The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
 	constexpr std::uintptr_t Gradients = 0x817710, SlopeShapes = 0xAA105C, BridgePattern = 0x81CC30;
-	// 437CCC: the Z adjust bytes an RLE blitter reads when no Z shape is given.
-	constexpr std::uintptr_t FlatZShape = 0x89C568;
-	constexpr size_t FlatZShapeChecked = 1024;
 	constexpr int GradientCount = 4;
 	constexpr std::uint32_t BridgeFlag = 0x80;
 	// 4AED70's brightness for Tiberium and shadows.
@@ -61,9 +61,14 @@ namespace OverlaySnapshot
 	// 5AFB80 (the matrix applied to a vector) gives for its corners.
 	constexpr int LayerCount = 5;
 	constexpr std::uintptr_t MatrixApply = 0x5AFB80;
+	// 43D290's BUILDNGZ.SHA (frame 0, already less 41h), the projection of a Foundation corner
+	// (6D1FE0), and the Foundation width and height (45EC90, 45ECA0, which Ares takes over), read
+	// as the whole EAX.
+	constexpr std::uintptr_t BuildingZShape = 0x89DDBC, ZShapeMove = 0x6D1FE0, FoundationWidth = 0x45EC90, FoundationHeight = 0x45ECA0;
 
-	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0) or a cliff (6D7C00).
-	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff };
+	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00) or a
+	// building (6D9920).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -87,6 +92,8 @@ namespace OverlaySnapshot
 		std::vector<std::uint8_t> ZBytes;
 		// 4AED70's Z write: the Tile pass writes Z (4E00, 4601), mode 2's Terrain only tests it (2E00).
 		bool WritesDepth = true;
+		// The tint an RLE body ORs into each color (705E00's, 0 where the frame is plain).
+		std::uint16_t Tint = 0;
 		// For the trace: the layer, the overlay, Terrain type or tile type index, and the shape's frame.
 		Layer Source = Layer::Overlay;
 		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Index = -1, ShapeFrame = 0;
@@ -107,6 +114,10 @@ namespace OverlaySnapshot
 		// The other objects 6D8DB0 marked IsVisible (it clears the flag of each and sets it where it draws),
 		// and those of them whose rectangle (GetRenderDimensions) is empty.
 		int OthersVisible = 0, OthersUnbounded = 0;
+		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
+		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
+		// and doors drawn.
+		int Buildings = 0, BuildingsFogged = 0, BuildingsOutside = 0, BuildingsUnsupported = 0, Gates = 0, Unloading = 0, Bibs = 0, Doors = 0;
 	};
 	struct Frame
 	{

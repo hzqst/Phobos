@@ -60,8 +60,9 @@ namespace TerrainBatch
 		std::uint32_t Accumulator, RowsPerBand, BandLimit;
 		std::int32_t BandDelta;
 		std::uint32_t ZOffset;
-		// ShadowShape: halve the target's color instead of drawing.
-		std::uint32_t Flags, Padding;
+		// ShadowShape: halve the target's color instead of drawing. Tint: the 16 bits an RLE body of
+		// 4AED70 ORs into each palette color (Blit_Copy_Tinted), 0 for the others.
+		std::uint32_t Flags, Tint;
 	};
 	static_assert(sizeof(Shape) == 32);
 	constexpr std::uint32_t NoZ = 0xFFFFFFFF, ShadowShape = 1;

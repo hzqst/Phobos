@@ -257,7 +257,7 @@ namespace TerrainPass
 				}
 				const auto& rows = draw.Rows;
 				TerrainBatch::Shape shape {rows.Base, std::uint32_t(rows.Accumulator), rows.Steps ? std::uint32_t(draw.Gradient.RowsPerBand) : 0u,
-					std::uint32_t(draw.Gradient.BandLimit), draw.Gradient.BandDelta, TerrainBatch::NoZ, draw.Shadow ? TerrainBatch::ShadowShape : 0u, 0};
+					std::uint32_t(draw.Gradient.BandLimit), draw.Gradient.BandDelta, TerrainBatch::NoZ, draw.Shadow ? TerrainBatch::ShadowShape : 0u, draw.Tint};
 				if (draw.ZShaped)
 				{
 					shape.ZOffset = std::uint32_t(packed.size());

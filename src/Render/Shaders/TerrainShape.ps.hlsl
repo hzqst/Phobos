@@ -3,7 +3,8 @@
 // selects the shade row of the LightConvert table). The depth follows ShapeDepth: the drawn row's
 // base, stepped by the Z gradient, less the signed Z shape byte, tested strictly smaller and written
 // by the pipeline. A shadow outputs nothing but alpha 1/2, which its pipeline's blend multiplies
-// the target by; the composite's floor keeps the native (c >> 1) & mask.
+// the target by; the composite's floor keeps the native (c >> 1) & mask. A tinted RLE body ORs the
+// tint into the packed color.
 #ifdef __spirv__
 #define COMBINED_IMAGE_SAMPLER [[vk::combinedImageSampler]]
 #else
@@ -26,7 +27,7 @@ struct Shape
     int BandDelta;
     uint ZOffset;
     uint Flags;
-    uint Padding;
+    uint Tint;
 };
 
 StructuredBuffer<Shape> Shapes : register(t3, space2);
@@ -88,7 +89,7 @@ PSOutput main(VSOutput input)
         alpha = uint(round(ABuffer.Load(int3(word, 0)) * 255.0));
     const uint last = (input.Data.z >> 16) - 1;
     const uint shade = min(last, last * (input.Data.w & 0xFFFF) * alpha / 32258) & 0xFF;
-    const uint packed = Tables.Load(int3(index, (input.Data.z & 0xFFFF) + shade, 0));
+    const uint packed = Tables.Load(int3(index, (input.Data.z & 0xFFFF) + shade, 0)) | shape.Tint;
     const uint3 maximum = (1u << Bits.xyz) - 1u;
     output.Color = float4(float3((packed.xxx >> Shift.xyz) & maximum), 1.0);
     return output;
