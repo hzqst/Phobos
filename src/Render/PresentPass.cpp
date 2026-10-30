@@ -1,5 +1,6 @@
 #include "PresentPass.h"
 #include "CursorImage.h"
+#include "GPUShader.h"
 
 #include <Unsorted.h>
 
@@ -35,45 +36,6 @@ namespace
 
 	static_assert(sizeof(DecodeUniforms) == 64);
 
-	struct ShaderCode
-	{
-		const unsigned char* pDXIL;
-		size_t DXILSize;
-		const unsigned char* pSPIRV;
-		size_t SPIRVSize;
-	};
-
-	template <size_t DXILSize, size_t SPIRVSize>
-	constexpr ShaderCode MakeShaderCode(const unsigned char (&dxil)[DXILSize], const unsigned char (&spirv)[SPIRVSize])
-	{
-		return { dxil, DXILSize, spirv, SPIRVSize };
-	}
-
-	SDL_GPUShader* CreateShader(SDL_GPUDevice* pDevice, const ShaderCode& code, SDL_GPUShaderStage stage,
-		Uint32 samplerCount, Uint32 uniformBufferCount)
-	{
-		SDL_GPUShaderCreateInfo info {};
-		info.entrypoint = "main";
-		info.stage = stage;
-		info.num_samplers = samplerCount;
-		info.num_uniform_buffers = uniformBufferCount;
-
-		if (SDL_GetGPUShaderFormats(pDevice) & SDL_GPU_SHADERFORMAT_DXIL)
-		{
-			info.format = SDL_GPU_SHADERFORMAT_DXIL;
-			info.code = code.pDXIL;
-			info.code_size = code.DXILSize;
-		}
-		else
-		{
-			info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-			info.code = code.pSPIRV;
-			info.code_size = code.SPIRVSize;
-		}
-
-		return SDL_CreateGPUShader(pDevice, &info);
-	}
-
 	// The game packs 8 bit channels as (value >> SHR) << SHL, so a channel starts at bit SHL
 	// and has 8 - SHR bits.
 	DecodeUniforms GetDecodeUniforms()
@@ -106,12 +68,12 @@ namespace
 
 bool PresentPass::Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow)
 {
-	SDL_GPUShader* pVertexShader = CreateShader(pDevice,
-		MakeShaderCode(g_Fullscreen_vs_DXIL, g_Fullscreen_vs_SPIRV), SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
-	SDL_GPUShader* pFragmentShader = CreateShader(pDevice,
-		MakeShaderCode(g_DecodeRGB16_ps_DXIL, g_DecodeRGB16_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-	SDL_GPUShader* indexedShader = CreateShader(pDevice,
-		MakeShaderCode(g_IndexedSprite_ps_DXIL, g_IndexedSprite_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
+	SDL_GPUShader* pVertexShader = GPUShader::Create(pDevice,
+		GPUShader::Make(g_Fullscreen_vs_DXIL, g_Fullscreen_vs_SPIRV), SDL_GPU_SHADERSTAGE_VERTEX, 0, 0);
+	SDL_GPUShader* pFragmentShader = GPUShader::Create(pDevice,
+		GPUShader::Make(g_DecodeRGB16_ps_DXIL, g_DecodeRGB16_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+	SDL_GPUShader* indexedShader = GPUShader::Create(pDevice,
+		GPUShader::Make(g_IndexedSprite_ps_DXIL, g_IndexedSprite_ps_SPIRV), SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
 
 	if (pVertexShader && pFragmentShader)
 	{
@@ -209,7 +171,7 @@ bool PresentPass::DrawRegion(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextur
 
 bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTexture* pTarget,
 	unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,
-	std::span<const Sprite> sprites)
+	std::span<const Sprite> sprites, const Underlay& underlay)
 {
 	SDL_GPUColorTargetInfo target {};
 	target.texture = pTarget;
@@ -220,6 +182,9 @@ bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextu
 	SDL_GPURenderPass* pRenderPass = SDL_BeginGPURenderPass(pCommandBuffer, &target, 1, nullptr);
 	if (!pRenderPass)
 		return false;
+
+	if (underlay)
+		underlay(pRenderPass, GetLetterboxViewport(targetWidth, targetHeight, logicalWidth, logicalHeight));
 
 	for (const auto& sprite : sprites)
 	{
@@ -242,7 +207,6 @@ bool PresentPass::DrawSprites(SDL_GPUCommandBuffer* pCommandBuffer, SDL_GPUTextu
 		uniforms.Effect[0] = sprite.Effect;
 		uniforms.Effect[1] = sprite.SolidColor;
 		uniforms.Effect[2] = sprite.Opacity256;
-		uniforms.Effect[3] = sprite.FrameOrigin;
 		if (sprite.Palette)
 		{
 			std::copy(sprite.Shift.begin(), sprite.Shift.end(), uniforms.Shift);

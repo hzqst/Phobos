@@ -1,8 +1,8 @@
-# 战术区地形：GPU 重画（阶段 C2）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-本阶段只画 TMP 地块：主菱形与 extra 图，按原生顺序、不用 Z buffer，颜色按每格 `Intensity_Terrain` 与默认 ABuffer 值。弹坑、overlay、Terrain 对象、建筑底座、地块阴影、迷雾与逐像素 ABuffer、TMP 自身的 Z 遮挡都不在本层。
+C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS 查整张 LightConvert 表，输出不变。目前只画 TMP 地块：主菱形与 extra 图，按原生顺序、不用 Z buffer，颜色按每格 `Intensity_Terrain` 与默认 ABuffer 值。弹坑、overlay、Terrain 对象、建筑底座、地块阴影、迷雾与逐像素 ABuffer、TMP 自身的 Z 遮挡都不在本层。
 
 ## 采集
 
@@ -16,18 +16,28 @@
 | 变体 | `480350`：变体数 `+2F0` 大于 1 时，基础 TMP 中 `Height % 格数` 的 piece 有 flag bit 2 则取 `(CellFlags>>13)&1`，否则 `4814F0`；clear tile 总是 `4814F0`。`4814F0` 多格地块先退回原点格再按格宽高归一，变体数 ≤4 查 `81CCA8` 4×4 表，否则查 `89E620` 8×8 表；8×8 表未初始化（`[89E7C7]==0`）时不画该格，不触发其 RNG 初始化。`547CF0` 按 `+2BC` 链走 `variant % 数`（超界时）步 |
 | 素材 | 直接读 `ObjectTypeClass::Image@+A4`，不调用 `GetImage` 的 lazy 加载；piece 为空时与原生一样整格不画 |
 | 位置 | `tileX=30(cx−cy)−TacticalPos.X−30`，`tileY=15(cx+cy)−TacticalPos.Y−15·Level+ViewBounds.Y`（Tile 坐标）；extra 再加 `(ExtraX−X, ExtraY−Y)` |
-| 颜色 | `q=min(254,(261·max(0,I))>>11)`，`I` 为有符号 `Intensity_Terrain`；shade `=min(N−1,(N−1)·q·127/32258)`（`420140`，默认 ABuffer 127）；复制该格 LightConvert 的 `FullColorData` 第 shade 行 256 色，按 (LightConvert, shade) 去重，再按内容进 palette 缓存（上限 160） |
+| 颜色 | 每格只采光照行 `q=min(254,(261·max(0,I))>>11)`（`I` 为有符号 `Intensity_Terrain`）与该格 LightConvert 的整张 `FullColorData`（`ShadeCount×256`）；PS 逐像素算 shade `=min(N−1,(N−1)·q·a/32258)&0xFF`（`420140`），a 目前为默认 ABuffer 127，再取 `表[shade][索引]` |
 | 层序 | 每格主菱形后接 extra 图，与 `547CF0` 相同 |
 
-主菱形每行有效区间由 `7EC4C8` 模板与 `7EC450` 行偏移决定。首次采集核对二者与解析式菱形（行宽 4,8,…,60,…,8,4 居中，共 900 像素）一致，否则整层不画（`reason=template`）。解包成 60×29 索引图，菱形外为 0。着色器 `Effect.x==5`（`TileDiamond`）按菱形覆盖决定透明，菱形内索引 0 也画；`Effect.w` 传帧在 atlas 中的左上角，用于算帧内坐标。extra 图为普通索引帧，索引 0 透明。
+主菱形每行有效区间由 `7EC4C8` 模板与 `7EC450` 行偏移决定。首次采集核对二者与解析式菱形（行宽 4,8,…,60,…,8,4 居中，共 900 像素）一致，否则整层不画（`reason=template`）。解包成 60×29 索引图，菱形外为 0。PS 对主菱形按解析式菱形覆盖决定是否 `discard`，菱形内索引 0 也画；extra 图索引 0 `discard`。
 
 ## 素材缓存
 
-`TerrainSnapshot::Frames` 是独立的 FrameCache（64 MiB、8192 个 piece），以 piece 地址为身份，每次采集按 piece 头、900 像素与 extra 内容的哈希核对；内容变化（换 theater、重载后复用地址）时作废重建。每次采集对每个地块类型、piece、LightConvert 只做一次可读性检查。资源超预算时清空缓存，后续采集重建。atlas 请求带该缓存作为 Storage。
+`TerrainSnapshot::Frames` 是独立的 FrameCache（64 MiB、8192 个 piece），以 piece 地址为身份，每次采集按 piece 头、900 像素与 extra 内容的哈希核对；内容变化（换 theater、重载后复用地址）时作废重建。每次采集对每个地块类型、piece、LightConvert 只做一次可读性检查。资源超预算时只清 piece 缓存，后续采集重建。atlas 以 `SourceKind::Mask`（只要索引，不带调色板）请求，Storage 为该缓存。
+
+颜色表（`TerrainBatch::ColorTables`）按内容去重，整张放进一张 256×1024 的 `R32_UINT` 纹理，一行一个 shade；按首次适配分配行，不再被快照引用的表按最近最少使用淘汰，任何增删都换代。retint 原地改表时内容哈希变化，生成新表。
 
 ## 绘制与失效
 
 GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地形裁剪到 ViewBounds，加 Composite 画布原点（`Tooltip::CanvasOrigin`）。显示条件为 `Game::IsActive`、`ScenarioStarted`、Tactical 存在。
+
+`TerrainPass.h`（只由 `GPURender.cpp` 包含）负责实例化绘制：
+
+- 每个裁剪后的地块图是一个 32 字节实例（`TerrainBatch::Instance`：画布位置、尺寸、atlas 纹素、帧内偏移、颜色表首行与 shade 数、q 与是否主菱形），放在 storage buffer 中。
+- 实例按原生顺序排列，按 atlas 页切成连续段，每段一次 `SDL_DrawGPUPrimitives`（每实例 6 个顶点）；同一次绘制内图元按提交顺序光栅化，顺序不变。正常只有一页，即一次绘制。
+- `TerrainTile.vs.hlsl` 用 `View.z + SV_VertexID/6` 取实例；起始实例由顶点 uniform 传入，不依赖 base instance（D3D12 的 `SV_InstanceID` 不含起始值）。
+- 在 `PresentPass::DrawSprites` 的底层回调中绘制：同一渲染通道、清屏之后、精灵之前；交换链与截图读回两次绘制都包含地形。
+- 实例内容与上次上传相同时（没有新 GScreen 帧的 present）不重新上传；颜色表换代时整张重新上传（SDL 的 cycle 不保留旧内容）。
 
 - `560BF0`（视频模式重建）与 `OnVideoModeSet` 清快照；`6BE1C0`（场景清理）与释放 GPU 资源时连同素材缓存一起清空。
 - 光照、retint、桥毁、地形变化不需要单独的失效 hook：每次采集重读格子与颜色表并按内容核对。
@@ -35,7 +45,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 
 ## 日志
 
-`PHOBOS_TERRAIN_TRACE=1` 时输出 `[TerrainGPU]`，最多 64 条，内容相同时不重复：`ready/reason`、ViewBounds、画布原点、TacticalPos、锚点与扫描行列数、遍历/合法/提交格数、extra 数、各类失败计数（`tile/image/variant/empty/palette/frame`）、本次 piece 与 palette 数、缓存规模，以及视口中心格的索引、子块、Level、变体、实际地块、piece、亮度与 shade。
+`PHOBOS_TERRAIN_TRACE=1` 时输出 `[TerrainGPU]`，最多 64 条，内容相同时不重复：`ready/reason`、ViewBounds、画布原点、TacticalPos、锚点与扫描行列数、遍历/合法/提交格数、extra 数、各类失败计数（`tile/image/variant/empty/palette/frame`）、本次 piece 数、颜色表数与占用行数、缓存规模，以及视口中心格的索引、子块、Level、变体、实际地块、piece、亮度与 shade。另每 600 次采集输出一条 `perf`：采集平均/最大耗时，以及期间每次 present 的地形绘制次数与实例数（最多 64 条）。
 
 ## 未支持与边界
 
@@ -44,7 +54,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - 弹坑（`480350` 尾部）、overlay、Terrain 对象、建筑底座、地块阴影不画（C5/阶段 D）。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
-- 每帧采集耗时未测量。
+- Debug 构建每帧采集约 1 ms（下表），尚未优化；曾出现一次 15 ms 的最大值，原因未查。present 侧的 CPU 耗时未单独测量。
 
 ## 验收（2026-10-30）
 
@@ -61,3 +71,23 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 测试地图注意：缺 `OverlayPack` 时 `native_terrain` 的 clear 格整片是逐格重复的覆盖物纹理（推断为每格默认带 0 号 overlay），补上全空 overlay 后一致。
 
 回归：`test_render_capture_regression.cmd` 通过（新增 `TerrainImageTests`），`test_gpu_capture.cmd` 通过；Debug 构建无警告。未跑场景 smoke。
+
+### C2.5 实例化（2026-10-30）
+
+DLL SHA256 `15a45d8a…6549`（HEAD `ad256099` + 本批未提交改动），同上受控地图与比较方法。
+
+| 后端/地图/分辨率 | 状态 | 结果 |
+| --- | --- | --- |
+| D3D12 GPUTERR 1024×768 | 开局、向上、右上斜向、向左滚屏 | 除光标外最大差 1 |
+| Vulkan GPUTERR 1024×768 | 开局、右上斜向、向左滚屏 | 同上 |
+| D3D12 GPUFLAT 800×600 | 开局、向上 | 同上；底栏与侧栏最大差 1 |
+| D3D12 原雪地图 1024×768 | 开局（未揭示） | 已揭示区内部一致，差异只在迷雾渐变带，与 C2 相同 |
+
+性能（Debug 构建，GPUTERR 1024×768，D3D12，同一操作序列，每窗口 600 次采集）：
+
+| | 每次 present 地形绘制次数 | 每帧实例数 | 采集平均耗时 | 采集最大耗时 |
+| --- | --- | --- | --- | --- |
+| C2（每图一次绘制） | 739–753 | — | 0.99–1.14 ms | 2.9–3.5 ms |
+| C2.5（实例化） | 1.0 | 739–773 | 0.98–1.11 ms | 3.3–4.1 ms（另一窗口 15.3 ms） |
+
+采集耗时不变（C2.5 不改采集）。回归新增 `TerrainBatchTests`；`test_gpu_capture.cmd` 通过；Debug 构建无警告。

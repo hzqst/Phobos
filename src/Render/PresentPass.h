@@ -3,6 +3,7 @@
 #include <span>
 #include <array>
 #include <cstdint>
+#include <functional>
 
 struct SDL_GPUDevice;
 struct SDL_Window;
@@ -10,6 +11,8 @@ struct SDL_GPUCommandBuffer;
 struct SDL_GPUTexture;
 struct SDL_GPUGraphicsPipeline;
 struct SDL_GPUSampler;
+struct SDL_GPURenderPass;
+struct SDL_GPUViewport;
 
 // Clears to black and draws either the diagnostic mirror or an independent cursor.
 // Both paths use the same logical-canvas scaling and integer color decoder.
@@ -24,12 +27,12 @@ public:
 		SDL_GPUTexture* Palette = nullptr;
 		std::array<std::uint32_t, 3> Shift {}, Bits {};
 		std::uint32_t Effect = 0, SolidColor = 0, Opacity256 = 256;
-		// Atlas position of the frame's top-left, X in the low 16 bits; TileDiamond only.
-		std::uint32_t FrameOrigin = 0;
 	};
+	// Draws into the pass after the clear and before the sprites; gets the letterbox viewport.
+	using Underlay = std::function<void(SDL_GPURenderPass*, const SDL_GPUViewport&)>;
 	static bool DrawSprites(SDL_GPUCommandBuffer* commands, SDL_GPUTexture* target,
 		unsigned int targetWidth, unsigned int targetHeight, int logicalWidth, int logicalHeight,
-		std::span<const Sprite> sprites);
+		std::span<const Sprite> sprites, const Underlay& underlay = {});
 	static bool Create(SDL_GPUDevice* pDevice, SDL_Window* pWindow);
 	static void Release(SDL_GPUDevice* pDevice);
 

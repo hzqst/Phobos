@@ -7,7 +7,7 @@
 #include "CursorSnapshot.h"
 #include "SidebarSnapshot.h"
 #include "CommandBarSnapshot.h"
-#include "TerrainSnapshot.h"
+#include "TerrainPass.h"
 #include "Tooltip.h"
 #include "FrameAtlas.h"
 #include "GPUReadback.h"
@@ -132,29 +132,6 @@ namespace
 			unsigned(placement.Effect), placement.SolidColor, placement.Opacity256});
 	}
 
-	FrameAtlas::Request TerrainRequest(const TerrainSnapshot::Placement& placement)
-	{
-		return {placement.ID, placement.Color, FrameAtlas::SourceKind::Indexed, &TerrainSnapshot::Frames};
-	}
-
-	// Terrain is clipped to ViewBounds on Tile, which the terrain pass copies to the same place on Composite.
-	void AppendTerrain(const TerrainSnapshot::Placement& placement, int originX, const RectangleStruct& clip)
-	{
-		const auto view = Atlas.Resolve(TerrainRequest(placement));
-		if (!view.Texture) return;
-		const auto left = std::max<std::int64_t>(placement.X, clip.X);
-		const auto top = std::max<std::int64_t>(placement.Y, clip.Y);
-		const auto right = std::min<std::int64_t>(std::int64_t(placement.X) + placement.Width, std::int64_t(clip.X) + clip.Width);
-		const auto bottom = std::min<std::int64_t>(std::int64_t(placement.Y) + placement.Height, std::int64_t(clip.Y) + clip.Height);
-		const auto canvasX = left + originX;
-		if (right <= left || bottom <= top || canvasX < INT_MIN || canvasX > INT_MAX) return;
-		const auto& values = placement.Color->Values;
-		const auto effect = placement.Diamond ? ShapeImage::Effect::TileDiamond : ShapeImage::Effect::Normal;
-		Sprites.push_back({view.Texture, int(canvasX), int(top), int(right - left), int(bottom - top),
-			view.X + int(left - placement.X), view.Y + int(top - placement.Y), true, view.Palette, values.Shift, values.Bits,
-			unsigned(effect), 0, 256, std::uint32_t(view.X) | std::uint32_t(view.Y) << 16});
-	}
-
 	FrameAtlas::BeginResult PrepareSidebar()
 	{
 		Sprites.clear();
@@ -168,7 +145,7 @@ namespace
 		std::vector<FrameAtlas::Request> requests;
 		if (terrainVisible)
 			for (const auto& placement : terrain.Placements)
-				requests.push_back(TerrainRequest(placement));
+				requests.push_back(TerrainPass::Request(placement));
 		if (barVisible)
 			for (const auto& placement : bar.Placements)
 				requests.push_back(SpriteRequest(placement, bar.Assets.data()));
@@ -183,10 +160,9 @@ namespace
 		}
 		const auto result = Atlas.Begin(ShapeFrameSource::Frames, requests);
 		if (result != FrameAtlas::BeginResult::Ready) return result;
-		// The terrain cache is the bottom of Composite.
-		if (terrainVisible)
-			for (const auto& placement : terrain.Placements)
-				AppendTerrain(placement, terrain.OriginX, terrain.Clip);
+		// The terrain cache is the bottom of Composite, drawn by TerrainPass before these sprites.
+		if (!TerrainPass::Prepare(Device, Atlas, terrainVisible ? &terrain : nullptr)) return FrameAtlas::BeginResult::Failed;
+		if (terrainVisible) TerrainSnapshot::RecordPresent(TerrainPass::DrawCount(), TerrainPass::InstanceCount());
 		// Composite and the sidebar do not overlap; the bar keeps Tab's order before the sidebar.
 		if (barVisible)
 			for (const auto& placement : bar.Placements)
@@ -596,6 +572,8 @@ void GPURender::Initialize(int width, int height)
 	if (!PresentPass::Create(Device, SecondaryWindow::Get()))
 		return Fail("Creating the present pipeline");
 	if (!MirrorMode && !Atlas.Create(Device, {})) return Fail("Creating the indexed frame atlas");
+	if (!MirrorMode && !TerrainPass::Create(Device, SDL_GetGPUSwapchainTextureFormat(Device, SecondaryWindow::Get())))
+		return Fail("Creating the terrain pipeline");
 	AtlasTraceCount = 0;
 	LastAtlasIndexBytes = LastAtlasPaletteBytes = 0;
 	LastAtlasDecoded = ShapeFrameSource::Frames.GetStats().Decoded;
@@ -628,6 +606,7 @@ void GPURender::ReleaseResources()
 		Readback.Reset(Device, "gpu_device_destroyed");
 		if (PendingCapture) { PendingCapture->Error = "gpu_device_destroyed"; PendingCapture.reset(); }
 		PresentPass::Release(Device);
+		TerrainPass::Release(Device);
 		SurfaceMirror::Release(Device);
 		ReleaseCursorResources();
 		Atlas.Release();
@@ -680,7 +659,7 @@ void GPURender::Present()
 	if (!pCommandBuffer)
 		return Fail("SDL_AcquireGPUCommandBuffer");
 
-	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || Atlas.HasUploads()))
+	if (MirrorMode ? SurfaceMirror::HasPendingUpload() : (CursorDirty || Atlas.HasUploads() || TerrainPass::HasUploads()))
 	{
 		SDL_GPUCopyPass* pCopyPass = SDL_BeginGPUCopyPass(pCommandBuffer);
 		if (!pCopyPass)
@@ -693,6 +672,13 @@ void GPURender::Present()
 		else
 		{
 			Atlas.EncodeUploads(pCopyPass);
+			if (!TerrainPass::Upload(Device, pCopyPass))
+			{
+				SDL_EndGPUCopyPass(pCopyPass);
+				SDL_CancelGPUCommandBuffer(pCommandBuffer);
+				Atlas.CancelBatch();
+				return Fail("Uploading the terrain instances");
+			}
 			if (CursorDirty) UploadCursor(pCopyPass);
 		}
 		SDL_EndGPUCopyPass(pCopyPass);
@@ -711,13 +697,17 @@ void GPURender::Present()
 
 	bool drawn = true;
 	bool captureDrawn = false;
+	const PresentPass::Underlay terrain = [pCommandBuffer](SDL_GPURenderPass* pass, const SDL_GPUViewport& viewport)
+	{
+		TerrainPass::Draw(pass, pCommandBuffer, viewport, DSurface::WindowBounds.Width, DSurface::WindowBounds.Height);
+	};
 	if (pSwapchainTexture)
 	{
 		drawn = MirrorMode
 			? PresentPass::Draw(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
 				SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
 			: PresentPass::DrawSprites(pCommandBuffer, pSwapchainTexture, swapchainWidth, swapchainHeight,
-				DSurface::WindowBounds.Width, DSurface::WindowBounds.Height, Sprites);
+				DSurface::WindowBounds.Width, DSurface::WindowBounds.Height, Sprites, terrain);
 		if (PendingCapture && mirrorFresh && !Readback.Busy() && Readback.Begin(Device, PendingCapture,
 			SDL_GetGPUSwapchainTextureFormat(Device, SecondaryWindow::Get()), int(swapchainWidth), int(swapchainHeight)))
 		{
@@ -733,7 +723,7 @@ void GPURender::Present()
 				? PresentPass::Draw(pCommandBuffer, Readback.Target(), swapchainWidth, swapchainHeight,
 					SurfaceMirror::GetTexture(), SurfaceMirror::GetWidth(), SurfaceMirror::GetHeight())
 				: PresentPass::DrawSprites(pCommandBuffer, Readback.Target(), swapchainWidth, swapchainHeight,
-					image.LogicalWidth, image.LogicalHeight, Sprites);
+					image.LogicalWidth, image.LogicalHeight, Sprites, terrain);
 			if (!captureDrawn) Readback.Reset(Device, "gpu_capture_draw_failed");
 		}
 	}

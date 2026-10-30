@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SidebarSnapshot.h"
+#include "TerrainBatch.h"
 #include "TerrainImage.h"
 #include <CellClass.h>
 #include <ConvertClass.h>
@@ -25,7 +26,8 @@ namespace TerrainSnapshot
 	// 4814F0: the fixed 4x4 table and the 8x8 table with its one-time setup flag.
 	constexpr std::uintptr_t VariantTable4 = 0x81CCA8, VariantTable8 = 0x89E620, VariantTable8Ready = 0x89E7C7;
 	constexpr std::uint32_t AlternateVariantFlag = 1u << 13;
-	constexpr size_t MaxPalettes = 160;
+	// Rows of the color table texture: 19 tables of 53 shades, or 37 of 27.
+	constexpr std::uint32_t TableRows = 1024;
 	static_assert(offsetof(ObjectTypeClass, Image) == 0xA4);
 	static_assert(offsetof(IsometricTileTypeClass, unk_2BC) == 0x2BC);
 	static_assert(offsetof(IsometricTileTypeClass, unk_2F0) == 0x2F0);
@@ -55,8 +57,10 @@ namespace TerrainSnapshot
 	struct Placement
 	{
 		FrameCache::FrameID ID;
-		PaletteCache::Handle Color;
+		TerrainBatch::ColorTables::Handle Table;
 		int X, Y, Width, Height;
+		// 547CF0's row of the alpha lighting remap; the shader combines it with the ABuffer value.
+		int LightRow;
 		bool Diamond;
 	};
 	struct Frame
@@ -69,12 +73,20 @@ namespace TerrainSnapshot
 	};
 	inline Frame Current;
 	inline FrameCache::Cache Frames({64 * 1024 * 1024, 16384, 8192});
-	inline PaletteCache::Cache Colors(MaxPalettes);
+	inline TerrainBatch::ColorTables Tables(TableRows);
 	inline std::unordered_map<std::uintptr_t, std::uint64_t> PieceHashes;
 	// 0: not checked yet, 1: the template is the analytic diamond, 2: it is not.
 	inline int TemplateState = 0;
 	inline bool Trace = false;
 	inline unsigned TraceCount = 0;
+	// Capture cost and what the presents drew, logged every PerfWindow captures.
+	constexpr unsigned PerfWindow = 600;
+	struct Perf
+	{
+		std::uint64_t Captures = 0, Ticks = 0, MaxTicks = 0, Presents = 0, Draws = 0, Instances = 0;
+		unsigned Lines = 0;
+	};
+	inline Perf Stats;
 	inline std::uint64_t LastTraceHash = 0;
 
 	inline void Invalidate()
@@ -85,11 +97,17 @@ namespace TerrainSnapshot
 	}
 
 	// Pieces are keyed by their address and checked by content on every capture.
+	inline void ClearPieces()
+	{
+		Frames.Clear();
+		PieceHashes.clear();
+	}
+
 	inline void Clear()
 	{
 		Invalidate();
-		Frames.Clear();
-		PieceHashes.clear();
+		ClearPieces();
+		Tables.Clear();
 	}
 
 	inline void InitializeTrace()
@@ -163,8 +181,9 @@ namespace TerrainSnapshot
 				{0, 0, hasExtra ? piece->ExtraWidth : 0, hasExtra ? piece->ExtraHeight : 0}}});
 			if (!resource)
 			{
-				// Over budget: start again from the pieces later captures still use.
-				Clear();
+				// Over budget: start again from the pieces later captures still use. Pieces placed
+				// earlier in this capture no longer resolve and are skipped for one frame.
+				ClearPieces();
 				return {{}, {}, "budget"};
 			}
 		}
@@ -197,16 +216,12 @@ namespace TerrainSnapshot
 			&& convert->ShadeCount > 0 && convert->ShadeCount <= 256;
 	}
 
-	inline PaletteCache::Handle AcquireColor(const LightConvertClass* convert, int shade)
+	// The whole FullColorData of a LightConvert: every shade row, so the shader can pick any.
+	inline TerrainBatch::ColorTables::Handle AcquireTable(const LightConvertClass* convert)
 	{
-		const auto* row = static_cast<const std::uint16_t*>(convert->FullColorData) + size_t(shade) * 256;
-		if (!CursorSnapshot::Readable(row, 512)) return {};
-		PaletteCache::Data data;
-		std::memcpy(data.Colors.data(), row, sizeof(data.Colors));
-		const auto& pack = Unsorted::ColorPackData;
-		data.Shift = {unsigned(pack._R_SHL), unsigned(pack._G_SHL), unsigned(pack._B_SHL)};
-		data.Bits = {unsigned(8 - pack._R_SHR), unsigned(8 - pack._G_SHR), unsigned(8 - pack._B_SHR)};
-		return Colors.Acquire(data);
+		const auto* colors = static_cast<const std::uint16_t*>(convert->FullColorData);
+		if (!CursorSnapshot::Readable(colors, size_t(convert->ShadeCount) * 256 * sizeof(std::uint16_t))) return {};
+		return Tables.Acquire(colors, std::uint32_t(convert->ShadeCount));
 	}
 
 	inline bool Intersects(const RectangleStruct& clip, std::int64_t x, std::int64_t y, std::int64_t width, std::int64_t height)
@@ -215,8 +230,49 @@ namespace TerrainSnapshot
 			&& y < std::int64_t(clip.Y) + clip.Height && y + height > clip.Y;
 	}
 
+	inline void TracePerf()
+	{
+		if (!Trace || Stats.Lines >= 64 || Stats.Captures < PerfWindow) return;
+		LARGE_INTEGER frequency;
+		QueryPerformanceFrequency(&frequency);
+		const auto micros = [&](std::uint64_t ticks) { return double(ticks) * 1e6 / double(frequency.QuadPart); };
+		++Stats.Lines;
+		Debug::Log("[TerrainGPU] perf captures=%llu captureAvgUs=%.1f captureMaxUs=%.1f presents=%llu drawsPerPresent=%.1f instancesPerPresent=%.1f\n",
+			Stats.Captures, micros(Stats.Ticks) / double(Stats.Captures), micros(Stats.MaxTicks), Stats.Presents,
+			Stats.Presents ? double(Stats.Draws) / double(Stats.Presents) : 0.0,
+			Stats.Presents ? double(Stats.Instances) / double(Stats.Presents) : 0.0);
+		const auto lines = Stats.Lines;
+		Stats = {};
+		Stats.Lines = lines;
+	}
+
+	// draws: GPU draw calls the terrain took in one present; instances: tile images drawn.
+	inline void RecordPresent(std::uint64_t draws, std::uint64_t instances)
+	{
+		++Stats.Presents;
+		Stats.Draws += draws;
+		Stats.Instances += instances;
+	}
+
+	struct CaptureTimer
+	{
+		LARGE_INTEGER Start;
+		CaptureTimer() { QueryPerformanceCounter(&Start); }
+		~CaptureTimer()
+		{
+			LARGE_INTEGER end;
+			QueryPerformanceCounter(&end);
+			const auto ticks = std::uint64_t(end.QuadPart - Start.QuadPart);
+			++Stats.Captures;
+			Stats.Ticks += ticks;
+			Stats.MaxTicks = std::max(Stats.MaxTicks, ticks);
+			TracePerf();
+		}
+	};
+
 	inline void CaptureAfterDraw()
 	{
+		const CaptureTimer timer;
 		Current.Visible = false;
 		Current.Placements.clear();
 		const char* reason = nullptr;
@@ -235,7 +291,7 @@ namespace TerrainSnapshot
 		std::int64_t sampleDistance = INT64_MAX;
 		Cell anchor {};
 		int rows = 0, columns = 0;
-		size_t pieces = 0, palettes = 0;
+		size_t pieces = 0, tables = 0;
 		if (!reason)
 		{
 			const auto& sidebar = DSurface::SidebarBounds;
@@ -253,9 +309,8 @@ namespace TerrainSnapshot
 			// Each type, piece and color table is checked once per capture.
 			std::unordered_map<const IsometricTileTypeClass*, const TileImageHeader*> images;
 			std::unordered_map<const Piece*, bool> readablePieces;
-			std::unordered_map<const LightConvertClass*, bool> converts;
+			std::unordered_map<const LightConvertClass*, TerrainBatch::ColorTables::Handle> converts;
 			std::unordered_map<const Piece*, PieceFrames> captured;
-			std::vector<std::pair<std::pair<const LightConvertClass*, int>, PaletteCache::Handle>> colors;
 			const auto imageOf = [&](const IsometricTileTypeClass* type)
 			{
 				const auto [it, inserted] = images.try_emplace(type);
@@ -326,18 +381,11 @@ namespace TerrainSnapshot
 					if (!piece) { ++count.Empty; continue; }
 					if (!readable(piece)) { ++count.Image; continue; }
 					const auto* convert = cell->LightConvert;
-					const auto [known, inserted] = converts.try_emplace(convert);
-					if (inserted) known->second = ValidConvert(convert);
-					if (!known->second) { ++count.Palette; continue; }
-					const int shade = ShadeRow(convert->ShadeCount, LightRow(std::int16_t(cell->Intensity_Terrain)), DefaultAlpha);
-					const auto key = std::make_pair(convert, shade);
-					auto color = std::find_if(colors.begin(), colors.end(), [&](const auto& pair) { return pair.first == key; });
-					if (color == colors.end())
-					{
-						colors.push_back({key, AcquireColor(convert, shade)});
-						color = colors.end() - 1;
-					}
-					if (!color->second) { ++count.Palette; continue; }
+					const auto [table, inserted] = converts.try_emplace(convert);
+					if (inserted && ValidConvert(convert)) table->second = AcquireTable(convert);
+					if (!table->second) { ++count.Palette; continue; }
+					const int lightRow = LightRow(std::int16_t(cell->Intensity_Terrain));
+					const int shade = ShadeRow(convert->ShadeCount, lightRow, DefaultAlpha);
 					auto frames = captured.find(piece);
 					if (frames == captured.end()) frames = captured.emplace(piece, AcquirePiece(piece)).first;
 					if (frames->second.Reason) { ++count.Frame; continue; }
@@ -351,18 +399,18 @@ namespace TerrainSnapshot
 						sample = {cellX, cellY, cell->IsoTileTypeIndex, typeIndex, height, cell->Level, variants, variant,
 							drawn->ArrayIndex, std::int16_t(cell->Intensity_Terrain), convert->ShadeCount, shade, piece};
 					}
-					Current.Placements.push_back({frames->second.Main, color->second, int(position.X), int(position.Y), TileWidth, DiamondRows, true});
+					Current.Placements.push_back({frames->second.Main, table->second, int(position.X), int(position.Y), TileWidth, DiamondRows, lightRow, true});
 					if (frames->second.Extra)
 					{
 						const auto x = position.X + std::int64_t(piece->ExtraX) - piece->X;
 						const auto y = position.Y + std::int64_t(piece->ExtraY) - piece->Y;
 						if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX) continue;
 						++count.Extras;
-						Current.Placements.push_back({frames->second.Extra, color->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight, false});
+						Current.Placements.push_back({frames->second.Extra, table->second, int(x), int(y), piece->ExtraWidth, piece->ExtraHeight, lightRow, false});
 					}
 				}
 			pieces = captured.size();
-			palettes = colors.size();
+			tables = Tables.Count();
 			Current.Visible = true;
 			reason = "ready";
 		}
@@ -370,7 +418,7 @@ namespace TerrainSnapshot
 		const int state[] {Current.Visible, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,
-			count.Palette, count.Frame, int(pieces), int(palettes), sample.X, sample.Y};
+			count.Palette, count.Frame, int(pieces), int(tables), sample.X, sample.Y};
 		auto hash = SidebarSnapshot::Hash(state, sizeof(state));
 		hash = SidebarSnapshot::Hash(&reason, sizeof(reason), hash);
 		if (hash == LastTraceHash) return;
@@ -378,12 +426,12 @@ namespace TerrainSnapshot
 		++TraceCount;
 		const auto& stats = Frames.GetStats();
 		Debug::Log("[TerrainGPU] sample=%u ready=%d reason=%s view=%d,%d,%d,%d origin=%d tactical=%d,%d anchor=%d,%d scan=%dx%d+%d "
-			"visited=%d legal=%d drawn=%d extras=%d tile=%d image=%d variant=%d empty=%d palette=%d frame=%d pieces=%zu palettes=%zu "
+			"visited=%d legal=%d drawn=%d extras=%d tile=%d image=%d variant=%d empty=%d palette=%d frame=%d pieces=%zu tables=%zu rows=%u "
 			"cache=%zu/%zu bytes=%zu center=%d,%d:index=%d:type=%d:sub=%d:level=%d:variants=%d:variant=%d:drawn=%d:piece=%p:intensity=%d:shade=%d/%d\n",
 			TraceCount, Current.Visible, reason, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns, ScanMargin,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,
-			count.Palette, count.Frame, pieces, palettes, stats.Resources, stats.Frames, stats.IndexBytes, sample.X, sample.Y, sample.Index,
+			count.Palette, count.Frame, pieces, tables, Tables.UsedRows(), stats.Resources, stats.Frames, stats.IndexBytes, sample.X, sample.Y, sample.Index,
 			sample.Type, sample.Height, sample.Level, sample.Variants, sample.Variant, sample.Drawn, sample.Piece, sample.Intensity,
 			sample.Shade, sample.Shades);
 	}

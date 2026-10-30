@@ -344,6 +344,12 @@
     <PhobosShader Include="src\Render\Shaders\Fullscreen.vs.hlsl">
       <Profile>vs_6_0</Profile>
     </PhobosShader>
+    <PhobosShader Include="src\Render\Shaders\TerrainTile.vs.hlsl">
+      <Profile>vs_6_0</Profile>
+    </PhobosShader>
+    <PhobosShader Include="src\Render\Shaders\TerrainTile.ps.hlsl">
+      <Profile>ps_6_0</Profile>
+    </PhobosShader>
   </ItemGroup>
   <!-- Header files -->
   <ItemGroup>
