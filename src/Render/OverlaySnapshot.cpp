@@ -1,6 +1,7 @@
 #include "OverlaySnapshot.h"
 #include "TerrainPass.h"
 
+#include <Ext/Rules/Body.h>
 #include <Utilities/Debug.h>
 
 #include <array>
@@ -34,12 +35,15 @@ namespace OverlaySnapshot
 			int ZShapeX = 0, ZShapeY = 0;
 			// The frame 47FB90 bounds the cell by, when it differs from the drawn one.
 			int BoundsFrame = -1;
+			// Whether 6D6D10's test of 47FB90's rectangle applies; 6D97D0 tests the object's own one
+			// and 6D7C00 none.
+			bool Bounded = true;
 		};
 
 		struct Capture
 		{
 			const RectangleStruct& Clip;
-			int TacticalX, TacticalY, ViewY;
+			int TacticalX, TacticalY, ViewX, ViewY;
 			// The ZBuffer's MaxValue and Bounds.Y, and how many of FlatZShape's first bytes are 0.
 			int MaxValue, BoundsY, FlatZeros;
 			std::unordered_map<const ConvertClass*, TerrainBatch::ColorTables::Handle> Tables;
@@ -127,7 +131,7 @@ namespace OverlaySnapshot
 
 			// 4AED70 with flag 200 for one call: the frame centered on center, cut by its Z shape, then
 			// clipped and given its row depths by 4373B0 or 437A10.
-			void Place(const CellClass* cell, int index, const Call& call, Point center, bool shadow)
+			void Place(int cellX, int cellY, Layer source, int index, const Call& call, Point center, bool shadow)
 			{
 				auto& count = Current.Count;
 				// 4AED70 and 47FB90 draw nothing for a type without an image.
@@ -137,7 +141,7 @@ namespace OverlaySnapshot
 				const auto shape = AcquireShape(call.Image, call.Frame);
 				if (!shape.Ready)
 				{
-					if (!count.Frame++) { FirstFailure = {index, call.Frame, FrameCount(call.Image), 0}; }
+					if (!count.Frame++) { FirstFailure = {index, call.Frame, FrameCount(call.Image), int(source)}; }
 					return;
 				}
 				// 6D6D10 draws only where 47FB90's rectangle meets the clip.
@@ -146,7 +150,7 @@ namespace OverlaySnapshot
 				if (!bounds.Ready) { ++count.Frame; return; }
 				if (!bounds.ID || !shape.ID) { ++count.Empty; return; }
 				const auto boundsAt = OverlayImage::FrameOrigin(center, bounds.CanvasWidth, bounds.CanvasHeight, bounds.Frame.Left, bounds.Frame.Top);
-				if (!TerrainSnapshot::Intersects(Clip, boundsAt.X, boundsAt.Y, bounds.Frame.Width, bounds.Frame.Height)) { ++count.Outside; return; }
+				if (call.Bounded && !TerrainSnapshot::Intersects(Clip, boundsAt.X, boundsAt.Y, bounds.Frame.Width, bounds.Frame.Height)) { ++count.Outside; return; }
 				const auto at = OverlayImage::FrameOrigin(center, shape.CanvasWidth, shape.CanvasHeight, shape.Frame.Left, shape.Frame.Top);
 				if (shape.Frame.Width <= 0 || shape.Frame.Height <= 0) { ++count.Empty; return; }
 				if (!Representable({at.X - Clip.X, at.Y - Clip.Y})) { ++count.Outside; return; }
@@ -190,9 +194,10 @@ namespace OverlaySnapshot
 				if (zshaped && !ReadZBytes(shape, cut, draw)) { ++count.ZShape; return; }
 				draw.ZAdjust = call.ZAdjust;
 				draw.GradientIndex = call.Gradient;
-				draw.CellX = cell->MapCoords.X;
-				draw.CellY = cell->MapCoords.Y;
-				draw.Overlay = index;
+				draw.CellX = cellX;
+				draw.CellY = cellY;
+				draw.Source = source;
+				draw.Index = index;
 				if (compressed) ++count.Compressed;
 				Current.Draws.push_back(std::move(draw));
 				++(shadow ? count.Shadows : count.Bodies);
@@ -282,7 +287,7 @@ namespace OverlaySnapshot
 					if (type->Crate) call.Frame = 0;
 				}
 				if (!call.Convert) { ++count.Palette; return; }
-				Place(cell, index, call, center, false);
+				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Overlay, index, call, center, false);
 			}
 
 			// 47F510: the second half of the type's own frames, darkening what lies below.
@@ -307,7 +312,107 @@ namespace OverlaySnapshot
 				call.Brightness = FullBrightness;
 				call.ZAdjust = BodyDepth - TerrainImage::LevelHeight * level;
 				if (!call.Convert) { ++count.Palette; return; }
-				Place(cell, index, call, center, true);
+				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Overlay, index, call, center, true);
+			}
+
+			// 6D97D0, 71CC50 and 71C1B0 (with Phobos' 71C1FE and 71C2BC) for an object of the ground
+			// layer: the body, then its own shadow.
+			void Terrain(TerrainClass* terrain)
+			{
+				auto& count = Current.Count;
+				const auto* type = terrain->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(TerrainTypeClass))) { ++count.Frame; return; }
+				++count.Terrains;
+				// An animated or crumbling object draws on Composite (6D8DB0).
+				if (type->IsAnimated || terrain->IsCrumbling) { ++count.Dynamic; return; }
+				if (!terrain->IsOnMap || terrain->InLimbo) return;
+				// 6D97D0 and 71CC50: the object's rectangle (71D160) must meet the clip.
+				RectangleStruct dimensions {};
+				terrain->GetRenderDimensions(&dimensions);
+				const std::int64_t left = std::int64_t(dimensions.X) + ViewX, top = std::int64_t(dimensions.Y) + ViewY;
+				if (left >= std::int64_t(Clip.X) + Clip.Width || top >= std::int64_t(Clip.Y) + Clip.Height
+					|| left + dimensions.Width <= Clip.X || top + dimensions.Height <= Clip.Y) { ++count.TerrainOutside; return; }
+				auto* cell = terrain->GetCell();
+				if (!cell || !cell->LightConvert) { ++count.Palette; return; }
+				const auto coords = terrain->GetRenderCoords();
+				Point2D client {};
+				reinterpret_cast<bool(__thiscall*)(const TacticalClass*, const CoordStruct*, Point2D*)>(CoordsToClient)(TacticalClass::Instance, &coords, &client);
+				const int height = reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(terrain->GetZ());
+				const auto* ext = TerrainTypeExt::TryFetch(type);
+				const bool damaged = ext && ext->HasDamagedFrames
+					&& terrain->GetHealthPercentage() <= RulesExt::Global()->ConditionYellow_Terrain.Get(RulesClass::Instance->ConditionYellow);
+				if (damaged) ++count.Damaged;
+				// The clip is ViewBounds, which 71CC50's client position is relative to.
+				Point center {std::int64_t(client.X) + ViewX, std::int64_t(client.Y) + ViewY};
+				Call call;
+				call.Image = type->Image;
+				call.Frame = TerrainObjectImage::StaticFrame(damaged);
+				call.Convert = cell->LightConvert;
+				call.Brightness = std::int16_t(cell->Intensity_Terrain);
+				call.ZAdjust = TerrainObjectImage::Depth(height, false);
+				call.Gradient = int(ZGradient::Deg90);
+				call.Bounded = false;
+				if (type->SpawnsTiberium)
+				{
+					call.Convert = FileSystem::GRFTXT_TIBERIUM_PAL;
+					call.Brightness = std::int16_t(cell->Intensity_Normal);
+					center.Y -= TerrainObjectImage::TiberiumLift;
+				}
+				if (ext && ext->Palette)
+				{
+					// 71C2BC: the color scheme of the cell's wall owner, else of the player.
+					const int owner = cell->WallOwnerIndex;
+					const auto* house = owner >= 0 && owner < HouseClass::Array.Count ? HouseClass::Array.Items[owner] : HouseClass::CurrentPlayer;
+					const int scheme = house ? house->ColorSchemeIndex : -1;
+					call.Convert = scheme >= 0 && scheme < ext->Palette->Count && ext->Palette->Items[scheme] ? ext->Palette->Items[scheme]->LightConvert : nullptr;
+					call.Brightness = cell->Intensity_Normal;
+				}
+				const int index = type->ArrayIndex;
+				if (!call.Convert) ++count.Palette;
+				else Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, false);
+				if (!Game::bDrawShadow) return;
+				const int frames = FrameCount(call.Image);
+				if (frames == UnloadedShape) { ++count.Unloaded; return; }
+				if (frames < 0) { ++count.Frame; return; }
+				// The shadow keeps the cell's own palette and the Tiberium lift.
+				call.Frame = TerrainObjectImage::ShadowFrame(call.Frame, std::int16_t(frames));
+				call.Convert = cell->LightConvert;
+				call.Brightness = FullBrightness;
+				call.ZAdjust = TerrainObjectImage::Depth(height, true);
+				call.Gradient = int(ZGradient::Ground);
+				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, true);
+			}
+
+			// 4802A0 and 547230 for a cell of 6D7C00's scan: the C_SHADOW.SHP frame its tile casts.
+			void Cliff(const CellClass* cell, int cellX, int cellY)
+			{
+				auto& count = Current.Count;
+				const auto& types = IsometricTileTypeClass::Array;
+				const bool clear = cell->IsoTileTypeIndex == TerrainSnapshot::ClearTileSlot;
+				const int typeIndex = clear ? *reinterpret_cast<const int*>(TerrainSnapshot::ClearTile) : cell->IsoTileTypeIndex;
+				if (typeIndex < 0 || typeIndex >= types.Count) return;
+				const auto* tile = types.Items[typeIndex];
+				if (!CursorSnapshot::Readable(tile, sizeof(IsometricTileTypeClass))) { ++count.Frame; return; }
+				if (!tile->ShadowCaster) return;
+				++count.Casters;
+				const auto record = TerrainObjectImage::SelectCliffShadow(tile->ArrayIndex, clear ? 0 : std::uint8_t(cell->Height),
+					*reinterpret_cast<const int*>(CliffSpecialBase), *reinterpret_cast<const int*>(CliffFallbackBase),
+					reinterpret_cast<const std::int32_t*>(CliffSpecialRecords), reinterpret_cast<const std::int32_t*>(CliffRangeStarts),
+					reinterpret_cast<const std::int32_t*>(CliffRecords));
+				if (!record.Drawn) return;
+				const int level = std::int8_t(cell->Level);
+				const auto tilePosition = TerrainImage::TilePosition(cellX, cellY, level, TacticalX, TacticalY, ViewY);
+				Call call;
+				call.Image = *reinterpret_cast<SHPStruct* const*>(CliffShadows);
+				call.Frame = record.Frame;
+				// The ISO palette's convert, not the cell's.
+				call.Convert = LightConvertClass::Array.Count > 0 ? LightConvertClass::Array.Items[0] : nullptr;
+				call.Brightness = FullBrightness;
+				call.ZAdjust = TerrainObjectImage::CliffShadowDepth(level);
+				call.Gradient = int(ZGradient::Ground);
+				call.Bounded = false;
+				if (!call.Convert) { ++count.Palette; return; }
+				Place(cellX, cellY, Layer::Cliff, tile->ArrayIndex, call, TerrainObjectImage::CliffCenter(tilePosition, record.X, record.Y, ViewX), true);
 			}
 		};
 
@@ -451,30 +556,33 @@ namespace OverlaySnapshot
 			return check;
 		}
 
+		char LayerLetter(Layer layer) { return layer == Layer::Overlay ? 'o' : layer == Layer::Terrain ? 't' : 'c'; }
+
 		void Trace()
 		{
 			const auto& count = Current.Count;
 			++TraceCount;
 			Debug::Log("[TerrainGPU] overlay sample=%u ready=%d visited=%d legal=%d overlays=%d bodies=%d shadows=%d noBody=%d outside=%d empty=%d "
-				"rubble=%d tiberium=%d palette=%d frame=%d zshape=%d ramps=%d bridges=%d walls=%d compressed=%d noImage=%d unloaded=%d slopes=%d unsupported=%d failure=%d:%d/%d gpu=%zu/%zu\n",
+				"rubble=%d tiberium=%d palette=%d frame=%d zshape=%d ramps=%d bridges=%d walls=%d compressed=%d noImage=%d unloaded=%d slopes=%d unsupported=%d failure=%d:%d/%d@%d "
+				"terrains=%d dynamic=%d terrainOutside=%d damaged=%d casters=%d gpu=%zu/%zu\n",
 				TraceCount, Current.Visible, count.Visited, count.Legal, count.Overlays, count.Bodies, count.Shadows, count.NoBody, count.Outside,
 				count.Empty, count.Rubble, count.Tiberium, count.Palette, count.Frame, count.ZShape, count.Ramps, count.Bridges, count.Walls, count.Compressed, count.NoImage, count.Unloaded, count.Slopes, count.Unsupported, FirstFailure[0], FirstFailure[1], FirstFailure[2],
-				TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
+				FirstFailure[3], count.Terrains, count.Dynamic, count.TerrainOutside, count.Damaged, count.Casters, TerrainPass::ShapeCount(), TerrainPass::SkippedShapes());
 			if (!Current.Visible) return;
-			// Each overlay type drawn: bodies, shadows, RLE frames and Z shapes.
-			std::map<int, std::array<int, 4>> types;
+			// Each overlay (o), Terrain (t) and cliff tile (c) type drawn: bodies, shadows, RLE frames and Z shapes.
+			std::map<std::pair<Layer, int>, std::array<int, 4>> types;
 			for (const auto& draw : Current.Draws)
 			{
-				auto& type = types[draw.Overlay];
+				auto& type = types[{draw.Source, draw.Index}];
 				++type[draw.Shadow ? 1 : 0];
 				type[2] += draw.Compressed;
 				type[3] += draw.ZShaped;
 			}
 			std::string list;
-			for (const auto& [index, type] : types)
+			for (const auto& [key, type] : types)
 			{
 				char item[48];
-				std::snprintf(item, sizeof(item), " %d:%d/%d/%d/%d", index, type[0], type[1], type[2], type[3]);
+				std::snprintf(item, sizeof(item), " %c%d:%d/%d/%d/%d", LayerLetter(key.first), key.second, type[0], type[1], type[2], type[3]);
 				list += item;
 			}
 			Debug::Log("[TerrainGPU] overlaytypes sample=%u%s\n", TraceCount, list.c_str());
@@ -486,8 +594,8 @@ namespace OverlaySnapshot
 				else
 				{
 					const auto& draw = Current.Draws[size_t(owner)];
-					std::snprintf(text, sizeof(text), "%s:%d,%d:overlay=%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d", draw.Shadow ? "shadow" : "body",
-						draw.CellX, draw.CellY, draw.Overlay, draw.ZAdjust, draw.GradientIndex, draw.Compressed, draw.ZShaped, draw.X, draw.Y, draw.Width, draw.Height,
+					std::snprintf(text, sizeof(text), "%s:%d,%d:%c%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d", draw.Shadow ? "shadow" : "body",
+						draw.CellX, draw.CellY, LayerLetter(draw.Source), draw.Index, draw.ZAdjust, draw.GradientIndex, draw.Compressed, draw.ZShaped, draw.X, draw.Y, draw.Width, draw.Height,
 						draw.FrameX, draw.FrameY);
 				}
 				return text;
@@ -526,7 +634,7 @@ namespace OverlaySnapshot
 			const auto* flat = reinterpret_cast<const std::uint8_t*>(FlatZShape);
 			int zeros = 0;
 			while (zeros < int(FlatZShapeChecked) && !flat[zeros]) ++zeros;
-			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.Y, ZBuffer::Instance->MaxValue, ZBuffer::Instance->Bounds.Y,
+			Capture capture {clip, tactical->TacticalPos.X, tactical->TacticalPos.Y, view.X, view.Y, ZBuffer::Instance->MaxValue, ZBuffer::Instance->Bounds.Y,
 				zeros, {}};
 			const auto anchor = TerrainImage::ScanAnchor(capture.TacticalX + clip.X - view.X, capture.TacticalY + clip.Y - view.Y);
 			const int rows = OverlayImage::ScanRows(clip.Height), columns = OverlayImage::ScanColumns(clip.Width);
@@ -555,6 +663,25 @@ namespace OverlaySnapshot
 						if (pass) capture.Shadow(cell, index, type, tile);
 						else capture.Body(cell, index, type, tile);
 					}
+			// 6D97D0: the static Terrain objects of the ground layer, last first.
+			const auto& ground = MapClass::ObjectsInLayers[GroundLayer];
+			for (int i = ground.Count - 1; i >= 0; --i)
+			{
+				auto* object = ground.Items[i];
+				if (!CursorSnapshot::Readable(object, sizeof(TerrainClass)) || object->WhatAmI() != AbstractType::Terrain || !object->IsAlive) continue;
+				capture.Terrain(static_cast<TerrainClass*>(object));
+			}
+			// 6D7C00: the cliff shadows, rows from far to near.
+			const int cliffRows = TerrainObjectImage::CliffRows(clip.Height), cliffColumns = TerrainObjectImage::CliffColumns(clip.Width);
+			for (int r = -margin; r < cliffRows + margin; ++r)
+				for (int c = -margin; c < cliffColumns + margin; ++c)
+				{
+					const auto [cellX, cellY] = TerrainObjectImage::CliffCell(anchor, r, c);
+					if (cellX < INT16_MIN || cellX > INT16_MAX || cellY < INT16_MIN || cellY > INT16_MAX) continue;
+					const CellStruct coords {std::int16_t(cellX), std::int16_t(cellY)};
+					if (!MapClass::Instance.CoordinatesLegal(coords)) continue;
+					if (const auto* cell = MapClass::Instance.TryGetCellAt(coords)) capture.Cliff(cell, cellX, cellY);
+				}
 			Current.Visible = true;
 		}
 		// The native Tile keeps what scrolling redrew in strips, and a Z-shaped draw's depth depends

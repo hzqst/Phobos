@@ -2,21 +2,26 @@
 
 #include "OverlayImage.h"
 #include "ShapeDepth.h"
+#include "TerrainObjectImage.h"
 #include "TerrainSnapshot.h"
 #include <ColorScheme.h>
 #include <FileSystem.h>
 #include <HouseClass.h>
 #include <OverlayTypeClass.h>
+#include <TerrainClass.h>
 #include <TiberiumClass.h>
 #include <Ext/OverlayType/Body.h>
+#include <Ext/TerrainType/Body.h>
 #include <Ext/Tiberium/Body.h>
 
 // The overlay layer of the tactical Tile pass (gamemd-reverse #18): 6D6D10 draws every overlay
 // body (47F6A0), then every overlay shadow (47F510), each through 4AED70 with a Z test, after the
 // TMP tiles and smudges TerrainSnapshot captures. Captured in the same 4F4583 callback for a full
-// redraw of the visible cells. TerrainPass draws them after the tiles (C5.2c); the trace replays the
-// captured tiles, smudges and overlays in software and compares the result with the native Tile and
-// ZBuffer (C5.2b). Rubble and the deferred cells of 6D3470 are absent.
+// redraw of the visible cells. The static Terrain objects with their own shadows (6D97D0, 71C1B0)
+// and the cliff shadows (6D7C00, 547230) of gamemd-reverse #19 follow in the same list, in the native
+// order (C6). TerrainPass draws the list after the tiles (C5.2c); the trace replays the captured
+// tiles, smudges and draws in software and compares the result with the native Tile and ZBuffer
+// (C5.2b). Rubble and the deferred records of 6D3470 are absent.
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -34,6 +39,18 @@ namespace OverlaySnapshot
 	constexpr int VeinsZShapeX = 30, VeinsZShapeY = -2;
 	// The SHP frame flag of an RLE frame.
 	constexpr unsigned CompressedFrame = 2;
+	// 545150's C_SHADOW.SHP; 547230's special range starts, their records, the starts of the regular
+	// ranges and their records.
+	constexpr std::uintptr_t CliffShadows = 0xABC554, CliffSpecialBase = 0xABC1F8, CliffFallbackBase = 0xAA1098,
+		CliffSpecialRecords = 0xABC210, CliffRangeStarts = 0xAA102C, CliffRecords = 0xABC2D0;
+	// 6D20E0 (screen height of a Z) and 6D2140 (client position of coordinates), which 71C1B0 and
+	// 71CC50 call.
+	constexpr std::uintptr_t AdjustForZ = 0x6D20E0, CoordsToClient = 0x6D2140;
+	// 6D97D0 draws the objects of this layer.
+	constexpr int GroundLayer = 2;
+
+	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0) or a cliff (6D7C00).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -55,13 +72,17 @@ namespace OverlaySnapshot
 		// Width x Height.
 		bool ZShaped = false;
 		std::vector<std::uint8_t> ZBytes;
-		// For the trace.
-		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Overlay = -1;
+		// For the trace: the layer, and the overlay, Terrain type or tile type index.
+		Layer Source = Layer::Overlay;
+		int ZAdjust = 0, GradientIndex = 0, CellX = 0, CellY = 0, Index = -1;
 	};
 	struct Counters
 	{
 		int Visited = 0, Legal = 0, Overlays = 0, Bodies = 0, Shadows = 0, NoBody = 0, Outside = 0, Empty = 0, Rubble = 0,
 			Tiberium = 0, Palette = 0, Frame = 0, ZShape = 0, Ramps = 0, Bridges = 0, Walls = 0, Compressed = 0, NoImage = 0, Unloaded = 0, Slopes = 0, Unsupported = 0;
+		// Ground layer objects that are Terrain, those drawn later on Composite, those off the clip,
+		// the static ones drawn with their damaged frame, and the cells whose tile casts a cliff shadow.
+		int Terrains = 0, Dynamic = 0, TerrainOutside = 0, Damaged = 0, Casters = 0;
 	};
 	struct Frame
 	{
