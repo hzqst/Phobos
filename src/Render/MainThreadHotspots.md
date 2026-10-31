@@ -103,6 +103,32 @@ GPURender::OnToolTipsDrawn
 2. 对正常路径继续拆出原生最终软件合成与 scratch 工作；GPU 资源复用命中后，验证可安全跳过这些工作。
 3. 优化后重跑相同基线及负对照，再扩展到真实千单位同时运动。当前结果只覆盖静止 AMCV。
 
+> 2026-10-31 用户决定：彻底废弃 `CursorSnapshot::Readable`（VirtualQuery 探测），取代第 1 条中“不要全局删除安全检查”的约束。
+> 理由：VirtualQuery 只能证明页面已提交，不能证明对象存活，释放后访问与类型混淆照样通过，反而把真正的违规访问掩盖成“不画”。
+> 现在采集层只保留判空与数值边界（计数、帧索引、偏移溢出、编码上限）；若存在越界或悬空访问，应作为崩溃暴露并修正根因。
+> 已知待查的跨帧裸指针：`OverlaySnapshot.cpp` `FindBlitter` 的 `BlitterOwners` 缓存 `ConvertClass*`，Convert 释放后会读到失效内存。
+
+### 废弃 Readable 后重测（2026-10-31）
+
+同一 runner、地图、分辨率与采样器，DLL SHA256 `7a64a85bb59738cb726f4234d55b73c6f4bfda2e0348be78319dc25b2e73db2f`
+（HEAD `8f1be491` + 未提交的 Readable 移除）。证据 `Debug/AutomationTests/voxel-p4/runs/sample-noreadable-baseline`、`sample-noreadable-omit`。
+
+| 指标（ms／逻辑帧） | 正常：旧 → 新 | 屏蔽 VXL：旧 → 新 |
+|---|---:|---:|
+| 外部整段主线程 CPU | 42.191 → 24.019 | 18.938 → 4.756 |
+| 外部整段墙钟 | 49.836 → 28.831 | 23.235 → 16.020 |
+| 逻辑帧／秒 | 20.07 → 34.69 | 43.04 → 62.42 |
+| RenderLayers 及其内部采集（墙钟／CPU） | 25.588／22.910 → 20.353／18.581 | 0.602／0.549 → 0.536／0.493 |
+| OverlaySnapshot::CaptureAfterDraw（墙钟／CPU） | 14.470／13.188 → 0.267／0.248 | 14.233／13.050 → 0.128／0.117 |
+| 叶节点 NtQueryVirtualMemory 样本 | 1133 → 0 | 1749 → 0 |
+
+- 两轮 1000 个 AMCV 均存活、可见、位置不变；文件按 SHA256 还原，临时地图移除，无崩溃。
+- 同局 GPU 与 native_composite 战术区差异与旧轮一致：正常 11187／11187 像素，屏蔽 VXL 187／188（只在光标处）。
+  跨局截图本身就不同（地形变体等），不能拿来判断画面对错。
+- 屏蔽 VXL 新轮最大叶节点为 `Sleep`→`ZwDelayExecution`（1834 个），`main_loop_other` 墙钟 13.3 ms 大多是帧率限制等待，
+  主线程已不是瓶颈。正常模式剩余热点为原生 VXL 软件合成及 `BlitFrameSource::AcquirePixels`（后续优先级第 2 条）。
+- 单轮静止场景，未覆盖千单位同时运动。
+
 ## 验证与恢复
 
 诊断开关 `PHOBOS_MAIN_THREAD_PROFILE=1` 默认关闭；复用既有主循环与 RenderLayers 调用边界，

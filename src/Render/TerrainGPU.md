@@ -24,7 +24,7 @@ C2 建立采集与像素规则，C2.5 把绘制改为实例化、颜色改为 PS
 
 ## 素材缓存
 
-`TerrainSnapshot::Frames` 是独立的 FrameCache（64 MiB、8192 个 piece），以 piece 地址为身份，每次采集按 piece 头、900 像素、extra 与 Z 数据的哈希核对。有深度数据的 piece，每帧在索引平面下方接一个同尺寸的 Z 平面：主图 60×58（Z 字节按像素同样的菱形展开），extra 为 W×2H；GPU 只按上半部分（索引）绘制。内容变化（换 theater、重载后复用地址）时作废重建。每次采集对每个地块类型、piece、LightConvert 只做一次可读性检查。资源超预算时只清 piece 缓存，后续采集重建。atlas 以 `SourceKind::Mask`（只要索引，不带调色板）请求，Storage 为该缓存。
+`TerrainSnapshot::Frames` 是独立的 FrameCache（64 MiB、8192 个 piece），以 piece 地址为身份，每次采集按 piece 头、900 像素、extra 与 Z 数据的哈希核对。有深度数据的 piece，每帧在索引平面下方接一个同尺寸的 Z 平面：主图 60×58（Z 字节按像素同样的菱形展开），extra 为 W×2H；GPU 只按上半部分（索引）绘制。内容变化（换 theater、重载后复用地址）时作废重建。每次采集对每个地块类型、LightConvert 只解析一次。资源超预算时只清 piece 缓存，后续采集重建。atlas 以 `SourceKind::Mask`（只要索引，不带调色板）请求，Storage 为该缓存。
 
 颜色表（`TerrainBatch::ColorTables`）按内容去重，整张放进一张 256×1024 的 `R32_UINT` 纹理，一行一个 shade；按首次适配分配行，不再被快照引用的表按最近最少使用淘汰，任何增删都换代。retint 原地改表时内容哈希变化，生成新表。
 

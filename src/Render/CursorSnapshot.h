@@ -24,52 +24,28 @@ namespace CursorSnapshot
 		std::array<std::uint32_t, CursorImage::MaxDimension * CursorImage::MaxDimension> Pixels {};
 	};
 
-	inline bool Readable(const void* pointer, size_t bytes)
-	{
-		auto address = reinterpret_cast<std::uintptr_t>(pointer);
-		if (!address || bytes > std::numeric_limits<std::uintptr_t>::max() - address)
-			return false;
-		const auto end = address + bytes;
-		while (address < end)
-		{
-			MEMORY_BASIC_INFORMATION info {};
-			if (!VirtualQuery(reinterpret_cast<void*>(address), &info, sizeof(info))
-				|| info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD)
-				|| !(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY
-					| PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
-				return false;
-			const auto next = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
-			if (next <= address)
-				return false;
-			address = next;
-		}
-		return true;
-	}
-
 	inline bool CopySelected(Frame& frame)
 	{
 		auto* mouse = WWMouseClass::Instance;
-		if (!Game::IsFocused || !Readable(mouse, sizeof(*mouse)) || !mouse->field_10 || mouse->RefCount != 0)
+		if (!Game::IsFocused || !mouse || !mouse->field_10 || mouse->RefCount != 0)
 			return false;
 
 		const SHPStruct* image = mouse->Image;
-		if (!Readable(image, sizeof(*image)))
+		if (!image)
 			return false;
 		if (image->IsReference())
 		{
 			const auto* reference = image->AsReference();
-			if (!Readable(reference, sizeof(*reference)) || !reference->Loaded)
+			if (!reference->Loaded)
 				return false;
 			image = reference->Data;
 		}
-		if (!Readable(image, sizeof(*image)) || image->IsReference()
+		if (!image || image->IsReference()
 			|| image->Width <= 0 || image->Height <= 0 || image->Frames <= 0
 			|| mouse->ImageFrameIndex < 0 || mouse->ImageFrameIndex >= image->Frames)
 			return false;
 
 		const size_t headersSize = sizeof(SHPStruct) + size_t(image->Frames) * sizeof(SHPFrame);
-		if (!Readable(image, headersSize))
-			return false;
 		const auto& header = image->AsFile()->GetFrameHeader(mouse->ImageFrameIndex);
 		if ((header.Flags & 2) || header.Width <= 0 || header.Height <= 0
 			|| header.Width > CursorImage::MaxDimension || header.Height > CursorImage::MaxDimension
@@ -80,8 +56,6 @@ namespace CursorSnapshot
 		if (size_t(header.Offset) > std::numeric_limits<std::uintptr_t>::max() - base)
 			return false;
 		const auto* pixels = reinterpret_cast<const byte*>(base + header.Offset);
-		if (!Readable(pixels, count))
-			return false;
 		// A following frame gives an additional resource-local bound when available.
 		for (int i = 0; i < image->Frames; ++i)
 		{
@@ -91,8 +65,7 @@ namespace CursorSnapshot
 		}
 
 		const auto* convert = FileSystem::MOUSE_PAL;
-		if (!Readable(convert, sizeof(*convert)) || convert->BytesPerPixel != 2
-			|| !Readable(convert->PaletteData, 256 * sizeof(std::uint16_t)))
+		if (!convert || convert->BytesPerPixel != 2 || !convert->PaletteData)
 			return false;
 		const auto* palette = static_cast<const std::uint16_t*>(convert->PaletteData);
 		const auto x = std::int64_t(mouse->field_14.X) - mouse->XY2.X + header.Left;

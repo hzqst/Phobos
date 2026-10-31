@@ -12,7 +12,6 @@ namespace SidebarText
 {
 	namespace
 	{
-		using CursorSnapshot::Readable;
 		constexpr unsigned MaxText = 512, MaxCommands = 1024, MaxNesting = 8;
 		constexpr int MaxCoordinate = 16384;
 		GlyphCache::Cache Cache;
@@ -75,8 +74,7 @@ namespace SidebarText
 		bool RefreshFont()
 		{
 			const auto* font = BitFont::Instance;
-			if (!Readable(font, sizeof(*font)) || *reinterpret_cast<const unsigned*>(font) != 0x7E3A78
-				|| !Readable(font->InternalPTR, sizeof(BitFont::InternalData)))
+			if (!font || *reinterpret_cast<const unsigned*>(font) != 0x7E3A78 || !font->InternalPTR)
 			{
 				FontInvalidating(nullptr);
 				return false;
@@ -91,11 +89,11 @@ namespace SidebarText
 			if (binding != Binding)
 			{
 				FontInvalidating(nullptr);
-				if (binding[9] != unsigned(data.Stride) || !Readable(data.SymbolTable, 65536 * sizeof(short))) return false;
+				if (binding[9] != unsigned(data.Stride) || !data.SymbolTable) return false;
 				BoundID = Cache.Register(reinterpret_cast<std::uintptr_t>(font),
 					{unsigned(data.Stride), unsigned(data.FontHeight), unsigned(data.SymbolDataSize), unsigned(data.Count)});
 				if (!BoundID) return false;
-				if (!Readable(data.Bitmaps, std::size_t(data.Count) * data.SymbolDataSize))
+				if (!data.Bitmaps)
 					{ FontInvalidating(nullptr); return false; }
 				BoundFont = font; Binding = binding; Metrics = metrics;
 				if (SidebarSnapshot::Trace && TraceCount < 96)
@@ -179,17 +177,17 @@ namespace SidebarText
 			// factory queues without invoking lookup/AI or mutating progress flags.
 			const auto& factories = FactoryClass::Array;
 			if (factories.Count < 0 || factories.Count > 4096
-				|| (factories.Count && !Readable(factories.Items, factories.Count * sizeof(void*)))) return 0;
+				|| (factories.Count && !factories.Items)) return 0;
 			for (const auto* factory : factories)
 			{
-				if (!Readable(factory, sizeof(*factory))) return 0;
+				if (!factory) return 0;
 				if (factory->Owner != HouseClass::CurrentPlayer) continue;
 				const std::uintptr_t fields[] {reinterpret_cast<std::uintptr_t>(factory),
 					reinterpret_cast<std::uintptr_t>(factory->Object), unsigned(factory->Production.Value >= 54),
 					unsigned(factory->Production.Rate == 0), factory->IsSuspended, factory->IsManual};
 				hash = SidebarSnapshot::Hash(fields, sizeof(fields), hash);
 				const auto& queue = factory->QueuedObjects;
-				if (queue.Count < 0 || queue.Count > 4096 || (queue.Count && !Readable(queue.Items, queue.Count * sizeof(void*)))) return 0;
+				if (queue.Count < 0 || queue.Count > 4096 || (queue.Count && !queue.Items)) return 0;
 				hash = SidebarSnapshot::Hash(&queue.Count, sizeof(queue.Count), hash);
 				if (queue.Count) hash = SidebarSnapshot::Hash(queue.Items, queue.Count * sizeof(void*), hash);
 			}
@@ -198,7 +196,7 @@ namespace SidebarText
 				const auto* house = HouseClass::CurrentPlayer;
 				if (!house || item.ItemIndex < 0 || item.ItemIndex >= house->Supers.Count) return 0;
 				const auto* super = house->Supers[item.ItemIndex];
-				if (!Readable(super, sizeof(*super))) return 0;
+				if (!super) return 0;
 				const std::uintptr_t state[] {reinterpret_cast<std::uintptr_t>(super), reinterpret_cast<std::uintptr_t>(super->Type),
 					super->IsPresent, super->IsReady, super->IsSuspended, unsigned(super->ChargeDrainState)};
 				hash = SidebarSnapshot::Hash(state, sizeof(state), hash);
@@ -262,8 +260,7 @@ namespace SidebarText
 		bool ObserveCreditsPrint(REGISTERS* r)
 		{
 			const auto direct = r->Stack<unsigned>(0);
-			if ((direct != SimpleFormatted && direct != SimpleUnformatted) || r->Stack<void*>(4) != DSurface::Sidebar
-				|| !Readable(r->lea_Stack<void*>(FancyCaller), MoneyTabReturn + 4 - FancyCaller)) return false;
+			if ((direct != SimpleFormatted && direct != SimpleUnformatted) || r->Stack<void*>(4) != DSurface::Sidebar) return false;
 			const auto caller = r->Stack<unsigned>(FancyCaller);
 			Credits text;
 			if (ActiveCounter) text = *ActiveCounter;
@@ -287,8 +284,8 @@ namespace SidebarText
 				const auto* input = reinterpret_cast<const wchar_t*>(r->EDX());
 				std::wstring copy;
 				unsigned i = 0;
-				for (; i < MaxText && Readable(input + i, sizeof(wchar_t)) && input[i]; ++i) copy.push_back(input[i]);
-				if (i == MaxText || !Readable(input + i, sizeof(wchar_t))) run.Known = false;
+				for (; input && i < MaxText && input[i]; ++i) copy.push_back(input[i]);
+				if (!input || i == MaxText) run.Known = false;
 				run.Texts.push_back(std::move(copy));
 			}
 			CreditsScope = CreditsPrint {r->ESP(), text, std::move(run)};
@@ -389,7 +386,7 @@ namespace SidebarText
 			const auto* house = HouseClass::CurrentPlayer;
 			const auto* super = house && scope.Item.ItemIndex >= 0 && scope.Item.ItemIndex < house->Supers.Count
 				? house->Supers[scope.Item.ItemIndex] : nullptr;
-			if (Readable(super, sizeof(*super)) && Readable(super->Type, sizeof(*super->Type)))
+			if (super && super->Type)
 			{
 				const unsigned state[] {unsigned(scope.Tab), unsigned(scope.Item.ItemIndex), super->Type->UseChargeDrain,
 					super->IsReady, super->IsSuspended, unsigned(super->ChargeDrainState), unsigned(scope.Pending.Texts.size()), scope.Pending.Known};
@@ -429,16 +426,15 @@ namespace SidebarText
 		Prints.push_back({r->ESP(), false, false});
 		if (r->Stack<void*>(4) != DSurface::Sidebar) return;
 		const auto direct = r->Stack<unsigned>(0);
-		if ((direct != 0x4A6143 && direct != 0x4A619A) || !Readable(r->lea_Stack<void*>(0x428), 4)) return;
+		if (direct != 0x4A6143 && direct != 0x4A619A) return;
 		const auto caller = r->Stack<unsigned>(0x428);
 		if (caller != 0x6A9D80 && caller != 0x6A9E3B && caller != 0x6AA019) return;
 		const unsigned flags = r->Stack<unsigned>(0x18);
 		if (flags != 0x42 && flags != 0x142 && flags != 0x242) { Items.back().Pending.Known = false; return; }
 		const auto* input = reinterpret_cast<const wchar_t*>(r->EDX());
 		std::wstring text;
-		for (unsigned i = 0; i < MaxText; ++i)
+		for (unsigned i = 0; input && i < MaxText; ++i)
 		{
-			if (!Readable(input + i, sizeof(wchar_t))) break;
 			if (!input[i])
 			{
 				Items.back().Pending.Texts.push_back(std::move(text));
@@ -469,7 +465,7 @@ namespace SidebarText
 		const auto* font = reinterpret_cast<const BitFont*>(r->ECX());
 		const auto unit = r->Stack<unsigned short>(4);
 		if (unit == 9) return GlyphResult::Skipped; // Native tab moves the pen without a bitmap.
-		if (font != BoundFont || !Readable(font, sizeof(*font)) || !font->pGraphBuffer) return GlyphResult::Failed;
+		if (font != BoundFont || !font || !font->pGraphBuffer) return GlyphResult::Failed;
 		const auto& data = *font->InternalPTR;
 		const auto mapped = static_cast<unsigned short>(data.SymbolTable[unit]);
 		const auto bytes = std::size_t(1) + data.Stride * data.FontHeight;
@@ -485,7 +481,7 @@ namespace SidebarText
 			{
 				const auto* original = reinterpret_cast<const std::uint8_t*>(data.Bitmaps) + std::size_t(x - 1) * data.SymbolDataSize;
 				const auto* fallback = static_cast<const std::uint8_t*>(font->Pointer_8);
-				if (Readable(original, bytes) && Readable(fallback, bytes) && original[0] == fallback[0])
+				if (fallback && original[0] == fallback[0])
 				{
 					bool valid = true;
 					for (std::size_t i = 1; i < bytes; ++i) valid &= fallback[i] == std::uint8_t(~original[i]);
@@ -493,7 +489,7 @@ namespace SidebarText
 				}
 			}
 		}
-		if (!Readable(record, bytes))
+		if (!record)
 		{
 			if (!mapped && SidebarSnapshot::Trace && MissingTraceCount < 32)
 				Debug::Log("[SidebarTextGPU] missing sample=%u unit=%04X fontID=%llu fallback=unsupported\n",
@@ -538,7 +534,7 @@ namespace SidebarText
 		const auto caller = r->Stack<unsigned>(EntryStack);
 		if (caller != 0x6A9D51 && caller != 0x6A9E11 && caller != 0x6A9F5E && caller != 0x6A9FF3) return;
 		const auto* rect = reinterpret_cast<const RectangleStruct*>(r->ECX());
-		if (!Readable(rect, sizeof(*rect)) || rect->Width < 0 || rect->Height < 0
+		if (!rect || rect->Width < 0 || rect->Height < 0
 			|| rect->Width > MaxCoordinate || rect->Height > MaxCoordinate
 			|| r->Stack<unsigned short>(EntryStack + 4) != 0 || r->Stack<unsigned char>(EntryStack + 8) != 175)
 			{ Items.back().Pending.Known = false; return; }

@@ -16,7 +16,7 @@
 
 计数器标记由 `src/Misc/Hooks.UI.cpp` 的 `4A25E0` 回调提供：开头构造 `SidebarText::CounterBatch`，每个 `DrawText` 外包 `SidebarText::CounterScope`。批次结束时没有打印的计数器（开关关闭、阵亡提前返回、PowerDelta 无建筑）提交为不显示。回调原有逻辑与返回值不变。
 
-每段文字在 `4A5FF2` 结束时整体提交；任一字形失败、文本超过 512 字或不可读时，该段提交为未知并不画，不沿用旧值。已提交结果保留到下一次原生打印覆盖，与 CPU surface 保留像素一致。字体失效、CSF 卸载、`6A5840`/`6A5BF0`/`6BE1C0` 失效都经 `SidebarText::ClearRuns` 一并清除。
+每段文字在 `4A5FF2` 结束时整体提交；任一字形失败、文本超过 512 字或文本指针为空时，该段提交为未知并不画，不沿用旧值。已提交结果保留到下一次原生打印覆盖，与 CPU surface 保留像素一致。字体失效、CSF 卸载、`6A5840`/`6A5BF0`/`6BE1C0` 失效都经 `SidebarText::ClearRuns` 一并清除。
 
 ## 层序
 

@@ -154,9 +154,9 @@ namespace TerrainSnapshot
 	{
 		// Read the loaded image directly; GetImage (544CB0) would load a lazy TMP.
 		const auto* image = reinterpret_cast<const TileImageHeader*>(type->Image);
-		if (!CursorSnapshot::Readable(image, sizeof(*image))) return nullptr;
+		if (!image) return nullptr;
 		const auto pieces = std::int32_t(std::uint32_t(image->GridWidth) * std::uint32_t(image->GridHeight));
-		return pieces > 0 && CursorSnapshot::Readable(image + 1, size_t(pieces) * sizeof(void*)) ? image : nullptr;
+		return pieces > 0 ? image : nullptr;
 	}
 
 	inline int PieceCount(const TileImageHeader* image)
@@ -189,13 +189,13 @@ namespace TerrainSnapshot
 		const void* Piece = nullptr;
 	};
 
-	// Piece data at an offset relative to the piece, or null when it cannot be read.
+	// Piece data at an offset relative to the piece, or null when the address overflows.
 	inline const std::uint8_t* PieceData(const Piece* piece, std::uint32_t offset, size_t size)
 	{
 		const auto base = reinterpret_cast<std::uintptr_t>(piece);
 		if (offset > UINTPTR_MAX - base) return nullptr;
 		const auto* data = reinterpret_cast<const std::uint8_t*>(base + offset);
-		return CursorSnapshot::Readable(data, size) ? data : nullptr;
+		return data;
 	}
 
 	// Copies the piece into the frame cache. A changed piece at the same address replaces the old frames.
@@ -272,7 +272,7 @@ namespace TerrainSnapshot
 	// One FullColorData row of a cell's LightConvert, the shade the default ABuffer value selects.
 	inline bool ValidConvert(const LightConvertClass* convert)
 	{
-		return CursorSnapshot::Readable(convert, sizeof(ConvertClass)) && convert->BytesPerPixel == 2
+		return convert && convert->BytesPerPixel == 2
 			&& convert->ShadeCount > 0 && convert->ShadeCount <= 256;
 	}
 
@@ -280,7 +280,7 @@ namespace TerrainSnapshot
 	inline TerrainBatch::ColorTables::Handle AcquireTable(const LightConvertClass* convert)
 	{
 		const auto* colors = static_cast<const std::uint16_t*>(convert->FullColorData);
-		if (!CursorSnapshot::Readable(colors, size_t(convert->ShadeCount) * 256 * sizeof(std::uint16_t))) return {};
+		if (!colors) return {};
 		return Tables.Acquire(colors, std::uint32_t(convert->ShadeCount));
 	}
 
@@ -390,7 +390,7 @@ namespace TerrainSnapshot
 		else if (TemplateState != 1) reason = "template";
 		else if (view.Width <= 0 || view.Height <= 0 || view.Width > SidebarSnapshot::MaxCanvasDimension
 			|| view.Height > SidebarSnapshot::MaxCanvasDimension) reason = "view";
-		else if (!CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer))) reason = "zbuffer";
+		else if (!zbuffer) reason = "zbuffer";
 		Counters count;
 		Sample sample;
 		std::int64_t sampleDistance = INT64_MAX;
@@ -411,21 +411,14 @@ namespace TerrainSnapshot
 			const auto* table4 = reinterpret_cast<const std::int32_t*>(VariantTable4);
 			const auto* table8 = reinterpret_cast<const std::int32_t*>(VariantTable8);
 			const bool table8Ready = *reinterpret_cast<const bool*>(VariantTable8Ready);
-			// Each type, piece and color table is checked once per capture.
+			// Each type and color table is checked once per capture.
 			std::unordered_map<const IsometricTileTypeClass*, const TileImageHeader*> images;
-			std::unordered_map<const Piece*, bool> readablePieces;
 			std::unordered_map<const LightConvertClass*, TerrainBatch::ColorTables::Handle> converts;
 			std::unordered_map<const Piece*, PieceFrames> captured;
 			const auto imageOf = [&](const IsometricTileTypeClass* type)
 			{
 				const auto [it, inserted] = images.try_emplace(type);
 				if (inserted) it->second = ImageOf(type);
-				return it->second;
-			};
-			const auto readable = [&](const Piece* piece)
-			{
-				const auto [it, inserted] = readablePieces.try_emplace(piece);
-				if (inserted) it->second = CursorSnapshot::Readable(piece, sizeof(*piece) + DiamondPixels);
 				return it->second;
 			};
 			std::unordered_map<int, SmudgeShape> smudges;
@@ -437,7 +430,7 @@ namespace TerrainSnapshot
 				auto& shape = it->second;
 				if (!inserted) return &shape;
 				const auto* smudgeType = SmudgeTypeClass::Array.Items[index];
-				if (!CursorSnapshot::Readable(smudgeType, sizeof(SmudgeTypeClass))) { shape.Failed = true; return &shape; }
+				if (!smudgeType) { shape.Failed = true; return &shape; }
 				shape.Width = smudgeType->Width;
 				if (!smudgeType->Image) return &shape;
 				// The loaded shape only: an unloaded reference stays NotReady instead of loading.
@@ -473,7 +466,7 @@ namespace TerrainSnapshot
 					{
 						const int last = PieceCount(image) - 1;
 						const auto* basePiece = PieceSlot(image, height >= last ? last : height);
-						if (!basePiece || !readable(basePiece)) { ++count.Image; continue; }
+						if (!basePiece) { ++count.Image; continue; }
 						if (basePiece->Flags & HasExtra) rise = ExtraRise(basePiece->Y, basePiece->ExtraY);
 					}
 					if (!Intersects(Current.Clip, position.X, position.Y - rise, TileWidth, std::int64_t(CellHeight) + rise)) continue;
@@ -492,7 +485,6 @@ namespace TerrainSnapshot
 						if (!clear && variants > 1)
 						{
 							const auto* entry = PieceSlot(image, height % PieceCount(image));
-							if (entry && !readable(entry)) { ++count.Image; return; }
 							if (entry && (entry->Flags & AlternateVariant))
 								variant = (std::uint32_t(cell->Flags) & AlternateVariantFlag) ? 1 : 0;
 							else pick = true;
@@ -512,7 +504,6 @@ namespace TerrainSnapshot
 						// 547CF0 draws nothing, extra image included, for an empty piece.
 						const auto* piece = PieceSlot(drawnImage, (clear ? 0 : height) % PieceCount(drawnImage));
 						if (!piece) { ++count.Empty; return; }
-						if (!readable(piece)) { ++count.Image; return; }
 						const int shade = ShadeRow(convert->ShadeCount, lightRow, DefaultAlpha);
 						auto frames = captured.find(piece);
 						if (frames == captured.end()) frames = captured.emplace(piece, AcquirePiece(piece)).first;
@@ -573,7 +564,7 @@ namespace TerrainSnapshot
 		const auto& abuffer = ABufferSnapshot::Current;
 		// Stage C3 probe: which 547CF0 Z path runs and the values its base depth starts from.
 		const int accelerated = *reinterpret_cast<const std::uint8_t*>(AcceleratedDepth);
-		const bool zvalid = CursorSnapshot::Readable(zbuffer, sizeof(ZBuffer));
+		const bool zvalid = zbuffer != nullptr;
 		const int state[] {accelerated, zvalid ? zbuffer->MaxValue : 0, zvalid ? zbuffer->Bounds.Y : 0, count.NoDepth, count.MaxLevel, Current.Visible, view.X, view.Y, view.Width, view.Height, Current.OriginX,
 			tactical ? tactical->TacticalPos.X : 0, tactical ? tactical->TacticalPos.Y : 0, anchor.X, anchor.Y, rows, columns,
 			count.Visited, count.Legal, count.Drawn, count.Extras, count.Tile, count.Image, count.Variant, count.Empty,

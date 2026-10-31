@@ -349,7 +349,7 @@ namespace OverlaySnapshot
 		{
 			const auto owned = [blitter, compressed](const BlitterOwner& owner)
 			{
-				if (!CursorSnapshot::Readable(owner.Convert, sizeof(ConvertClass)) || owner.Compressed != compressed) return false;
+				if (owner.Compressed != compressed) return false;
 				return compressed ? owner.Convert->RLEBlitters[owner.Slot] == blitter : owner.Convert->Blitters[owner.Slot] == blitter;
 			};
 			auto found = BlitterOwners.find(blitter);
@@ -359,7 +359,7 @@ namespace OverlaySnapshot
 				BlitterOwners.clear();
 				for (const auto* convert : ConvertClass::Array)
 				{
-					if (!CursorSnapshot::Readable(convert, sizeof(ConvertClass))) continue;
+					if (!convert) continue;
 					for (size_t i = 0; i < PlainBlitters; ++i)
 						if (convert->Blitters[i]) BlitterOwners.try_emplace(convert->Blitters[i], BlitterOwner {convert, std::uint8_t(i), false});
 					for (size_t i = 0; i < RLEBlitters; ++i)
@@ -444,7 +444,6 @@ namespace OverlaySnapshot
 				const auto* zshape = ShapeData(call.ZShape);
 				if (!zshape || zshape->Frames <= 0) return false;
 				const auto base = reinterpret_cast<std::uintptr_t>(zshape);
-				if (!CursorSnapshot::Readable(reinterpret_cast<const void*>(base + sizeof(SHPStruct)), sizeof(SHPFrame))) return false;
 				const auto header = zshape->AsFile()->GetFrameHeader(0);
 				if (header.Offset <= 0) return false;
 				cut.FunX = call.ZShapeX - (shape.CanvasWidth / 2 - shape.Frame.Left) + header.Left;
@@ -457,16 +456,15 @@ namespace OverlaySnapshot
 
 			// 437A10's Z adjust bytes: per drawn row the pointer starts at Z shape pixel (funX + FrameX,
 			// funY + FrameY + row) and stays behind by the row's prefix overshoot, the pixels the
-			// blitter's whole tokens skip beyond FrameX. False where the data cannot be read.
+			// blitter's whole tokens skip beyond FrameX. False where the data is malformed.
 			static bool ReadZBytes(const Shape& shape, const Cut& cut, Draw& draw)
 			{
 				draw.ZBytes.assign(size_t(draw.Width) * draw.Height, 0);
 				const auto* row = reinterpret_cast<const std::uint8_t*>(shape.Data + shape.Frame.Offset);
 				const auto lineLength = [](const std::uint8_t* line) -> size_t
 				{
-					if (!CursorSnapshot::Readable(line, 2)) return 0;
 					const size_t length = line[0] | (size_t(line[1]) << 8);
-					return length >= 2 && CursorSnapshot::Readable(line, length) ? length : 0;
+					return length >= 2 ? length : 0;
 				};
 				for (int y = 0; y < draw.FrameY; ++y)
 				{
@@ -494,7 +492,6 @@ namespace OverlaySnapshot
 					const auto* z = cut.Pixels + std::ptrdiff_t(cut.FunY + draw.FrameY + r) * cut.Pitch + cut.FunX + draw.FrameX;
 					if (draw.Width > lag)
 					{
-						if (!CursorSnapshot::Readable(z, size_t(draw.Width - lag))) return false;
 						std::memcpy(draw.ZBytes.data() + size_t(r) * draw.Width + lag, z, size_t(draw.Width - lag));
 					}
 					row += length;
@@ -761,7 +758,7 @@ namespace OverlaySnapshot
 			{
 				auto& count = *Count;
 				const auto* type = terrain->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(TerrainTypeClass))) { ++count.Frame; return; }
+				if (!type) { ++count.Frame; return; }
 				++count.Terrains;
 				// An animated or crumbling object draws on Composite (6D8DB0), and only there.
 				if (type->IsAnimated || terrain->IsCrumbling) { ++count.Dynamic; return; }
@@ -854,7 +851,7 @@ namespace OverlaySnapshot
 				auto& count = *Count;
 				if (!building->IsOnMap || building->InLimbo) return false;
 				auto* type = building->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return false; }
+				if (!type) { ++count.Frame; return false; }
 				RectangleStruct dimensions {};
 				building->GetRenderDimensions(&dimensions);
 				if (!TerrainSnapshot::Intersects(Clip, std::int64_t(dimensions.X) + ViewX, std::int64_t(dimensions.Y) + ViewY, dimensions.Width, dimensions.Height))
@@ -1009,7 +1006,7 @@ namespace OverlaySnapshot
 				const auto* parts = *reinterpret_cast<const FoggedPart* const*>(record + FoggedParts);
 				const int partCount = *reinterpret_cast<const int*>(record + FoggedPartCount);
 				if (partCount <= 0) return;
-				if (!CursorSnapshot::Readable(owner, sizeof(HouseClass)) || !CursorSnapshot::Readable(parts, size_t(partCount) * sizeof(FoggedPart)))
+				if (!owner || !parts)
 				{
 					++count.Frame;
 					return;
@@ -1029,7 +1026,7 @@ namespace OverlaySnapshot
 					auto* object = static_cast<ObjectTypeClass*>(part.Type);
 					// 4D204D: an anim part without a type draws nothing.
 					if (!object && i) continue;
-					if (!CursorSnapshot::Readable(object, sizeof(AbstractTypeClass))) { ++count.Frame; continue; }
+					if (!object) { ++count.Frame; continue; }
 					const auto* image = object->GetImage();
 					if (i)
 					{
@@ -1051,7 +1048,6 @@ namespace OverlaySnapshot
 						continue;
 					}
 					const auto* type = static_cast<const BuildingTypeClass*>(object);
-					if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
 					// 4D1D5F: the whole record, anims included.
 					if (type->InvisibleInGame) { ++count.FoggedInvisible; return; }
 					const int light = std::int16_t(cell->Intensity_Normal) + std::int16_t(type->ExtraLight);
@@ -1062,7 +1058,7 @@ namespace OverlaySnapshot
 					call.Convert = convert;
 					call.Brightness = light;
 					call.Bounded = false;
-					if (image && CursorSnapshot::Readable(image, sizeof(SHPStruct)))
+					if (image)
 					{
 						// The body and its shadow are cut at the image's bottom; 4D1890 reads the shape's own
 						// header, as for the shadow frame.
@@ -1116,7 +1112,7 @@ namespace OverlaySnapshot
 				const int typeIndex = clear ? *reinterpret_cast<const int*>(TerrainSnapshot::ClearTile) : cell->IsoTileTypeIndex;
 				if (typeIndex < 0 || typeIndex >= types.Count) return;
 				const auto* tile = types.Items[typeIndex];
-				if (!CursorSnapshot::Readable(tile, sizeof(IsometricTileTypeClass))) { ++count.Frame; return; }
+				if (!tile) { ++count.Frame; return; }
 				if (!tile->ShadowCaster) return;
 				++count.Casters;
 				const auto record = TerrainObjectImage::SelectCliffShadow(tile->ArrayIndex, clear ? 0 : std::uint8_t(cell->Height),
@@ -1255,7 +1251,7 @@ namespace OverlaySnapshot
 				for (int i = 0; i < items.Count; ++i)
 				{
 					auto* object = items.Items[i];
-					if (!CursorSnapshot::Readable(object, sizeof(ObjectClass))) continue;
+					if (!object) continue;
 					++count.LayerObjects;
 					if (!object->IsVisible || object->WhatAmI() == AbstractType::Terrain || object->WhatAmI() == AbstractType::Anim) continue;
 					++count.OthersVisible;
@@ -1303,7 +1299,7 @@ namespace OverlaySnapshot
 		{
 			std::vector<std::uint16_t> alpha(size_t(clip.Width) * clip.Height, TerrainImage::DefaultAlpha);
 			auto* abuffer = ABuffer::Instance;
-			if (CursorSnapshot::Readable(abuffer, sizeof(ABuffer)))
+			if (abuffer)
 				for (int row = 0; row < clip.Height; ++row)
 				{
 					auto* word = static_cast<std::uint16_t*>(abuffer->GetBuffer(clip.X, clip.Y + row - abuffer->Bounds.Y));
@@ -1785,7 +1781,7 @@ namespace OverlaySnapshot
 				const auto* pairs = *reinterpret_cast<const std::uint32_t* const*>(FoggedPairs);
 				count.Fogged = *reinterpret_cast<const int*>(FoggedCount);
 				std::vector<std::array<std::uint32_t, 2>> records;
-				for (int i = 0; i < count.Fogged && CursorSnapshot::Readable(pairs + 2 * i, 2 * sizeof(std::uint32_t)); ++i)
+				for (int i = 0; pairs && i < count.Fogged; ++i)
 					records.push_back({pairs[2 * i], pairs[2 * i + 1]});
 				// A record made after this frame's draw unsorts them; 4D1890 sorts them by key next time.
 				if (!*reinterpret_cast<const bool*>(FoggedSorted))
@@ -1796,7 +1792,7 @@ namespace OverlaySnapshot
 				for (const auto& [key, address] : records)
 				{
 					const auto* record = reinterpret_cast<const std::uint8_t*>(std::uintptr_t(address));
-					if (!CursorSnapshot::Readable(record, FoggedRecordSize)) continue;
+					if (!record) continue;
 					const bool building = *reinterpret_cast<const int*>(record + FoggedKind) == FoggedBuilding;
 					count.FoggedBuildings += building;
 					const auto& bounds = *reinterpret_cast<const RectangleStruct*>(record + FoggedBounds);
@@ -1823,7 +1819,7 @@ namespace OverlaySnapshot
 						const int index = cell->OverlayTypeIndex;
 						if (index < 0 || index >= OverlayTypeClass::Array.Count) continue;
 						const auto* type = OverlayTypeClass::Array.Items[index];
-						if (!CursorSnapshot::Readable(type, sizeof(OverlayTypeClass))) { ++count.Frame; continue; }
+						if (!type) { ++count.Frame; continue; }
 						if (!pass) ++count.Overlays;
 						const auto tile = TerrainImage::TilePosition(cellX, cellY, cell->Level, capture.TacticalX, capture.TacticalY, capture.ViewY);
 						if (pass) capture.Shadow(cell, index, type, tile);
@@ -1834,7 +1830,7 @@ namespace OverlaySnapshot
 			for (int i = ground.Count - 1; i >= 0; --i)
 			{
 				auto* object = ground.Items[i];
-				if (!CursorSnapshot::Readable(object, sizeof(TerrainClass)) || object->WhatAmI() != AbstractType::Terrain || !object->IsAlive) continue;
+				if (!object || object->WhatAmI() != AbstractType::Terrain || !object->IsAlive) continue;
 				capture.Terrain(static_cast<TerrainClass*>(object));
 			}
 			// 6D7C00: the cliff shadows, rows from far to near.
@@ -1852,7 +1848,7 @@ namespace OverlaySnapshot
 			for (int i = 0; i < ground.Count; ++i)
 			{
 				auto* object = ground.Items[i];
-				if (!CursorSnapshot::Readable(object, sizeof(BuildingClass)) || object->WhatAmI() != AbstractType::Building) continue;
+				if (!object || object->WhatAmI() != AbstractType::Building) continue;
 				capture.Building(static_cast<BuildingClass*>(object));
 			}
 			CaptureComposite(capture);

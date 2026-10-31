@@ -169,8 +169,7 @@ namespace SidebarSnapshot
 	{
 		for (const auto& pair : CapturedColors) if (pair.first == convert) return pair.second;
 		PaletteCache::Handle color;
-		if (CursorSnapshot::Readable(convert, sizeof(*convert)) && convert->BytesPerPixel == 2
-			&& CursorSnapshot::Readable(convert->PaletteData, 512))
+		if (convert && convert->BytesPerPixel == 2 && convert->PaletteData)
 		{
 			PaletteCache::Data data;
 			std::memcpy(data.Colors.data(), convert->PaletteData, sizeof(data.Colors));
@@ -271,8 +270,7 @@ namespace SidebarSnapshot
 	template<typename T> inline T* CameoTypeAt(int index)
 	{
 		const auto& types = T::Array;
-		return index >= 0 && index < types.Count && types.Items && CursorSnapshot::Readable(types.Items + index, sizeof(T*))
-			? types.Items[index] : nullptr;
+		return index >= 0 && index < types.Count && types.Items ? types.Items[index] : nullptr;
 	}
 
 	inline TechnoTypeClass* ResolveCameoType(const BuildType& item)
@@ -290,18 +288,17 @@ namespace SidebarSnapshot
 	// 0 = native SHP, 1 = extension/PCX/custom palette, 2 = invalid or not ready.
 	inline const SHPStruct* CameoSource(const BuildType& item, bool ares, int& sourceKind)
 	{
-		using CursorSnapshot::Readable;
 		sourceKind = 2;
 		const SHPStruct* source = nullptr;
 		if (item.ItemType == AbstractType::Special)
 		{
 			const auto* type = CameoTypeAt<SuperWeaponTypeClass>(item.ItemIndex);
-			if (!Readable(type, sizeof(*type))) return nullptr;
+			if (!type) return nullptr;
 			if (ares)
 			{
 				// Ares' own SW extension lookup, also used elsewhere in Phobos. No load or AI.
 				const auto* ext = reinterpret_cast<const std::uint8_t*>(AresFunctions::SWTypeExtMap_Find(const_cast<SuperWeaponTypeClass*>(type)));
-				if (!Readable(ext, 0x4D4)) return nullptr;
+				if (!ext) return nullptr;
 				if (*reinterpret_cast<void* const*>(ext + 0x494) || *reinterpret_cast<void* const*>(ext + 0x4D0))
 					{ sourceKind = 1; return nullptr; }
 			}
@@ -310,14 +307,14 @@ namespace SidebarSnapshot
 		else
 		{
 			const auto* type = ResolveCameoType(item);
-			if (!Readable(type, sizeof(*type))) return nullptr;
+			if (!type) return nullptr;
 			// Unknown virtual selectors are not assumed to be pure field readers.
 			const auto* vtable = *reinterpret_cast<const std::uintptr_t* const*>(type);
-			if (!Readable(vtable, 0x9C) || vtable[0x98 / 4] != 0x712040) { sourceKind = 1; return nullptr; }
+			if (vtable[0x98 / 4] != 0x712040) { sourceKind = 1; return nullptr; }
 			if (ares)
 			{
 				const auto* ext = *reinterpret_cast<const std::uint8_t* const*>(reinterpret_cast<const std::uint8_t*>(type) + 0x2FC);
-				if (!Readable(ext, 0x250)) return nullptr;
+				if (!ext) return nullptr;
 				// Conservatively exclude either PCX binding; never show its SHP fallback.
 				if (*reinterpret_cast<void* const*>(ext + 0x120) || *reinterpret_cast<void* const*>(ext + 0x228)
 					|| *reinterpret_cast<void* const*>(ext + 0x24C)) { sourceKind = 1; return nullptr; }
@@ -325,15 +322,14 @@ namespace SidebarSnapshot
 			// The verified vanilla/Ares selector preserves current infiltration/veterancy rules.
 			source = type->GetCameo();
 		}
-		if (!Readable(source, sizeof(SHPStruct))) return nullptr;
+		if (!source) return nullptr;
 		if (source->Type == 0xFFFF)
 		{
 			const auto* ref = reinterpret_cast<const SHPReference*>(source);
-			if (!Readable(ref, sizeof(*ref))) return nullptr;
 			const auto* rules = RulesExt::Global();
 			const auto* missing = rules ? rules->MissingCameo.data() : "";
 			const auto length = std::strlen(missing);
-			if (Readable(ref->Filename, 11) && !_strnicmp(ref->Filename, "XXICON.SHP", 11)
+			if (ref->Filename && !_strnicmp(ref->Filename, "XXICON.SHP", 11)
 				&& length >= 4 && !_stricmp(missing + length - 4, ".pcx"))
 				{ sourceKind = 1; return nullptr; }
 		}
@@ -343,7 +339,6 @@ namespace SidebarSnapshot
 
 	inline bool GetCameoList(int tab, const BuildType*& items, int& count)
 	{
-		using CursorSnapshot::Readable;
 		if (tab < 0 || tab >= 4) return false;
 		if (AresHelper::AresBaseAddress)
 		{
@@ -351,7 +346,7 @@ namespace SidebarSnapshot
 			if (!known) return false;
 			const auto* list = reinterpret_cast<const DynamicVectorClass<BuildType>*>(AresHelper::AresBaseAddress + 0xC1150) + tab;
 			static_assert(sizeof(DynamicVectorClass<BuildType>) == 0x18);
-			if (!Readable(list, sizeof(*list)) || list->Count < 0 || list->Count > list->Capacity || list->Count > 4096) return false;
+			if (list->Count < 0 || list->Count > list->Capacity || list->Count > 4096) return false;
 			items = list->Items; count = list->Count;
 		}
 		else
@@ -360,7 +355,7 @@ namespace SidebarSnapshot
 			items = strip.Cameos; count = strip.CameoCount;
 			if (count < 0 || count > 75) return false;
 		}
-		return !count || (items && Readable(items, sizeof(BuildType) * count));
+		return !count || items;
 	}
 
 	inline std::uint64_t CameoKey(const BuildType& item)
@@ -487,7 +482,6 @@ namespace SidebarSnapshot
 
 	inline void CaptureCameos(int rows)
 	{
-		using CursorSnapshot::Readable;
 		const auto& sidebar = SidebarClass::Instance;
 		const int tab = sidebar.ActiveTabIndex;
 		if (tab < 0 || tab >= 4 || !HouseClass::CurrentPlayer || HouseClass::IsCurrentPlayerObserver()) return;
@@ -506,7 +500,7 @@ namespace SidebarSnapshot
 			if (!ShapeImage::PlaceCameo(slot, strip.TopRowIndex, count, strip.Location.X, strip.Location.Y,
 				SelectClass::CameoPitchX(), SelectClass::CameoPitchY(), strip.IsScrolling, strip.Slid,
 				DSurface::SidebarBounds.X, Current.Width, Current.Height, placement)) continue;
-			if (!items || !Readable(items + placement.Item, sizeof(BuildType))) { ++pendingCount; continue; }
+			if (!items) { ++pendingCount; continue; }
 			const auto item = items[placement.Item];
 			int kind = 2;
 			const auto* source = CameoSource(item, ares, kind);
@@ -661,7 +655,7 @@ namespace SidebarSnapshot
 		const auto* surface = DSurface::Sidebar;
 		const auto* convert = FileSystem::SIDEBAR_PAL;
 		const auto color = CaptureColor(convert);
-		if (!CursorSnapshot::Readable(surface, sizeof(*surface)) || !color)
+		if (!surface || !color)
 			return;
 		Current.Width = surface->Width;
 		Current.Height = surface->Height;

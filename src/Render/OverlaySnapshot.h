@@ -317,33 +317,32 @@ namespace OverlaySnapshot
 	// A shape reference whose file the native draw could not load: 4AED70 draws nothing for it.
 	constexpr int UnloadedShape = -2;
 
-	// The frames of a loaded shape, UnloadedShape for a reference that is not loaded and -1 where
-	// the shape cannot be read.
+	// The frames of a loaded shape, UnloadedShape for a reference that is not loaded and -1 for
+	// no shape.
 	inline int FrameCount(const SHPStruct* image)
 	{
-		if (!CursorSnapshot::Readable(image, sizeof(SHPStruct))) return -1;
+		if (!image) return -1;
 		if (image->IsReference())
 		{
 			const auto* reference = image->AsReference();
-			if (!CursorSnapshot::Readable(reference, sizeof(*reference))) return -1;
 			if (!reference->Loaded) return UnloadedShape;
 			image = reference->Data;
-			if (!CursorSnapshot::Readable(image, sizeof(SHPStruct))) return -1;
+			if (!image) return -1;
 		}
 		return image->Frames;
 	}
 
-	// The loaded data of a shape, null where it cannot be read.
+	// The loaded data of a shape, null for no shape or one not loaded.
 	inline const SHPStruct* ShapeData(const SHPStruct* image)
 	{
-		if (!CursorSnapshot::Readable(image, sizeof(SHPStruct))) return nullptr;
+		if (!image) return nullptr;
 		if (image->IsReference())
 		{
 			const auto* reference = image->AsReference();
-			if (!CursorSnapshot::Readable(reference, sizeof(*reference)) || !reference->Loaded) return nullptr;
+			if (!reference->Loaded) return nullptr;
 			image = reference->Data;
 		}
-		return CursorSnapshot::Readable(image, sizeof(SHPStruct)) && !image->IsReference() ? image : nullptr;
+		return image && !image->IsReference() ? image : nullptr;
 	}
 
 	// 69E7E0 gives a frame outside the shape an empty rectangle, which draws nothing: such a frame
@@ -377,7 +376,7 @@ namespace OverlaySnapshot
 		if (!type->Tiberium) return -1;
 		for (const auto* tiberium : TiberiumClass::Array)
 		{
-			if (!CursorSnapshot::Readable(tiberium, sizeof(TiberiumClass)) || !tiberium->Image) return -1;
+			if (!tiberium || !tiberium->Image) return -1;
 			const int first = tiberium->Image->ArrayIndex;
 			if (index >= first && index < first + tiberium->NumImages) return tiberium->ArrayIndex;
 			if (index >= first + tiberium->NumImages && index < first + tiberium->NumImages + tiberium->NumSlopes) return tiberium->ArrayIndex;

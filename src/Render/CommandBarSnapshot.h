@@ -67,8 +67,7 @@ namespace CommandBarSnapshot
 
 	inline const RectangleStruct* ReadRect(std::uintptr_t slot)
 	{
-		const auto* rect = *reinterpret_cast<const RectangleStruct* const*>(slot);
-		return CursorSnapshot::Readable(rect, sizeof(*rect)) ? rect : nullptr;
+		return *reinterpret_cast<const RectangleStruct* const*>(slot);
 	}
 
 	// The released Button%02d.SHP data is freed directly (6D0270) and rebound later
@@ -103,7 +102,6 @@ namespace CommandBarSnapshot
 
 	inline void CaptureAfterDraw()
 	{
-		using CursorSnapshot::Readable;
 		Current.Visible = false;
 		Current.Placements.clear();
 		const auto& tab = TabClass::Instance;
@@ -121,7 +119,7 @@ namespace CommandBarSnapshot
 		const int surfaces = *reinterpret_cast<const int*>(DrawnSurfaceCount);
 		const auto color = SidebarSnapshot::CaptureColor(FileSystem::SIDEBAR_PAL);
 		if (!Eligible()) reason = "ineligible";
-		else if (!Readable(composite, sizeof(*composite)) || composite->Width <= 0 || composite->Height <= 0
+		else if (!composite || composite->Width <= 0 || composite->Height <= 0
 			|| composite->Width > SidebarSnapshot::MaxCanvasDimension || composite->Height > SidebarSnapshot::MaxCanvasDimension)
 			reason = "surface";
 		// A repaint this frame went to the surface at the head of the list; normally Composite.

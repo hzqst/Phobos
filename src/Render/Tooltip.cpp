@@ -10,7 +10,6 @@ namespace Tooltip
 {
 	namespace
 	{
-		using CursorSnapshot::Readable;
 		constexpr unsigned MaxText = 1024, MaxCommands = 2048, MaxNesting = 4, MaxDraws = 8;
 		constexpr int MaxCoordinate = 16384;
 		// Native ESP offsets from the gamemd-reverse #11 scope contract. T is the
@@ -108,7 +107,7 @@ namespace Tooltip
 		auto* surface = reinterpret_cast<DSurface*>(r->ESI());
 		const auto target = surface == DSurface::Composite ? Target::Composite
 			: surface == DSurface::Sidebar ? Target::Sidebar : Target::None;
-		if (scope.Filled || target == Target::None || !Readable(rect, sizeof(*rect)) || !Coordinate(rect->X) || !Coordinate(rect->Y)
+		if (scope.Filled || target == Target::None || !rect || !Coordinate(rect->X) || !Coordinate(rect->Y)
 			|| rect->Width < 0 || rect->Height < 0 || rect->Width > MaxCoordinate || rect->Height > MaxCoordinate)
 			{ scope.Filled = true; draw.Known = false; return; }
 		scope.Filled = true; scope.Surface = surface;
@@ -120,7 +119,7 @@ namespace Tooltip
 			view.X + view.Width, sidebar.X + sidebar.Width);
 		// Draw2 keeps the final text pointer, after Phobos' 478EE1 substitution.
 		const auto* text = r->Stack<const wchar_t*>(FillText);
-		for (unsigned i = 0; i < MaxText && Readable(text + i, sizeof(wchar_t)) && text[i]; ++i)
+		for (unsigned i = 0; text && i < MaxText && text[i]; ++i)
 			draw.Text.push_back(text[i]);
 		const Edge area {rect->X, rect->Y, rect->Width, rect->Height};
 		Solid(draw, area, unsigned(Drawing::RGB_To_Int(color)), Opacity256(opacity));

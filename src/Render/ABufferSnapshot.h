@@ -94,12 +94,12 @@ namespace ABufferSnapshot
 	// The file data behind a shape, without loading a reference that is not loaded yet.
 	inline const SHPStruct* ShapeData(const SHPStruct* shape)
 	{
-		if (!CursorSnapshot::Readable(shape, sizeof(SHPStruct))) return nullptr;
+		if (!shape) return nullptr;
 		if (!shape->IsReference()) return shape;
 		const auto* reference = shape->AsReference();
-		if (!CursorSnapshot::Readable(reference, sizeof(SHPReference)) || !reference->Loaded) return nullptr;
+		if (!reference->Loaded) return nullptr;
 		const auto* data = reference->Data;
-		return CursorSnapshot::Readable(data, sizeof(SHPStruct)) && !data->IsReference() ? data : nullptr;
+		return data && !data->IsReference() ? data : nullptr;
 	}
 
 	// 69E7E0 and 69E740 without their loading: each frame's bounds, and its Width*Height bytes at its
@@ -110,7 +110,6 @@ namespace ABufferSnapshot
 		shape.Data = ShapeData(shape.Pointer);
 		if (!shape.Data || shape.Data->Frames <= 0) return false;
 		const auto headers = sizeof(SHPStruct) + size_t(shape.Data->Frames) * sizeof(SHPFrame);
-		if (!CursorSnapshot::Readable(shape.Data, headers)) return false;
 		const auto identity = reinterpret_cast<std::uintptr_t>(shape.Data);
 		const auto hash = SidebarSnapshot::Hash(shape.Data, headers);
 		shape.Resource = Frames.LookupResource(identity);
@@ -152,7 +151,6 @@ namespace ABufferSnapshot
 			if (d.Width <= 0 || d.Height <= 0) return FrameCache::Status::InvalidData;
 			const auto* pixels = reinterpret_cast<const std::uint8_t*>(base + d.Offset);
 			const auto size = size_t(d.Width) * size_t(d.Height);
-			if (!CursorSnapshot::Readable(pixels, size)) return FrameCache::Status::InvalidData;
 			indices.assign(pixels, pixels + size);
 			return FrameCache::Status::Ready;
 		});
@@ -177,12 +175,12 @@ namespace ABufferSnapshot
 		const auto& view = DSurface::ViewBounds;
 		snapshot.View = view;
 		const auto* scenario = ScenarioClass::Instance;
-		if (!tactical || !CursorSnapshot::Readable(scenario, sizeof(ScenarioClass))) { snapshot.Reason = "ineligible"; return snapshot; }
+		if (!tactical || !scenario) { snapshot.Reason = "ineligible"; return snapshot; }
 		snapshot.Fog = *reinterpret_cast<const std::uint32_t*>(&scenario->SpecialFlags) & FogOfWarFlag;
 		if (snapshot.Fog)
 		{
 			const auto* player = HouseClass::CurrentPlayer;
-			if (!CursorSnapshot::Readable(player, sizeof(HouseClass))) { snapshot.Reason = "player"; return snapshot; }
+			if (!player) { snapshot.Reason = "player"; return snapshot; }
 			snapshot.Defeated = player->Defeated;
 		}
 		snapshot.Window = Game::hWnd != nullptr;
@@ -343,7 +341,7 @@ namespace ABufferSnapshot
 	inline void Trace(const Snapshot& snapshot, unsigned sample)
 	{
 		auto* buffer = ABuffer::Instance;
-		const bool readable = CursorSnapshot::Readable(buffer, sizeof(ABuffer));
+		const bool readable = buffer != nullptr;
 		const auto& map = MapClass::Instance;
 		// The first cell that draws anything but the plain frame 0, to explain a shaded edge.
 		const auto shaded = std::find_if(snapshot.Writes.begin(), snapshot.Writes.end(),

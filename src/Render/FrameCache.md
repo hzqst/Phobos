@@ -33,7 +33,7 @@
 ## 预算、失败与统计
 
 - 索引像素有效字节64MiB、资源256个、总帧描述槽65536、reference/Data别名512个。描述槽同时限制了成功记录与损坏帧负缓存的数量；实际allocator/map开销不包含在索引字节统计中。
-- 帧尺寸上限2048²、编码读取上限16MiB；没有可信完整文件长度时，末帧仍只能验证可读内存与格式界限。
+- 帧尺寸上限2048²、编码读取上限16MiB；没有可信完整文件长度时，末帧仍只能验证格式界限。
 - 解码成功且输出长度一致才发布FrameID；错误帧在当前ResourceID下负缓存，不反复解码。NotReady可稍后重试；超预算在解码之前拒绝；资源失效会归还活跃预算。
 - `FrameCache::Cache` 不读取引擎、不依赖SDL，decoder同步执行且不得重入修改cache。测试可用小预算和人工解码器验证失败路径。
 - `PHOBOS_SIDEBAR_TRACE=1` 开启 `[FrameCache]` 汇总：首次和每300次有效采集尝试记录，独立上限64条。包含hits/misses/attempts/decoded、与上次汇总相比的decodedDelta、活跃索引bytes/frames/resources、invalidations/invalid/budgetRejected及颜色转换次数。采集次数不是GPU present次数，也不保证每次原生帧都会经过此采样点。
