@@ -1,6 +1,7 @@
 #include "OverlaySnapshot.h"
 #include "CompositeSnapshot.h"
 #include "TerrainPass.h"
+#include "VoxelIdentity.h"
 
 #include <AnimTypeClass.h>
 #include <GameOptionsClass.h>
@@ -38,6 +39,78 @@ namespace OverlaySnapshot
 		std::vector<std::variant<RecordedCall, RecordedBlit, RecordedLine>> Recorded;
 		RecordedCall FirstUnmodeled;
 		RecordedBlit FirstUnmodeledBlit;
+
+		struct VoxelShadow
+		{
+			static constexpr unsigned Window = 120, MaxWindows = 16, ChecksPerFrame = 256;
+			VoxelIdentity::Tracker Context;
+			VoxelIdentity::Validator Oracle;
+			bool Enabled = false, Active = false;
+			unsigned Frames = 0, Windows = 0, Checks = 0;
+			std::uint64_t Scopes = 0, Parts = 0, Unknown = 0, Finals = 0, Ineligible = 0, Budget = 0;
+			std::array<std::uint64_t, 5> Results {};
+			VoxelShadow()
+			{
+				char value[2] {};
+				Enabled = GetEnvironmentVariableA("PHOBOS_VOXEL_IDENTITY_SHADOW", value, sizeof(value)) == 1 && value[0] == '1';
+			}
+			void Begin(bool capturing)
+			{
+				Active = Enabled && capturing && Windows < MaxWindows;
+				if (Active) { Context.BeginFrame(BlitFrameSource::Epoch); Checks = 0; }
+			}
+			void End()
+			{
+				if (!Active) return;
+				Context.BeginFrame(BlitFrameSource::Epoch);
+				Active = false;
+				if (++Frames != Window) return;
+				Debug::Log("[VoxelP2] window=%u scopes=%llu parts=%llu unknown=%llu finals=%llu ineligible=%llu budget=%llu seeded=%llu equal=%llu mismatch=%llu missing=%llu disabled=%llu scopeErrors=%u entries=%u epoch=%u\n",
+					++Windows, Scopes, Parts, Unknown, Finals, Ineligible, Budget, Results[0], Results[1], Results[2], Results[3], Results[4],
+					Context.ScopeErrors, unsigned(Oracle.Size()), BlitFrameSource::Epoch);
+				Frames = 0; Scopes = Parts = Unknown = Finals = Ineligible = Budget = 0; Results = {};
+			}
+			void UnknownWrite(const void* surface)
+			{
+				if (Active && Context.Targets(std::uintptr_t(surface))) { ++Unknown; Context.Unknown(std::uintptr_t(surface)); }
+			}
+			void Part(const BlitCall& call)
+			{
+				if (!Active || !Context.Targets(std::uintptr_t(call.Surface))) return;
+				// 707480's cached image only. Dynamic working-buffer draws (4AF328) stay ineligible.
+				if (!call.Compressed || call.Caller != 0x70773B || !call.Source || call.ZSurface)
+					{ UnknownWrite(call.Surface); return; }
+				auto* source = static_cast<XSurface*>(call.Source);
+				if (source->BytesPerPixel != 1) { UnknownWrite(call.Surface); return; }
+				const auto* payload = source->Lock(0, 0);
+				if (!payload) { UnknownWrite(call.Surface); return; }
+				VoxelIdentity::Component part;
+				part.Payload = std::uintptr_t(payload); part.Blitter = std::uintptr_t(call.Blitter);
+				source->Unlock();
+				size_t index = 0;
+				for (const auto* rect : {call.Bounds, call.Dest, call.Limit, call.Part})
+				{
+					part.Parameters[index++] = rect->X; part.Parameters[index++] = rect->Y;
+					part.Parameters[index++] = rect->Width; part.Parameters[index++] = rect->Height;
+				}
+				part.Parameters[16] = call.ZAdjust; part.Parameters[17] = call.Gradient;
+				part.Parameters[18] = call.Brightness; part.Parameters[19] = call.Tint;
+				Context.Add(std::uintptr_t(call.Surface), part, BlitFrameSource::Epoch); ++Parts;
+			}
+			void Final(const BlitCall& call, const RecordedBlit& blit)
+			{
+				if (!Active || !blit.OnTarget || call.Compressed
+					|| (call.Caller != 0x73B37C && call.Caller != 0x73B3EA && call.Caller != 0x73B44B)) return;
+				++Finals;
+				VoxelIdentity::Key key;
+				if (blit.Issue != BlitIssue::None || !blit.ID || !Context.Candidate(std::uintptr_t(call.Source),
+					{call.Limit->X + blit.Clipped.SourceX, call.Limit->Y + blit.Clipped.SourceY, blit.Clipped.Width, blit.Clipped.Rows},
+					BlitFrameSource::Epoch, key)) { ++Ineligible; return; }
+				if (Checks++ >= ChecksPerFrame) { ++Budget; return; }
+				++Results[size_t(Oracle.Observe(key, blit.ID, BlitFrameSource::Frames))];
+			}
+		};
+		VoxelShadow& IdentityShadow() { static VoxelShadow value; return value; }
 
 		// Opt-in, bounded P0 measurements. No pixel validation, extra engine reads or per-draw logging.
 		// Timings include instrumentation overhead; RenderLayers includes native work and recording.
@@ -1693,6 +1766,22 @@ namespace OverlaySnapshot
 		else if (trace) Trace();
 	}
 
+	void BeginVoxelIdentity(std::uintptr_t stackToken)
+	{
+		auto& shadow = IdentityShadow();
+		if (!shadow.Active) return;
+		// Retail 73B55B installs B1D13C as Temp. Only its address is retained.
+		const auto scratch = *reinterpret_cast<const std::uintptr_t*>(0xB1D13C);
+		shadow.Context.Begin(stackToken, scratch, BlitFrameSource::Epoch);
+		++shadow.Scopes;
+	}
+
+	void EndVoxelIdentity(std::uintptr_t stackToken)
+	{
+		auto& shadow = IdentityShadow();
+		if (shadow.Active) shadow.Context.End(stackToken);
+	}
+
 	void BeginRecording(DSurface* target)
 	{
 		Recorded.clear();
@@ -1700,22 +1789,26 @@ namespace OverlaySnapshot
 		RecordingAfter = false;
 		if (target) BlitFrameSource::BeginCapture();
 		Profile().Begin(target != nullptr);
+		IdentityShadow().Begin(target != nullptr);
 	}
 
 	void RecordAfterLayers()
 	{
 		Profile().End();
+		IdentityShadow().End();
 		RecordingAfter = RecordingTarget != nullptr;
 	}
 
 	void EndRecording()
 	{
+		IdentityShadow().End();
 		RecordingTarget = nullptr;
 		RecordingAfter = false;
 	}
 
 	void RecordCall(RecordedCall call, DSurface* surface)
 	{
+		IdentityShadow().UnknownWrite(surface);
 		// 4AED70 cuts the clip to the surface (421B60) and draws nothing where they do not meet.
 		auto& bounds = call.Bounds;
 		const std::int64_t left = std::max(bounds.X, 0), top = std::max(bounds.Y, 0);
@@ -1738,6 +1831,7 @@ namespace OverlaySnapshot
 		blit.Caller = call.Caller;
 		blit.OnTarget = call.Surface == RecordingTarget;
 		ProfileBlit profile(blit);
+		IdentityShadow().Part(call);
 		if (!blit.OnTarget) { Recorded.push_back(blit); return; }
 		const auto& dest = *call.Dest;
 		const auto& limit = *call.Limit;
@@ -1781,11 +1875,13 @@ namespace OverlaySnapshot
 			source->Unlock();
 		}
 		if (blit.Issue == BlitIssue::None && !blit.ID) blit.Issue = BlitIssue::Image;
+		IdentityShadow().Final(call, blit);
 		Recorded.push_back(blit);
 	}
 
 	void RecordLine(RecordedLine line, DSurface* surface)
 	{
+		IdentityShadow().UnknownWrite(surface);
 		line.OnTarget = surface == RecordingTarget;
 		line.AfterLayers = RecordingAfter;
 		if (line.OnTarget)

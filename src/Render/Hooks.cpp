@@ -138,6 +138,23 @@ DEFINE_HOOK(0x437A10, Copy_To_Surface_RLE_RecordLayers, 0x7)
 	return 0;
 }
 
+// Retail UnitClass::DrawAsVXL: before sub esp,1B4h, and after the final scratch clear.
+// Four saved registers plus locals put the original entry ESP at epilogue ESP+1C4h.
+// Shadow observation only; both hooks preserve the displaced instructions and registers.
+DEFINE_HOOK(0x73B470, UnitClass_DrawAsVXL_IdentityBegin, 0x6)
+{
+	if (OverlaySnapshot::RecordingTarget && !OverlaySnapshot::RecordingAfter)
+		OverlaySnapshot::BeginVoxelIdentity(R->ESP());
+	return 0;
+}
+
+DEFINE_HOOK(0x73C5DC, UnitClass_DrawAsVXL_IdentityEnd, 0xA)
+{
+	if (OverlaySnapshot::RecordingTarget && !OverlaySnapshot::RecordingAfter)
+		OverlaySnapshot::EndVoxelIdentity(R->ESP() + 0x1C4);
+	return 0;
+}
+
 // 5F99E0 frees every type's voxel cache and resets the arena the entries live in.
 DEFINE_HOOK(0x5F99E0, DestroyVoxelCaches_Purge, 0x5)
 {
