@@ -35,8 +35,12 @@ namespace OverlaySnapshot
 		// The first shape that could not be acquired: overlay, frame, frames of the shape.
 		std::array<int, 4> FirstFailure {};
 		// The calls, blits and lines of the last recorded RenderLayers in their order, and the first call and
-		// blit not modeled.
+		// blit not modeled. A capture consumes them once, after the RenderLayers that recorded them: their
+		// engine pointers are not kept for another frame. The captures that found none recorded are counted.
 		std::vector<std::variant<RecordedCall, RecordedBlit, RecordedLine>> Recorded;
+		bool RecordedFresh = false;
+		unsigned UnrecordedCaptures = 0;
+		constexpr unsigned MaxUnrecordedLogs = 8;
 		RecordedCall FirstUnmodeled;
 		RecordedBlit FirstUnmodeledBlit;
 
@@ -315,7 +319,8 @@ namespace OverlaySnapshot
 		// 490B90 and 490E50 pick a blitter from the convert's own tables by the flags. The flags each slot
 		// stands for, found by asking them for the combinations the draws model (an Alpha body, a shadow);
 		// and the convert and slot of each blitter of ConvertClass::Array, rebuilt at most once a capture
-		// when a blitter is not found.
+		// when a blitter is not found. They are dropped at the first lookup of a capture where the array no
+		// longer holds the converts they were built from, so no convert is read after it left the array.
 		std::array<std::uint32_t, PlainBlitters> PlainSlots {};
 		std::array<std::uint32_t, RLEBlitters> RLESlots {};
 		bool SlotsReady = false;
@@ -326,7 +331,8 @@ namespace OverlaySnapshot
 			bool Compressed = false;
 		};
 		std::unordered_map<const void*, BlitterOwner> BlitterOwners;
-		unsigned OwnersSerial = UINT_MAX;
+		std::vector<const ConvertClass*> OwnersArray;
+		unsigned OwnersSerial = UINT_MAX, CheckedSerial = UINT_MAX;
 
 		void FillSlots(const ConvertClass* convert)
 		{
@@ -352,12 +358,23 @@ namespace OverlaySnapshot
 				if (owner.Compressed != compressed) return false;
 				return compressed ? owner.Convert->RLEBlitters[owner.Slot] == blitter : owner.Convert->Blitters[owner.Slot] == blitter;
 			};
+			const auto& converts = ConvertClass::Array;
+			if (CheckedSerial != BlitFrameSource::Serial)
+			{
+				CheckedSerial = BlitFrameSource::Serial;
+				if (!std::equal(OwnersArray.begin(), OwnersArray.end(), converts.begin(), converts.end()))
+				{
+					BlitterOwners.clear();
+					OwnersArray.clear();
+				}
+			}
 			auto found = BlitterOwners.find(blitter);
 			if ((found == BlitterOwners.end() || !owned(found->second)) && OwnersSerial != BlitFrameSource::Serial)
 			{
 				OwnersSerial = BlitFrameSource::Serial;
 				BlitterOwners.clear();
-				for (const auto* convert : ConvertClass::Array)
+				OwnersArray.assign(converts.begin(), converts.end());
+				for (const auto* convert : converts)
 				{
 					if (!convert) continue;
 					for (size_t i = 0; i < PlainBlitters; ++i)
@@ -1851,9 +1868,13 @@ namespace OverlaySnapshot
 				if (!object || object->WhatAmI() != AbstractType::Building) continue;
 				capture.Building(static_cast<BuildingClass*>(object));
 			}
-			CaptureComposite(capture);
+			if (RecordedFresh) CaptureComposite(capture);
+			else if (++UnrecordedCaptures <= MaxUnrecordedLogs)
+				Debug::Log("[TerrainGPU] composite not recorded before capture count=%u\n", UnrecordedCaptures);
 			Current.Visible = true;
 		}
+		Recorded.clear();
+		RecordedFresh = false;
 		// The native Tile keeps what scrolling redrew in strips, and a Z-shaped draw's depth depends
 		// on its clip's top row, so the trace (PHOBOS_TERRAIN_TRACE only) asks for a full redraw and
 		// checks the capture after it.
@@ -1890,6 +1911,7 @@ namespace OverlaySnapshot
 	void BeginRecording(DSurface* target)
 	{
 		Recorded.clear();
+		RecordedFresh = target != nullptr;
 		RecordingTarget = target;
 		RecordingAfter = false;
 		if (target) BlitFrameSource::BeginCapture();

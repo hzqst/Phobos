@@ -106,7 +106,9 @@ GPURender::OnToolTipsDrawn
 > 2026-10-31 用户决定：彻底废弃 `CursorSnapshot::Readable`（VirtualQuery 探测），取代第 1 条中“不要全局删除安全检查”的约束。
 > 理由：VirtualQuery 只能证明页面已提交，不能证明对象存活，释放后访问与类型混淆照样通过，反而把真正的违规访问掩盖成“不画”。
 > 现在采集层只保留判空与数值边界（计数、帧索引、偏移溢出、编码上限）；若存在越界或悬空访问，应作为崩溃暴露并修正根因。
-> 已知待查的跨帧裸指针：`OverlaySnapshot.cpp` `FindBlitter` 的 `BlitterOwners` 缓存 `ConvertClass*`，Convert 释放后会读到失效内存。
+> 跨帧裸指针排查（同日完成）：`FindBlitter` 的 `BlitterOwners` 改为每次采集首次查找时比对 `ConvertClass::Array` 与建表时副本，
+> 不一致即丢弃；`OverlaySnapshot::Recorded` 每次采集只消费一次、消费后清空，未经 RenderLayers 录制的采集跳过 Composite
+> 并记日志 `composite not recorded`（前 8 次）。其余缓存均以内容哈希、分代或失效 hook 约束，或不保留引擎指针。
 
 ### 废弃 Readable 后重测（2026-10-31）
 
