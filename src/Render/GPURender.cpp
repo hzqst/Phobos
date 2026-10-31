@@ -24,6 +24,7 @@
 
 #include <Phobos.h>
 #include <Utilities/Debug.h>
+#include <Utilities/MainThreadProfile.h>
 
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_events.h>
@@ -137,6 +138,7 @@ namespace
 
 	FrameAtlas::BeginResult PrepareSidebar()
 	{
+		MainThreadProfile::Scope profile(MainThreadProfile::Phase::GpuPrepare);
 		Sprites.clear();
 		Overlay.clear();
 		const auto& terrain = TerrainSnapshot::Current;
@@ -656,6 +658,8 @@ void GPURender::ReleaseResources()
 
 void GPURender::Present()
 {
+	// Diagnostic wall time includes driver waits; CPU cycles are recorded separately.
+	MainThreadProfile::Scope profile(MainThreadProfile::Phase::GpuPresent);
 	PollCapture();
 	LastPresentTime = SDL_GetTicksNS();
 	bool mirrorFresh = true;
@@ -787,6 +791,7 @@ void GPURender::Present()
 
 void GPURender::OnSidebarDraw()
 {
+	MainThreadProfile::Scope profile(MainThreadProfile::Phase::SidebarCapture);
 	if (!MirrorMode && (CurrentState == State::Running || CurrentState == State::Hidden))
 	{
 		Tooltip::PublishSidebar();
@@ -802,9 +807,15 @@ void GPURender::OnToolTipsDrawn()
 	{
 		Tooltip::PublishTopLevel();
 		const auto traced = TerrainSnapshot::TraceCount;
-		TerrainSnapshot::CaptureAfterDraw();
+		{
+			MainThreadProfile::Scope profile(MainThreadProfile::Phase::TerrainCapture);
+			TerrainSnapshot::CaptureAfterDraw();
+		}
 		// The overlay trace follows the terrain trace's settled, changed views.
-		OverlaySnapshot::CaptureAfterDraw(TerrainSnapshot::TraceCount != traced);
+		{
+			MainThreadProfile::Scope profile(MainThreadProfile::Phase::ObjectCapture);
+			OverlaySnapshot::CaptureAfterDraw(TerrainSnapshot::TraceCount != traced);
+		}
 	}
 }
 
@@ -815,6 +826,8 @@ void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
 	// serves only the trace that checks this render.
 	if (drawn)
 	{
+		MainThreadProfile::Exit(MainThreadProfile::Phase::NativeLayers);
+		MainThreadProfile::Scope profile(MainThreadProfile::Phase::CompositeCopy);
 		// The lines that follow up to the end of the Techno loop (6D4912) are recorded too.
 		OverlaySnapshot::RecordAfterLayers();
 		if (capturing || Automation::IsRunning()) CompositeSnapshot::Record(CompositeSnapshot::Output, pSurface);
@@ -825,6 +838,7 @@ void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
 	OverlaySnapshot::BeginRecording(capturing ? pSurface : nullptr);
 	if (capturing && OverlaySnapshot::RedrawRequested) CompositeSnapshot::Record(CompositeSnapshot::Input, pSurface);
 	else CompositeSnapshot::Input.Valid = false;
+	MainThreadProfile::Enter(MainThreadProfile::Phase::NativeLayers);
 }
 
 void GPURender::InvalidateTerrain(bool resources)

@@ -45,6 +45,10 @@ Voxel 采集性能调查可在启动进程前设置 `PHOBOS_VOXEL_PROFILE=1`，�
 不依赖 Automation 或 GPU 是否启用，也不是 GPU-only 渲染模式。日志最多输出 16 个 120 次
 RenderLayers 窗口。使用边界、Hook 核验和实测见 [VoxelDrawDiagnostic](../src/Render/VoxelDrawDiagnostic.md)。
 
+`PHOBOS_MAIN_THREAD_PROFILE=1` 开启主线程诊断分段计时，最多 64 个 120 逻辑帧窗口；
+日志分开记录独占墙钟、CPU cycles 和线程 CPU 总时间。CPU cycles 不能按标称频率直接换算耗时；
+互斥分项、调用栈热点及测量限制见 [MainThreadHotspots](../src/Render/MainThreadHotspots.md)。
+
 ## 协议与工具
 
 提供 2026-07-28 无握手 `server/discover`、`tools/list`、`tools/call`，以及独立的

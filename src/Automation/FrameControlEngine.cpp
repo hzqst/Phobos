@@ -4,6 +4,7 @@
 #include <SessionClass.h>
 #include <Unsorted.h>
 #include <Fundamentals.h>
+#include <Utilities/MainThreadProfile.h>
 
 namespace Automation
 {
@@ -50,12 +51,15 @@ namespace Automation
 	void StopFrameTracking() { Tracking = false; FrameEntered = false; }
 	void FrameLogicBegin()
 	{
+		// Includes native work; nested GPU/capture scopes account for their own exclusive time.
+		MainThreadProfile::Enter(MainThreadProfile::Phase::MainLoop);
 		RefreshScene();
 		FrameEntered = Tracking && Unsorted::ScenarioStarted && Game::IsActive;
 		EntryFrame = Unsorted::CurrentFrame; EntryScene = SceneID;
 	}
 	void FramePauseBarrier()
 	{
+		MainThreadProfile::Exit(MainThreadProfile::Phase::MainLoop);
 		FrameEntered = false;
 		if (Tracking) ++Barriers;
 	}
@@ -67,6 +71,8 @@ namespace Automation
 		const bool complete = FrameEntered && EntryScene == SceneID
 			&& uint32_t(Unsorted::CurrentFrame) == EntryFrame + 1;
 		if (complete) ++Completed;
+		MainThreadProfile::Exit(MainThreadProfile::Phase::MainLoop);
+		MainThreadProfile::Get().Frame(complete);
 		FrameEntered = false;
 		return complete;
 	}
