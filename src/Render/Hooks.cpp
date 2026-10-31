@@ -5,6 +5,37 @@
 #include "Tooltip.h"
 
 #include <Utilities/Macro.h>
+#include <Utilities/Debug.h>
+
+namespace
+{
+	// Deliberately removes UnitClass VXLs from BOTH renderers. Diagnostic only.
+	struct UnitVoxelDrawDiagnostic
+	{
+		static constexpr unsigned WindowFrames = 120, MaxWindows = 16;
+		bool Enabled = false;
+		unsigned Frames = 0, Windows = 0;
+		std::uint64_t Skipped = 0, Completed = 0;
+		UnitVoxelDrawDiagnostic()
+		{
+			char value[2] {};
+			Enabled = GetEnvironmentVariableA("PHOBOS_DIAGNOSTIC_SKIP_UNIT_VXL_DRAW", value, sizeof(value)) == 1 && value[0] == '1';
+			if (Enabled) Debug::Log("[VoxelDrawDiagnostic] enabled=1 scope=UnitClass.DrawAsVXL rendering=omitted not_gpu_only=1\n");
+		}
+		void EndLayers()
+		{
+			if (!Enabled || Windows >= MaxWindows || ++Frames != WindowFrames) return;
+			Debug::Log("[VoxelDrawDiagnostic] window=%u frames=%u skipped=%llu nativeCompleted=%llu\n",
+				++Windows, Frames, Skipped, Completed);
+			Frames = 0; Skipped = Completed = 0;
+		}
+	};
+	UnitVoxelDrawDiagnostic& VoxelDrawDiagnostic()
+	{
+		static UnitVoxelDrawDiagnostic diagnostic;
+		return diagnostic;
+	}
+}
 
 // WinMain has set the initial display mode and allocated the global surfaces.
 // The first display setup does not go through Set_Video_Mode.
@@ -51,6 +82,7 @@ DEFINE_HOOK(0x6D465F, TacticalClass_Render_LayersBegin, 0x5)
 
 DEFINE_HOOK(0x6D4664, TacticalClass_Render_LayersEnd, 0x5)
 {
+	VoxelDrawDiagnostic().EndLayers();
 	GET(DSurface*, pSurface, EBX);
 	GPURender::OnRenderLayers(pSurface, true);
 	return 0;
@@ -140,9 +172,15 @@ DEFINE_HOOK(0x437A10, Copy_To_Surface_RLE_RecordLayers, 0x7)
 
 // Retail UnitClass::DrawAsVXL: before sub esp,1B4h, and after the final scratch clear.
 // Four saved registers plus locals put the original entry ESP at epilogue ESP+1C4h.
-// Shadow observation only; both hooks preserve the displaced instructions and registers.
+// The opt-in diagnostic skips the entire void function, before any state or identity scope changes.
+// Retail 73C5E6 is ret 20h at entry stack depth: Point2D + RectangleStruct + brightness + tint.
 DEFINE_HOOK(0x73B470, UnitClass_DrawAsVXL_IdentityBegin, 0x6)
 {
+	if (auto& diagnostic = VoxelDrawDiagnostic(); diagnostic.Enabled)
+	{
+		++diagnostic.Skipped;
+		return 0x73C5E6;
+	}
 	if (OverlaySnapshot::RecordingTarget && !OverlaySnapshot::RecordingAfter)
 		OverlaySnapshot::BeginVoxelIdentity(R->ESP());
 	return 0;
@@ -150,6 +188,7 @@ DEFINE_HOOK(0x73B470, UnitClass_DrawAsVXL_IdentityBegin, 0x6)
 
 DEFINE_HOOK(0x73C5DC, UnitClass_DrawAsVXL_IdentityEnd, 0xA)
 {
+	if (auto& diagnostic = VoxelDrawDiagnostic(); diagnostic.Enabled) ++diagnostic.Completed;
 	if (OverlaySnapshot::RecordingTarget && !OverlaySnapshot::RecordingAfter)
 		OverlaySnapshot::EndVoxelIdentity(R->ESP() + 0x1C4);
 	return 0;
