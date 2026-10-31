@@ -37,7 +37,7 @@ Phobos fork 分支 `feature/gpu-render`（主线 `develop`）。在游戏主窗�
 - [[Automation MCP]]：工具、元数据、截图语义、使用陷阱
 - [[实机验收流程]]：隔离副本、构建部署、Spawner 场景构造、同帧截图对照方法
 - [[gamemd-reverse 交接索引]]：静态调查 issue、交接文档与提交对照
-- 经验：[[经验 Spawner 预置建筑不生效]]、[[经验 Python 脚本名遮蔽 mcp 包]]、[[经验 页签闪烁导致双源截图差异]]、[[经验 cameo 名称开关语义相反]]、[[经验 测试地图缺 OverlayPack 画出满屏围墙]]、[[经验 用 Visibility 与 Foggedness 判别 ABuffer 差异来源]]、[[经验 原生 Tile 对照要等完整重画]]
+- 经验：[[经验 Spawner 预置建筑不生效]]、[[经验 Python 脚本名遮蔽 mcp 包]]、[[经验 页签闪烁导致双源截图差异]]、[[经验 cameo 名称开关语义相反]]、[[经验 测试地图缺 OverlayPack 画出满屏围墙]]、[[经验 用 Visibility 与 Foggedness 判别 ABuffer 差异来源]]、[[经验 原生 Tile 对照要等完整重画]]、[[经验 半透明对照要考虑 Phobos 的 blitter 补丁]]
 
 ## 仓库内权威文档
 
