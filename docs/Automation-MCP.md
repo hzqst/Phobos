@@ -40,6 +40,11 @@ Voxel 采集性能调查可在启动进程前设置 `PHOBOS_VOXEL_PROFILE=1`，�
 逐命中重新采集并核对像素。FAST 单独开启才会跳过命中的 scratch 复制／内容哈希。
 准入、清理检查、缓存续期与测量限制见 [VoxelIdentityP3](../src/Render/VoxelIdentityP3.md)。
 
+`PHOBOS_DIAGNOSTIC_SKIP_UNIT_VXL_DRAW=1` 是负对照：启动后跳过整个 `UnitClass::DrawAsVXL`，
+载具 VXL 本体及该函数内阴影在原生／GPU 画面中均消失，单位逻辑仍存在。它默认关闭，
+不依赖 Automation 或 GPU 是否启用，也不是 GPU-only 渲染模式。日志最多输出 16 个 120 次
+RenderLayers 窗口。使用边界、Hook 核验和实测见 [VoxelDrawDiagnostic](../src/Render/VoxelDrawDiagnostic.md)。
+
 ## 协议与工具
 
 提供 2026-07-28 无握手 `server/discover`、`tools/list`、`tools/call`，以及独立的
