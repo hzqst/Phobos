@@ -1,4 +1,4 @@
-# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象 / C7 桥格与平铺帧 / D2a 动画 Terrain 对照 / D2b GPU 动画 Terrain / D3 对象层）
+# 战术区地形：GPU 重画（阶段 C2 / C2.5 / C3 采集 / C4 ABuffer / C5.1 弹坑 / C5.2a 深度缓冲 / C5.2b overlay 采集 / C5.2c GPU overlay / C6 Terrain 对象 / C7 桥格与平铺帧 / D2a 动画 Terrain 对照 / D2b GPU 动画 Terrain / D3 对象层与体素）
 
 2026-10-30。依据 gamemd-reverse Issue #16 / `443a5e7` 的 `docs/zh-CN/terrain-gpu-handoff.md` 及其完整还原（`TerrainVisibleTileScan`、`TerrainCellTileDraw`、`TerrainTileBounds`、`TerrainTileVariant`、`TerrainTileFlags`、`TerrainTilePixels`、`AlphaLightingRemap`）。对照基准是 Automation 的 `source=native_terrain`（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- RenderLayers（D3）：只有经 `4AED70` 的 SHP；体素单位/弹体/炮塔/炮管（D3a-3）、选中框与目标线等画线、粒子与激光、RING1 仍不画，不居中或带 remap/Warp 等位的调用不建模（实测 GPUINF/GPUANIM/GPUDMG/GPUSHP 均为 0 次）。Alpha（`800`）不调制颜色。GPUINF/GPUSHP 顶部建筑处恒有 32 个 `others` 像素（原生多出的灰色，非 `4AED70`，未查）。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- RenderLayers（D3）：经 `4AED70` 的 SHP 与经 `4373B0`/`437A10` 的体素 blit；选中框与目标线等画线、粒子与激光、RING1 仍不画，不居中或带 remap/Warp 等位的调用、blitter 不属于已知 convert 或不是 Alpha 本体/阴影的 blit 不建模（实测 GPUINF/GPUANIM/GPUDMG/GPUSHP/GPUVXL/GPUBLD 均为 0 次）。Alpha（`800`）不调制颜色。D3a-2 记下的 GPUINF/GPUSHP 顶部建筑处 32 个 `others` 像素是体素缓存命中（`707480`），D3a-3 后为 0。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
 - `4D1890` deferred 记录只画建筑（D1c）：开 FogOfWar 实测只出现建筑记录；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾建筑的保存动画在原生按格重画后可能缺失，快照按全量重画画出（见“迷雾建筑”）；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -157,7 +157,7 @@ Tile 的第 8 步（`6D3870 → 6D9920`）在 Terrain 对象与悬崖投影之�
 | 大门（mission 24 且 UnloadTimer 处于开关状态） | 只画本体：帧 `BuildingImage::GateFrame`（进度×GateStages 截断，关闭时反向，空闲 0、全开为最后一阶，受损再加 GateStages+1），亮度只用 `Intensity_Normal` |
 | 自身阴影 | 仅 `bDrawShadow` 且类型非 NoShadow：帧 `部件帧 + int16(Frames)/2`，`z=−h−4`，梯度 0，亮度 1000，无 tint，flags `6E01` |
 | 颜色 | Convert：类型 `TerrainPalette` 时中心格 LightConvert（亮度改为 `int16(Intensity_Terrain)`），否则 `GetRemapColour()`；亮度 `int16(Intensity_Normal)+ExtraLight` → `GetFlashingIntensity` → 铁幕 → 空袭标记 → 加 Phobos `CustomTintIntensity`（`70632E`/`706389`） |
-| tint | `GetTintColor(铁幕, 空袭, 狂暴=否) | GetCustomTintColor`，中心格 shroud 时为 0；只有 RLE 帧的 blitter 把它 OR 进 16 位颜色（`Draw::Tint`，GPU 在 `TerrainShape.ps` 里 OR 到查表结果）|
+| tint | `GetTintColor(铁幕, 空袭, 狂暴=否) | GetCustomTintColor`，中心格 shroud 时为 0；只有测 Z 的 Alpha 本体 blitter 把它 OR 进 16 位颜色：RLE 的 AlphaZRead/AlphaZReadWrite（`498150`/`499280`）与非 RLE 的 AlphaZRead（`494C40`），其余 blitter 的 tinted 版本转调 `Blit_Copy`（D3a-3 在 IDB 逐表位核对后修正；`Draw::Tint`，GPU 在 `TerrainShape.ps` 里 OR 到查表结果）|
 | 不画 | 另一种 visual（`VisualCharacter≠Normal`）、正在折跃、对当前玩家不可见、伪装中的建筑计为 `unsupported`，不画 |
 
 Ares 的 `437CCC` 把无 ZShape 的 RLE blitter 默认读取的 Z 调整行换成与帧同宽的全 0 缓冲，所以宽阴影等无 ZShape 的 RLE 帧没有逐像素调整。trace 在 `overlay` 行后加 `buildings`：Ground 层建筑数 `buildings`、`fogged`、`outside`、`unsupported`、开关中的大门 `gates`、卸载中的 `unloading`、画出的底座 `bibs` 与门 `doors`；`overlaytypes` 的键前缀 `b` 为建筑类型号。
@@ -183,22 +183,24 @@ Tile 第 4 步（`6D3470`）在弹坑之后、overlay 之前调 `4D1890`。快�
 
 `6D3D10` 的 mode 2 在 `6D465F` 调 RenderLayers（`6D8DB0`），此时目标（`EBX`，正常为 Composite）已锁定并设为 Temp，内容是 mode 1 末尾从 Tile 复制来的 ViewBounds；`6D4664` 返回后才画 Spotlight、激光、计时器等，`4F4583` 时 Composite 已含 UI，不能作对照。`src/Render/Hooks.cpp` 在这两处各加一个只观测的 hook（整条 call 被移出，`return 0` 照常执行），`CompositeSnapshot` 按 #23 §9.2 复制目标的 ViewBounds：核对目标同时是 Temp 与 Composite、`LockLevel>0`、2 字节像素、ViewBounds 在 surface 内，按 pitch 逐行复制到自有缓冲，不再 Lock，失败记原因。`6D465F` 的输入只在本次渲染要做 trace 时复制；`6D4664` 的输出在 GPU 窗口运行或 MCP 服务运行时每次渲染都复制，是 Automation `source=native_composite` 的来源（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-RenderLayers 画到目标上的 SHP 一律**记录原生调用**，不在 CPU 重推（#26 起由用户确定；D2/D3b/D3a-1 的逐对象重算已删除）：Ares 3.0p1 在 SHP 车辆路径上的 FacingsA/B、WaterType、ChangeType、DrawShadowEarlier、SkipUnitShadow、OreGatherAnim 与 Phobos 的 73C7AC/73CCF4/73CFA7/73D0DB/73D223/73CF46 等改写都直接体现在最终参数里，绘制顺序就是原生顺序，DrawExtras 的 pips 等 SHP 也一并得到。
+RenderLayers 画到目标上的 SHP 与体素一律**记录原生调用**，不在 CPU 重推（#26 起由用户确定；D2/D3b/D3a-1 的逐对象重算已删除）：Ares 3.0p1 在 SHP 车辆路径上的 FacingsA/B、WaterType、ChangeType、DrawShadowEarlier、SkipUnitShadow、OreGatherAnim 与 Phobos 的 73C7AC/73CCF4/73CFA7/73D0DB/73D223/73CF46 等改写都直接体现在最终参数里，绘制顺序就是原生顺序，DrawExtras 的 pips 等 SHP 也一并得到。
 
 | 项 | 规则 |
 | --- | --- |
 | 区间 | `GPURender::OnRenderLayers`：`6D465F` 时若本次渲染要采集（GPU 窗口 Running/Hidden 且非镜像）则 `OverlaySnapshot::BeginRecording(目标)`，否则清空并不记录；`6D4664` 时 `EndRecording` |
 | 记录（`4AED70` 入口，6 字节 `sub esp`） | 区间内每次调用按原样保存：ConvertClass、SHP、帧、点、clip（先与 surface 矩形求交，同 `421B60`）、flags、remap、ZAdjust、梯度、亮度、tint、ZShape 与帧/偏移、返回地址；目标不是区间的 surface（SHP 炮塔组合用的 scratch `B1D13C`）计 `elsewhere`。无 SHP、点或 clip 的调用原生不画，不记 |
 | 回放（`4F4583`） | 按顺序经 `Capture::Place`：中心为 `clip 原点 + 点`，clip 用调用自己的；`Darken(1)` 为阴影，`6` 为半透明位，`2000/1000` 测 Z、`4000` 测并写，RLE 半透明且只测不写时按 Phobos 补丁取整（见下）。不建模（`unmodeled`）：无 `Centered(200)`、有 `Warp/ZRemap/Plain/40/80/MultiPass/8000` 等其他位、remap 非 0、ZShape 帧非 0 |
-| 半透明 | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
-| 不在其中 | 体素（`4AF2A0`/`73B140` 经 `4373B0` 直接 blit，D3a-3）、选中框与目标线等画线、RING1 的 Direct3D、粒子等不经 `4AED70` 的绘制；Alpha（`800`）不调制颜色 |
+| 半透明与 tint | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint；tint 只由测 Z 的 Alpha 本体 blitter 应用（RLE 的 AlphaZRead/AlphaZReadWrite，非 RLE 的 AlphaZRead，见“建筑”的 tint 一行）。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
+| 体素 blit（D3a-3） | 区间内 `4373B0`、`437A10` 的入口（各 7 字节，`sub esp` 与 `mov eax`）记录返回地址不在 `4AED70`（`4AED70..4AF295`，已由其记录覆盖）的调用：未缓存的体素与影子（`4AF2A0`，#26 §5.2）、体素缓存命中（`707480`）、车辆 scratch 合成图（`73B140` 的三处）。两者参数次序相同：目标、clip、放置矩形、源 surface、源矩形（`4373B0` 为 surface 区域，`437A10` 为整帧）、要画的部分、blitter、Z、梯度、亮度、tint（`437A10` 之前另有未用值与 Z adjust surface）。在调用时按 `7BBE20` 裁剪（`ShapeDepth::Clip`，`437A10` 为压缩方式）并立即取像素：`4373B0` 只复制画到的 8 位像素，`437A10` 解码整帧 RLE（`661590` 写的 SHP 压缩格式）。blitter 反查 `ConvertClass::Array` 里所属的 convert 与表位，表位代表的 flags 由对 `490B90`/`490E50` 逐一询问 Alpha 本体（含 `2/4/6`）与阴影 × 不测/`2000`/`4000` 得到，其余表位不建模。目标不是区间 surface（部件画进 scratch）计 `blitsElsewhere`；源不是 8 位或与目标相同、带 Z adjust surface、`437A10` 的部分与整帧不同、clip 超出 surface、取像素失败都计 `blitsUnmodeled` |
+| 体素图像缓存 | `BlitFrameSource`（无引擎依赖，有单元测试）：`4373B0` 的图按内容（FNV-1a，命中后整块比较以排除碰撞）去重，`437A10` 的缓存项按 `(数据地址, 宽, 高, 清空次数)` 取用，`5F99E0`（5 字节 `mov eax`）清空全部类型的体素缓存并复位区域时清空次数加 1；每次采集计数，每 64 次淘汰 256 次采集未用的项，占用超过预算（32 MiB）四分之三时淘汰上次以来未用的项；`TerrainSnapshot::Clear` 时清空。`Draw::Storage` 指明帧所在的缓存，atlas 与 CPU 重放按它取帧 |
+| 不在其中 | 选中框与目标线等画线、RING1 的 Direct3D、粒子等不经这三个入口的绘制；Alpha（`800`）不调制颜色 |
 
 GPU：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之后，共用 shape 实例、atlas 与 `TerrainShape.ps`。深度管线按 不测/只测/测并写 × 本体/阴影/半透明 共 9 条；半透明绘制在新的一组开始前结束渲染通道，把目标复制到 `CopyTexture`，着色器读旧值算出整数结果（`RoundedShape` 时按通道 `(a+b+1)>>1`，只在色彩打包为 565 即 `HalfMask == F7DE>>1` 时画，否则跳过），互不重叠的半透明绘制共用一次复制。战术目标因此是“Tile + RenderLayers 的 SHP”，对照基准为同一暂停帧的 `native_composite`。
 
 trace（`PHOBOS_TERRAIN_TRACE=1`，与 `tilecheck` 同一次采集）在 `tiledepth` 之后输出：
 
-- `composite`：层内对象数 `layerObjects`、被 `6D8DB0` 标 IsVisible 的非 Terrain/动画对象 `othersVisible`（它先清每个对象的该标志，绘制时再置位）及其中 `GetRenderDimensions` 为空的 `unbounded`（体素单位）；`calls/elsewhere/unmodeled` 与第一个不建模调用的 `返回地址:flags:remap:zshapeFrame`；`bodies/shadows/compressed/translucent/writing/tinted` 与 Place 的各失败计数；`copyFailed` 为复制失败的渲染数。
-- `compositedraws`：每次绘制 `返回地址:帧[s][t][w|n]@x,y,宽x高`（`s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z）。
+- `composite`：层内对象数 `layerObjects`、被 `6D8DB0` 标 IsVisible 的非 Terrain/动画对象 `othersVisible`（它先清每个对象的该标志，绘制时再置位）及其中 `GetRenderDimensions` 为空的 `unbounded`（体素单位）；`calls/elsewhere/unmodeled` 与第一个不建模调用的 `返回地址:flags:remap:zshapeFrame`；`bodies/shadows/compressed/translucent/writing/tinted` 与 Place 的各失败计数；`copyFailed` 为复制失败的渲染数；`blits/blitsElsewhere/blitsUnmodeled` 与第一个不建模 blit 的 `返回地址:issue:rle:flags`（issue 1 blitter、2 源、3 clip、4 图像），`blitImages/blitBytes` 为 `BlitFrameSource` 的帧数与字节，`epoch` 为清空次数。
+- `compositedraws`：每次绘制 `返回地址:帧[s][t][w|n]@x,y,宽x高`（blit 的帧为 `-1`；`s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z）。
 - `compositecheck`：`input/output` 为两份副本的状态（`ok`、失败原因、`bounds_differ` 或 `stale`=不是本帧）；`inputMismatched` 为输入与原生 Tile 的 ViewBounds 不同的像素（应为 0）；在输入上用原生 Z、A 按顺序重放 `CompositeDraws`，与输出比较：`drawn` 为被画到的像素，`mismatched` 分为 `body/shadow`（已画像素不同）与 `untouched`，后者再按是否落在 IsVisible 对象的 `GetRenderDimensions` 矩形内分为 `others/unexplained`。`compositedrawn` 为第一个归属绘制的不同像素与其绘制，`compositesamples` 列前 24 个不同像素。
 
 ## 验收（2026-10-30）
@@ -470,3 +472,21 @@ HEAD `28b683dd` + 本批未提交改动，DLL SHA256 `7c7ad539…`，1024×768�
 | GPUSHP（Vulkan） | 开局、选中并移动、取消选择 | 同上 | 同上 |
 
 临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a`（`rec-inf`、`rec-anim`、`rec-dmg`、`shp1`、`shp2`、`vk-shp`）。回归脚本去掉 `AnimImageTests`、`UnitImageTests`，其余全部通过；Debug 构建无新警告。未实测：带 VXL 炮管的 SHP 车辆（走 scratch 组合，归 D3a-3）、SHP 炮塔、采矿动画与旗帜、GPUDOOR 的 DoorAnim。
+
+### D3a-3 体素：记录 4373B0/437A10 的 blit（2026-10-31）
+
+HEAD `861f712e` + 本批未提交改动，DLL SHA256 `a98a601b…`（tint 规则修正后 `5bcb6df0…`，下表最后两行与 GPUINF/GPUBLD 复跑），1024×768。体素按用户选的方式在最终提交点记录（见“RenderLayers”的“体素 blit”“体素图像缓存”）；原生缓存命中本来就不重新光栅化，我们这边命中的缓存项与内容相同的 scratch 图不再上传。新地图 `GPUVXL.MAP`（`scripts/make_vxl.py`，GPUDMG 加玩家的攻城直升机、两架 Harrier、一辆残血坦克，`[AudioVisual] JumpjetTilt=yes`）。每个状态在同一暂停帧比较 `native_composite` 与 `gpu`（`scripts/cmpcomp.py`）。
+
+| 地图（后端） | 状态 | `composite`/`compositecheck` | GPU 对 `native_composite` |
+| --- | --- | --- | --- |
+| GPUINF（D3D12） | 开局与交火、左右滚 | 每帧 3 次 blit（`707480` 本体与影子、`73B140` scratch），`blitsUnmodeled=0`，`mismatched=0`（原 2334 个 `others` 消失） | 0（光标在战术区外） |
+| GPUDMG（D3D12） | 坦克强制攻击、爆炸 | `mismatched=0`，`blitImages` 4→23 | 只有光标（188–411 像素，随鼠标位置） |
+| GPUVXL（D3D12） | 直升机与 Harrier 起飞移动、打掉残血坦克 | 每帧 8–12 次 blit，出现过 `4AF2A0` 直接提交，`blitImages` 增到 136（倾斜时键失效），`mismatched=0` | 只有光标 |
+| GPUVXL（Vulkan） | 直升机与 Harrier 起飞移动 | `mismatched=0` | 只有光标 |
+| GPUBLD（D3D12） | 开局、上滚、左滚 | `tilecheck` 颜色与 Z 全一致，`compositecheck mismatched=0` | 只有光标（原约 3217 像素的单位差异消失） |
+| GPUANIM（D3D12） | 开局、上滚 | `mismatched=0` | 只有光标 |
+| GPUSHP（D3D12） | 开局 | `mismatched=0`（D3a-2 的 32 像素消失） | 只有光标 |
+| GPUTINT（D3D12） | GPUVXL 加 `[MTNK] Tint.Color=255,0,0`（`scripts/make_tint.py`），坦克移动 | 每帧 `tinted=2`，都是 `73B140` 的非 RLE scratch 合成图，`mismatched=0`（按旧规则会丢掉这两次的 tint） | 只有光标 |
+| GPUINF、GPUBLD（D3D12，复跑） | 开局、滚动 | `mismatched=0`，`tilecheck` 全一致 | GPUINF 0，GPUBLD 只有光标 |
+
+临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a3`。回归脚本新增 `BlitFrameSourceTests`，全部通过；Debug 构建无新警告。未实测：体素碎片（VoxelAnim `749B70`，原版 MTNK 死亡不产生）、体素弹体（`46B0C0`）、`73B140` 桥下分两段提交的两处、`5F99E0` 实际触发（本轮 `epoch=0`）、铁幕与空袭的 tint、体素的半透明 visual、RLE 缓存项带 tint 的绘制（GPUTINT 里坦克只经 scratch）。tint 规则按 IDB 逐表位核对后改为“只有测 Z 的 Alpha 本体 blitter 应用”（原为“只有 RLE 帧应用”），对 `4AED70` 的调用同样生效。

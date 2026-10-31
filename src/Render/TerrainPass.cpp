@@ -245,7 +245,7 @@ namespace TerrainPass
 
 	FrameAtlas::Request Request(const OverlaySnapshot::Draw& draw)
 	{
-		return {draw.ID, {}, FrameAtlas::SourceKind::Mask, &ShapeFrameSource::Frames};
+		return {draw.ID, {}, FrameAtlas::SourceKind::Mask, draw.Storage};
 	}
 
 	namespace

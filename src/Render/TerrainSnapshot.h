@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ABufferSnapshot.h"
+#include "BlitFrameSource.h"
 #include "ShapeFrameSource.h"
 #include "SidebarSnapshot.h"
 #include "TerrainBatch.h"
@@ -133,6 +134,7 @@ namespace TerrainSnapshot
 		ClearPieces();
 		Tables.Clear();
 		ABufferSnapshot::Clear();
+		BlitFrameSource::Clear();
 	}
 
 	inline void InitializeTrace()

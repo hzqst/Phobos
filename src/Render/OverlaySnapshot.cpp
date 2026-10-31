@@ -16,6 +16,8 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <variant>
 
 // The single definition of the state OverlaySnapshot.h declares, the capture and the trace replay.
 namespace OverlaySnapshot
@@ -30,9 +32,72 @@ namespace OverlaySnapshot
 		using TerrainImage::Point;
 		// The first shape that could not be acquired: overlay, frame, frames of the shape.
 		std::array<int, 4> FirstFailure {};
-		// The calls of the last recorded RenderLayers, and the first of them not modeled.
-		std::vector<RecordedCall> Recorded;
+		// The calls and blits of the last recorded RenderLayers in their order, and the first of each not
+		// modeled.
+		std::vector<std::variant<RecordedCall, RecordedBlit>> Recorded;
 		RecordedCall FirstUnmodeled;
+		RecordedBlit FirstUnmodeledBlit;
+
+		// 490B90 and 490E50 pick a blitter from the convert's own tables by the flags. The flags each slot
+		// stands for, found by asking them for the combinations the draws model (an Alpha body, a shadow);
+		// and the convert and slot of each blitter of ConvertClass::Array, rebuilt at most once a capture
+		// when a blitter is not found.
+		std::array<std::uint32_t, PlainBlitters> PlainSlots {};
+		std::array<std::uint32_t, RLEBlitters> RLESlots {};
+		bool SlotsReady = false;
+		struct BlitterOwner
+		{
+			const ConvertClass* Convert = nullptr;
+			std::uint8_t Slot = 0;
+			bool Compressed = false;
+		};
+		std::unordered_map<const void*, BlitterOwner> BlitterOwners;
+		unsigned OwnersSerial = UINT_MAX;
+
+		void FillSlots(const ConvertClass* convert)
+		{
+			for (const std::uint32_t kind : {AlphaFlag, AlphaFlag | 2u, AlphaFlag | 4u, AlphaFlag | 6u, ShadowFlag})
+				for (const std::uint32_t depth : {0u, ZReadFlag, ZWriteFlag})
+				{
+					const auto flags = 0x400 | kind | depth;
+					const auto* plain = convert->SelectPlainBlitter(BlitterFlags(flags));
+					const auto* rle = convert->SelectRLEBlitter(BlitterFlags(flags));
+					for (size_t i = 0; i < PlainBlitters; ++i)
+						if (convert->Blitters[i] == plain && !PlainSlots[i]) PlainSlots[i] = flags;
+					for (size_t i = 0; i < RLEBlitters; ++i)
+						if (convert->RLEBlitters[i] == rle && !RLESlots[i]) RLESlots[i] = flags;
+				}
+			SlotsReady = true;
+		}
+
+		// The convert a blitter belongs to and the flags it stands for; no convert where it is not found.
+		std::pair<const ConvertClass*, std::uint32_t> FindBlitter(const void* blitter, bool compressed)
+		{
+			const auto owned = [blitter, compressed](const BlitterOwner& owner)
+			{
+				if (!CursorSnapshot::Readable(owner.Convert, sizeof(ConvertClass)) || owner.Compressed != compressed) return false;
+				return compressed ? owner.Convert->RLEBlitters[owner.Slot] == blitter : owner.Convert->Blitters[owner.Slot] == blitter;
+			};
+			auto found = BlitterOwners.find(blitter);
+			if ((found == BlitterOwners.end() || !owned(found->second)) && OwnersSerial != BlitFrameSource::Serial)
+			{
+				OwnersSerial = BlitFrameSource::Serial;
+				BlitterOwners.clear();
+				for (const auto* convert : ConvertClass::Array)
+				{
+					if (!CursorSnapshot::Readable(convert, sizeof(ConvertClass))) continue;
+					for (size_t i = 0; i < PlainBlitters; ++i)
+						if (convert->Blitters[i]) BlitterOwners.try_emplace(convert->Blitters[i], BlitterOwner {convert, std::uint8_t(i), false});
+					for (size_t i = 0; i < RLEBlitters; ++i)
+						if (convert->RLEBlitters[i]) BlitterOwners.try_emplace(convert->RLEBlitters[i], BlitterOwner {convert, std::uint8_t(i), true});
+				}
+				found = BlitterOwners.find(blitter);
+			}
+			if (found == BlitterOwners.end() || !owned(found->second)) return {};
+			const auto& owner = found->second;
+			if (!SlotsReady) FillSlots(owner.Convert);
+			return {owner.Convert, (compressed ? RLESlots[owner.Slot] : PlainSlots[owner.Slot])};
+		}
 
 		bool Representable(Point point) { return point.X >= INT_MIN && point.X <= INT_MAX && point.Y >= INT_MIN && point.Y <= INT_MAX; }
 
@@ -163,6 +228,23 @@ namespace OverlaySnapshot
 				return true;
 			}
 
+			// The blitter's part of a draw whose Compressed is set: a shadow or a body, its translucency, Z
+			// test and write, and tint.
+			static void Blend(Draw& draw, const ConvertClass* convert, bool shadow, std::uint8_t translucency, bool tests, bool writes, int tint)
+			{
+				draw.Shadow = shadow;
+				draw.Mask = convert->HalfTranslucencyMask;
+				draw.QuarterMask = convert->QuatTranslucencyMask;
+				draw.Translucency = shadow ? 0 : translucency;
+				draw.TestsDepth = tests || writes;
+				draw.WritesDepth = writes;
+				// 437A10 takes an RLE AlphaZRead blitter for a frame that reads Z without writing it.
+				draw.Rounded = draw.Translucency && draw.Compressed && tests && !writes && BlittersFix::Applied;
+				// Only the Alpha blitters that test Z OR the tint in: RLE AlphaZRead (498150) and AlphaZReadWrite
+				// (499280), plain AlphaZRead (494C40); the others' tinted copies call Blit_Copy (#22 §7).
+				draw.Tint = !shadow && !draw.Translucency && (tests || writes) && (draw.Compressed || !writes) ? std::uint16_t(tint) : 0;
+			}
+
 			// 4AED70 with flag 200 for one call: the frame centered on center, cut by its Z shape, then
 			// clipped and given its row depths by 4373B0 or 437A10.
 			void Place(int cellX, int cellY, Layer source, int index, const Call& call, Point center, bool shadow)
@@ -223,17 +305,8 @@ namespace OverlaySnapshot
 					? ShapeDepth::RLE(draw.Gradient, MaxValue, BoundsY, clip.Y, dest, clipped.Dest, call.ZAdjust, zshaped)
 					: ShapeDepth::Plain(draw.Gradient, MaxValue, BoundsY, clip.Y, clipped.Dest, call.ZAdjust);
 				draw.Compressed = compressed;
-				draw.Shadow = shadow;
-				draw.Mask = call.Convert->HalfTranslucencyMask;
-				draw.QuarterMask = call.Convert->QuatTranslucencyMask;
-				draw.Translucency = shadow ? 0 : call.Translucency;
+				Blend(draw, call.Convert, shadow, call.Translucency, call.TestsDepth, call.WritesDepth, call.Tint);
 				draw.ZShaped = zshaped;
-				draw.TestsDepth = call.TestsDepth || call.WritesDepth;
-				draw.WritesDepth = call.WritesDepth;
-				// 437A10 takes an RLE AlphaZRead blitter for a frame that reads Z without writing it.
-				draw.Rounded = draw.Translucency && compressed && call.TestsDepth && !call.WritesDepth && BlittersFix::Applied;
-				// The translucent blitters' tinted copies ignore the tint (gamemd-reverse #22 §7).
-				draw.Tint = compressed && !draw.Translucency ? std::uint16_t(call.Tint) : 0;
 				if (zshaped && !ReadZBytes(shape, cut, draw)) { ++count.ZShape; return; }
 				draw.ZAdjust = call.ZAdjust;
 				draw.GradientIndex = call.Gradient;
@@ -243,6 +316,55 @@ namespace OverlaySnapshot
 				draw.Index = index;
 				draw.ShapeFrame = call.Frame;
 				if (compressed) ++count.Compressed;
+				Target->push_back(std::move(draw));
+				++(shadow ? count.Shadows : count.Bodies);
+			}
+
+			// A recorded blit within its clip: 4373B0 reads the kept pixels from their start, 437A10 the frame
+			// from the clipped part's offset, each with its own row depths.
+			void PlaceBlit(const RecordedBlit& blit)
+			{
+				auto& count = *Count;
+				const auto& clipped = blit.Clipped;
+				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) { ++count.Empty; return; }
+				const auto* gradients = reinterpret_cast<const ShapeDepth::Gradient*>(Gradients);
+				if (blit.Gradient < 0 || blit.Gradient >= GradientCount || !ShapeDepth::Usable(gradients[blit.Gradient])
+					|| !ShapeDepth::ClosedForm(gradients[blit.Gradient])) { ++count.Unsupported; return; }
+				const auto* frame = BlitFrameSource::Frames.Resolve(blit.ID);
+				if (!frame) { ++count.Frame; return; }
+				const int frameX = blit.Compressed ? clipped.SourceX : 0, frameY = blit.Compressed ? clipped.SourceY : 0;
+				if (frameX < 0 || frameY < 0 || frameX + clipped.Width > frame->Geometry.Width || frameY + clipped.Rows > frame->Geometry.Height)
+				{
+					++count.Unsupported;
+					return;
+				}
+				const auto table = Table(blit.Convert);
+				if (!table) { ++count.Palette; return; }
+				const auto& bounds = blit.Bounds;
+				Draw draw;
+				draw.ID = blit.ID;
+				draw.Storage = &BlitFrameSource::Frames;
+				draw.Table = table;
+				draw.X = bounds.X + clipped.Dest.X;
+				draw.Y = bounds.Y + clipped.Dest.Y;
+				draw.Width = clipped.Width;
+				draw.Height = clipped.Rows;
+				draw.FrameX = frameX;
+				draw.FrameY = frameY;
+				draw.LightRow = TerrainImage::LightRow(blit.Brightness);
+				draw.Gradient = gradients[blit.Gradient];
+				draw.Rows = blit.Compressed
+					? ShapeDepth::RLE(draw.Gradient, MaxValue, BoundsY, bounds.Y, blit.Dest, clipped.Dest, blit.ZAdjust, false)
+					: ShapeDepth::Plain(draw.Gradient, MaxValue, BoundsY, bounds.Y, clipped.Dest, blit.ZAdjust);
+				draw.Compressed = blit.Compressed;
+				const bool shadow = blit.Flags & ShadowFlag;
+				Blend(draw, blit.Convert, shadow, std::uint8_t(blit.Flags & TranslucencyMask), blit.Flags & ZReadMask, blit.Flags & ZWriteFlag, blit.Tint);
+				draw.ZAdjust = blit.ZAdjust;
+				draw.GradientIndex = blit.Gradient;
+				draw.Source = Layer::Composite;
+				draw.Index = int(blit.Caller);
+				draw.ShapeFrame = -1;
+				if (blit.Compressed) ++count.Compressed;
 				Target->push_back(std::move(draw));
 				++(shadow ? count.Shadows : count.Bodies);
 			}
@@ -745,14 +867,38 @@ namespace OverlaySnapshot
 		};
 
 		// 6D8DB0's draws on Composite: each recorded 4AED70 call in its order, placed as 4AED70 places it
-		// within its clip; and the rectangles of the objects it marked IsVisible, for the trace.
+		// within its clip, and each recorded blit; and the rectangles of the objects it marked IsVisible,
+		// for the trace.
 		void CaptureComposite(Capture& capture)
 		{
 			capture.Target = &Current.CompositeDraws;
 			capture.Count = &Current.CompositeCount;
 			auto& count = Current.CompositeCount;
-			for (const auto& recorded : Recorded)
+			const auto counted = [&count](const std::vector<Draw>& draws, size_t drawn)
 			{
+				if (draws.size() == drawn) return;
+				const auto& draw = draws.back();
+				count.CallsTranslucent += draw.Translucency != 0;
+				count.CallsWriting += draw.WritesDepth;
+				count.CallsTinted += draw.Tint != 0;
+			};
+			for (const auto& item : Recorded)
+			{
+				if (const auto* blit = std::get_if<RecordedBlit>(&item))
+				{
+					if (!blit->OnTarget) { ++count.BlitsElsewhere; continue; }
+					++count.Blits;
+					if (blit->Issue != BlitIssue::None)
+					{
+						if (!count.BlitsUnmodeled++) FirstUnmodeledBlit = *blit;
+						continue;
+					}
+					const auto drawn = capture.Target->size();
+					capture.PlaceBlit(*blit);
+					counted(*capture.Target, drawn);
+					continue;
+				}
+				const auto& recorded = std::get<RecordedCall>(item);
 				if (!recorded.OnTarget) { ++count.CallsElsewhere; continue; }
 				++count.Calls;
 				if (!(recorded.Flags & CenteredFlag) || (recorded.Flags & ~ModeledFlags) || recorded.Remap || (recorded.ZShape && recorded.ZShapeFrame))
@@ -781,11 +927,7 @@ namespace OverlaySnapshot
 				const auto drawn = capture.Target->size();
 				capture.Place(0, 0, Layer::Composite, int(recorded.Caller), call,
 					{std::int64_t(bounds.X) + recorded.Point.X, std::int64_t(bounds.Y) + recorded.Point.Y}, recorded.Flags & ShadowFlag);
-				if (capture.Target->size() == drawn) continue;
-				const auto& draw = capture.Target->back();
-				count.CallsTranslucent += draw.Translucency != 0;
-				count.CallsWriting += draw.WritesDepth;
-				count.CallsTinted += draw.Tint != 0;
+				counted(*capture.Target, drawn);
 			}
 			for (int layer = 0; layer < LayerCount; ++layer)
 			{
@@ -879,7 +1021,7 @@ namespace OverlaySnapshot
 			for (size_t drawIndex = 0; drawIndex < draws.size(); ++drawIndex)
 			{
 				const auto& draw = draws[drawIndex];
-				const auto* frame = ShapeFrameSource::Frames.Resolve(draw.ID);
+				const auto* frame = draw.Storage->Resolve(draw.ID);
 				if (!frame) { ++model.Missing; continue; }
 				const int pitch = frame->Geometry.Width;
 				if (frame->Indices.size() < size_t(pitch) * frame->Geometry.Height || draw.FrameX + draw.Width > pitch
@@ -1194,18 +1336,21 @@ namespace OverlaySnapshot
 			Debug::Log("[TerrainGPU] tiledepth sample=%u first=%d,%d:native=%d:model=%d:%s\n", TraceCount, check.DepthX, check.DepthY,
 				check.NativeDepth, check.ModelDepth, describe(check.DepthOwner));
 
-			// D3: RenderLayers' recorded 4AED70 calls on Composite, each draw in order (caller:frame, s for a
-			// shadow, t translucent, w writing Z, n not testing it, @ its rectangle), and their replay over the
-			// copies around the layers.
+			// D3: RenderLayers' recorded 4AED70 calls and blits on Composite, each draw in order (caller:frame,
+			// -1 for a blit, s for a shadow, t translucent, w writing Z, n not testing it, @ its rectangle), and
+			// their replay over the copies around the layers.
 			const auto& composite = Current.CompositeCount;
 			Debug::Log("[TerrainGPU] composite sample=%u layerObjects=%d othersVisible=%d unbounded=%d calls=%d elsewhere=%d unmodeled=%d "
 				"firstUnmodeled=%X:flags=%X:remap=%d:zshapeFrame=%d bodies=%d shadows=%d compressed=%d translucent=%d writing=%d tinted=%d palette=%d frame=%d "
-				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u\n",
+				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u blits=%d blitsElsewhere=%d blitsUnmodeled=%d "
+				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u\n",
 				TraceCount, composite.LayerObjects, composite.OthersVisible, composite.OthersUnbounded, composite.Calls, composite.CallsElsewhere,
 				composite.CallsUnmodeled, unsigned(FirstUnmodeled.Caller), FirstUnmodeled.Flags, FirstUnmodeled.Remap, FirstUnmodeled.ZShapeFrame,
 				composite.Bodies, composite.Shadows, composite.Compressed, composite.CallsTranslucent, composite.CallsWriting, composite.CallsTinted,
 				composite.Palette, composite.Frame, composite.NoImage, composite.Unloaded, composite.Empty, composite.Outside, composite.Unsupported,
-				composite.ZShape, CompositeSnapshot::Failed);
+				composite.ZShape, CompositeSnapshot::Failed, composite.Blits, composite.BlitsElsewhere, composite.BlitsUnmodeled,
+				unsigned(FirstUnmodeledBlit.Caller), int(FirstUnmodeledBlit.Issue), FirstUnmodeledBlit.Compressed, FirstUnmodeledBlit.Flags,
+				unsigned(BlitFrameSource::Frames.GetStats().Frames), unsigned(BlitFrameSource::Frames.GetStats().IndexBytes), BlitFrameSource::Epoch);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
@@ -1358,6 +1503,7 @@ namespace OverlaySnapshot
 	{
 		Recorded.clear();
 		RecordingTarget = target;
+		if (target) BlitFrameSource::BeginCapture();
 	}
 
 	void EndRecording() { RecordingTarget = nullptr; }
@@ -1372,5 +1518,58 @@ namespace OverlaySnapshot
 		bounds = {int(left), int(top), int(std::max<std::int64_t>(right - left, 0)), int(std::max<std::int64_t>(bottom - top, 0))};
 		call.OnTarget = surface == RecordingTarget;
 		Recorded.push_back(call);
+	}
+
+	void RecordBlit(const BlitCall& call)
+	{
+		RecordedBlit blit;
+		blit.Compressed = call.Compressed;
+		blit.Bounds = *call.Bounds;
+		blit.ZAdjust = call.ZAdjust;
+		blit.Gradient = call.Gradient;
+		blit.Brightness = call.Brightness;
+		blit.Tint = call.Tint;
+		blit.Caller = call.Caller;
+		blit.OnTarget = call.Surface == RecordingTarget;
+		if (!blit.OnTarget) { Recorded.push_back(blit); return; }
+		const auto& dest = *call.Dest;
+		const auto& limit = *call.Limit;
+		const auto& part = *call.Part;
+		blit.Dest = {dest.X, dest.Y, dest.Width, dest.Height};
+		// 7BC040 and 437A10 draw nothing for an empty rectangle; 7BBE20 cuts the place by the clip and the
+		// part by the source's rectangle.
+		if (blit.Bounds.Width > 0 && blit.Bounds.Height > 0 && dest.Width > 0 && dest.Height > 0 && limit.Width > 0 && limit.Height > 0
+			&& part.Width > 0 && part.Height > 0)
+			blit.Clipped = ShapeDepth::Clip(blit.Dest, {part.X, part.Y, part.Width, part.Height}, {limit.X, limit.Y, limit.Width, limit.Height},
+				blit.Bounds.Width, blit.Bounds.Height, call.Compressed);
+		if (!blit.Clipped.Drawn || blit.Clipped.Width <= 0 || blit.Clipped.Rows <= 0) { Recorded.push_back(blit); return; }
+		const auto [convert, flags] = FindBlitter(call.Blitter, call.Compressed);
+		blit.Convert = convert;
+		blit.Flags = flags;
+		auto* source = static_cast<XSurface*>(call.Source);
+		const auto& bounds = blit.Bounds;
+		if (!convert || !flags) blit.Issue = BlitIssue::Blitter;
+		else if (bounds.X < 0 || bounds.Y < 0 || std::int64_t(bounds.X) + bounds.Width > call.Surface->Width
+			|| std::int64_t(bounds.Y) + bounds.Height > call.Surface->Height) blit.Issue = BlitIssue::Bounds;
+		else if (!source || static_cast<Surface*>(call.Surface) == call.Source || source->BytesPerPixel != 1 || call.ZSurface
+			|| (call.Compressed && (limit.X || limit.Y || part.X != limit.X || part.Y != limit.Y || part.Width != limit.Width || part.Height != limit.Height)))
+			blit.Issue = BlitIssue::Source;
+		else if (call.Compressed)
+		{
+			// 437A10 reads the frame's rows from the start of the source.
+			if (const auto* data = static_cast<const std::uint8_t*>(source->Lock(0, 0)))
+			{
+				blit.ID = BlitFrameSource::AcquireEncoded(data, size_t(limit.Height) * (2 + 2 * size_t(limit.Width)), limit.Width, limit.Height);
+				source->Unlock();
+			}
+		}
+		else if (const auto* first = static_cast<const std::uint8_t*>(source->Lock(limit.X + blit.Clipped.SourceX, limit.Y + blit.Clipped.SourceY)))
+		{
+			// 7BC040 locks the source at the clipped part's place within the source's rectangle.
+			blit.ID = BlitFrameSource::AcquirePixels(first, source->GetPitch(), blit.Clipped.Width, blit.Clipped.Rows);
+			source->Unlock();
+		}
+		if (blit.Issue == BlitIssue::None && !blit.ID) blit.Issue = BlitIssue::Image;
+		Recorded.push_back(blit);
 	}
 }

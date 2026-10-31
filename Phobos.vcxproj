@@ -323,6 +323,7 @@
     <ClCompile Include="src\Render\CommandBarSnapshot.cpp" />
     <ClCompile Include="src\Render\CursorTrace.cpp" />
     <ClCompile Include="src\Render\PaletteCache.cpp" />
+    <ClCompile Include="src\Render\BlitFrameSource.cpp" />
     <ClCompile Include="src\Render\ShapeFrameSource.cpp" />
     <ClCompile Include="src\Render\SidebarSnapshot.cpp" />
     <ClCompile Include="src\Render\TerrainPass.cpp" />
@@ -511,6 +512,7 @@
     <ClInclude Include="src\Render\SecondaryWindow.h" />
     <ClInclude Include="src\Render\SurfaceMirror.h" />
     <ClInclude Include="src\Render\CompositeSnapshot.h" />
+    <ClInclude Include="src\Render\BlitFrameSource.h" />
     <!-- src\Utilities -->
     <ClInclude Include="src\Utilities\Anchor.h" />
     <ClInclude Include="src\Utilities\AresFunctions.h" />

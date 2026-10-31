@@ -89,6 +89,54 @@ DEFINE_HOOK(0x4AED70, CC_Draw_Shape_RecordLayers, 0x6)
 	return 0;
 }
 
+// 4373B0 and 437A10 while RenderLayers draws, from any caller but 4AED70, whose call is recorded already:
+// the voxels' blits (4AF2A0, 707480) and the vehicles' scratch (73B140), before the displaced sub esp.
+// Both take the destination in ECX, its clip in EDX, then the place, the source, the source's rectangle,
+// the part to draw, the blitter, Z, gradient and brightness; 4373B0 then the tint, 437A10 its unused
+// value, the Z adjust surface and its offset before the tint.
+static void RecordBlit(REGISTERS* R, bool compressed)
+{
+	if (!OverlaySnapshot::RecordingTarget) return;
+	GET_STACK(std::uintptr_t, caller, 0x0);
+	if (caller > OverlaySnapshot::DrawShapeBegin && caller < OverlaySnapshot::DrawShapeEnd) return;
+	OverlaySnapshot::BlitCall call;
+	call.Surface = R->ECX<DSurface*>();
+	call.Bounds = R->EDX<RectangleStruct*>();
+	call.Dest = R->Stack<RectangleStruct*>(0x4);
+	call.Source = R->Stack<Surface*>(0x8);
+	call.Limit = R->Stack<RectangleStruct*>(0xC);
+	call.Part = R->Stack<RectangleStruct*>(0x10);
+	call.Blitter = R->Stack<void*>(0x14);
+	call.ZAdjust = R->Stack<int>(0x18);
+	call.Gradient = R->Stack<int>(0x1C);
+	call.Brightness = R->Stack<int>(0x20);
+	call.Tint = R->Stack<int>(compressed ? 0x34 : 0x24);
+	call.ZSurface = compressed ? R->Stack<void*>(0x28) : nullptr;
+	call.Caller = caller;
+	call.Compressed = compressed;
+	if (!call.Surface || !call.Bounds || !call.Dest || !call.Limit || !call.Part || !call.Blitter) return;
+	OverlaySnapshot::RecordBlit(call);
+}
+
+DEFINE_HOOK(0x4373B0, Copy_To_Surface_RecordLayers, 0x7)
+{
+	RecordBlit(R, false);
+	return 0;
+}
+
+DEFINE_HOOK(0x437A10, Copy_To_Surface_RLE_RecordLayers, 0x7)
+{
+	RecordBlit(R, true);
+	return 0;
+}
+
+// 5F99E0 frees every type's voxel cache and resets the arena the entries live in.
+DEFINE_HOOK(0x5F99E0, DestroyVoxelCaches_Purge, 0x5)
+{
+	BlitFrameSource::Purged();
+	return 0;
+}
+
 // Observational probes: return 0 preserves every displaced instruction via SyringeEx.
 // No outer MouseMutex transaction is introduced by this diagnostic stage.
 // Intentionally stacked with GScreenClass_DrawText: both return 0 and the observation

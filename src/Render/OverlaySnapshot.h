@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BlitFrameSource.h"
 #include "BuildingImage.h"
 #include "OverlayImage.h"
 #include "ShapeDepth.h"
@@ -27,8 +28,9 @@
 // buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1); the building
 // records of 4D1890 (step 4) come first, before the overlays (D1c). What RenderLayers (6D8DB0) draws on
 // Composite in mode 2 through 4AED70 (animated Terrain, anims, units, bullets and their extras,
-// gamemd-reverse #23, #26, #27) is recorded call by call as it draws, and turned into a list of its own
-// in the same callback, which the trace replays over CompositeSnapshot's copies (D3).
+// gamemd-reverse #23, #26, #27) is recorded call by call as it draws, with the voxels' blits of 4373B0 and
+// 437A10 (D3a-3), and turned into a list of its own in the same callback, which the trace replays over
+// CompositeSnapshot's copies (D3).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -80,12 +82,16 @@ namespace OverlaySnapshot
 	// 4AED70's flags: Darken (a shadow), the translucency bits, Centered, 400h (which every caller sets),
 	// Alpha, the Z test and the Z write. A recorded call with any other flag, a remap, a Z shape frame
 	// other than 0 or without Centered is not modeled.
-	constexpr std::uint32_t ShadowFlag = 0x1, TranslucencyMask = 0x6, CenteredFlag = 0x200, ZReadMask = 0x3000, ZWriteFlag = 0x4000,
-		ModeledFlags = ShadowFlag | TranslucencyMask | CenteredFlag | 0x400 | 0x800 | ZReadMask | ZWriteFlag;
+	constexpr std::uint32_t ShadowFlag = 0x1, TranslucencyMask = 0x6, CenteredFlag = 0x200, AlphaFlag = 0x800, ZReadMask = 0x3000,
+		ZReadFlag = 0x2000, ZWriteFlag = 0x4000, ModeledFlags = ShadowFlag | TranslucencyMask | CenteredFlag | 0x400 | AlphaFlag | ZReadMask | ZWriteFlag;
+	// 4AED70's own blits, which its record covers.
+	constexpr std::uintptr_t DrawShapeBegin = 0x4AED70, DrawShapeEnd = 0x4AF295;
+	// ConvertClass' Blitters and RLEBlitters tables.
+	constexpr size_t PlainBlitters = 50, RLEBlitters = 39;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00), a
-	// building (6D9920), a fogged building record's building or anim part (4D1890), or a call recorded
-	// during RenderLayers (its Index the return address).
+	// building (6D9920), a fogged building record's building or anim part (4D1890), or a call or blit
+	// recorded during RenderLayers (its Index the return address).
 	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Composite };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
@@ -93,6 +99,8 @@ namespace OverlaySnapshot
 	struct Draw
 	{
 		FrameCache::FrameID ID;
+		// The cache the frame lives in: ShapeFrameSource's for a shape, BlitFrameSource's for a blit.
+		const FrameCache::Cache* Storage = &ShapeFrameSource::Frames;
 		TerrainBatch::ColorTables::Handle Table;
 		// The first drawn pixel on Tile and in the frame, and the drawn columns and rows.
 		int X = 0, Y = 0, Width = 0, Height = 0, FrameX = 0, FrameY = 0;
@@ -116,7 +124,7 @@ namespace OverlaySnapshot
 		// 4AED70's Z test and write: the Tile pass writes Z (4E00, 4601), mode 2's Terrain only tests it
 		// (2E00), a standalone anim's shadow (E01) does neither.
 		bool TestsDepth = true, WritesDepth = true;
-		// The tint an RLE body ORs into each color (705E00's, 0 where the frame is plain).
+		// The tint a body ORs into each color (705E00's); only the Alpha blitters that test Z apply it.
 		std::uint16_t Tint = 0;
 		// For the trace: the layer, the overlay, Terrain type or tile type index, and the shape's frame.
 		Layer Source = Layer::Overlay;
@@ -138,8 +146,10 @@ namespace OverlaySnapshot
 		// sets it where it draws) with those of them whose rectangle (GetRenderDimensions) is empty.
 		int LayerObjects = 0, OthersVisible = 0, OthersUnbounded = 0;
 		// The 4AED70 calls of RenderLayers: on its target, on another surface (a vehicle's scratch), not
-		// modeled, and those translucent, writing Z and tinted among the draws made of them.
+		// modeled, and those translucent, writing Z and tinted among the draws made of them and the blits'.
 		int Calls = 0, CallsElsewhere = 0, CallsUnmodeled = 0, CallsTranslucent = 0, CallsWriting = 0, CallsTinted = 0;
+		// Its blits outside 4AED70 (4373B0, 437A10): on its target, elsewhere, and not modeled.
+		int Blits = 0, BlitsElsewhere = 0, BlitsUnmodeled = 0;
 		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.
@@ -177,12 +187,54 @@ namespace OverlaySnapshot
 		std::uintptr_t Caller = 0;
 		bool OnTarget = true;
 	};
+	// A blit of RenderLayers outside 4AED70 as 4373B0 and 437A10 take it (gamemd-reverse #26 §5, §9): the
+	// clip on the destination, the place relative to it, the source surface, the source's rectangle (a
+	// plain blit's surface part, an RLE blit's frame) and the part of it to draw, the blitter, Z, gradient,
+	// brightness and tint; 437A10 may add a Z adjust surface.
+	struct BlitCall
+	{
+		DSurface* Surface = nullptr;
+		const RectangleStruct* Bounds = nullptr;
+		const RectangleStruct* Dest = nullptr;
+		::Surface* Source = nullptr;
+		const RectangleStruct* Limit = nullptr;
+		const RectangleStruct* Part = nullptr;
+		const void* Blitter = nullptr;
+		int ZAdjust = 0, Gradient = 0, Brightness = 0, Tint = 0;
+		const void* ZSurface = nullptr;
+		std::uintptr_t Caller = 0;
+		bool Compressed = false;
+	};
+	// Why a recorded blit is not modeled: its blitter is no known convert's or stands for other flags,
+	// its source is not an 8-bit surface apart from the target (or 437A10 cuts its frame or adjusts Z
+	// by a surface), its clip leaves the surface, or its image could not be kept.
+	enum class BlitIssue : std::uint8_t { None, Blitter, Source, Bounds, Image };
+	// What a blit drew, taken at the call: the convert and the flags its blitter stands for, the image in
+	// BlitFrameSource (a plain blit's drawn pixels, an RLE blit's whole frame), and the clipping 7BBE20
+	// made of it.
+	struct RecordedBlit
+	{
+		const ConvertClass* Convert = nullptr;
+		std::uint32_t Flags = 0;
+		FrameCache::FrameID ID;
+		bool Compressed = false;
+		RectangleStruct Bounds {};
+		ShapeDepth::Rect Dest {};
+		ShapeDepth::Clipped Clipped {};
+		int ZAdjust = 0, Gradient = 0, Brightness = 0, Tint = 0;
+		std::uintptr_t Caller = 0;
+		bool OnTarget = true;
+		BlitIssue Issue = BlitIssue::None;
+	};
+
 	// The surface RenderLayers draws on while its calls are recorded (between 6D465F and 6D4664 of a
-	// capturing render), else null; the hook at 4AED70 records through RecordCall.
+	// capturing render), else null; the hooks at 4AED70, 4373B0 and 437A10 record through RecordCall and
+	// RecordBlit.
 	extern DSurface* RecordingTarget;
 	void BeginRecording(DSurface* target);
 	void EndRecording();
 	void RecordCall(RecordedCall call, DSurface* surface);
+	void RecordBlit(const BlitCall& call);
 
 	inline void Invalidate() { Current = {}; }
 
