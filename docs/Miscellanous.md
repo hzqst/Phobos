@@ -8,6 +8,17 @@ This page describes every change in Phobos that wasn't categorized into a proper
 
 ## Developer tools
 
+### GPU voxel identity diagnostics (development branch)
+
+The GPU renderer supports opt-in voxel diagnostics through process environment variables:
+
+- `PHOBOS_VOXEL_PROFILE=1` records bounded acquisition timings.
+- `PHOBOS_VOXEL_IDENTITY_SHADOW=1` checks whether repeated component identities produce identical scratch pixels.
+- `PHOBOS_VOXEL_IDENTITY_FAST=1` enables experimental FrameID reuse for ordinary vehicle draws with one supported cached component. It verifies scratch cleanliness and falls back for unsupported draws. This option is off by default and does not skip native rendering.
+- Enabling both FAST and SHADOW re-acquires and checks every proposed hit. Use FAST without SHADOW to measure skipped copying and hashing. Diagnostic logging stops after 16 windows; the fast path continues running.
+
+These options do not establish a thousand-unit performance guarantee. Multi-component units and bridge split draws remain on the existing acquisition path.
+
 ### Additional sync logging
 
 - Phobos writes additional information to the `SYNC#.txt` log files when a desynchronization occurs such as calls to random number generator functions, facing / target / destination changes etc.

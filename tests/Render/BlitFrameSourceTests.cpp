@@ -57,6 +57,18 @@ int main()
 	CHECK(!Frames.Resolve(first) && ByContent.empty());
 	const auto again = AcquirePixels(surface + 1, 5, 3, 2);
 	CHECK(again && again != first);
+	for (unsigned i = 0; i < MaxIdle * 2; ++i)
+	{
+		BeginCapture();
+		CHECK(Touch(again)); // Identity hits must survive ordinary sweeps without re-reading pixels.
+	}
+	CHECK(Frames.Resolve(again));
+	++Serial;
+	CHECK(Touch(again));
+	Sweep(1); CHECK(Frames.Resolve(again));
+	++Serial;
+	Sweep(1); CHECK(!Frames.Resolve(again) && !Touch(again));
+	CHECK(IdentityUses.empty());
 	std::puts("BlitFrameSource: content and address keys, epochs and sweeps passed.");
 	return 0;
 }

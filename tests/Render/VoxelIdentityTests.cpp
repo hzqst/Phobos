@@ -67,13 +67,20 @@ int main()
 	};
 	auto first = make(1, 7), equal = make(2, 7), different = make(3, 8);
 	Validator validator;
+	assert(!validator.Lookup(key, frames));
 	assert(Result::Seeded == validator.Observe(key, first, frames));
+	assert(!validator.Lookup(key, frames)); // A baseline alone cannot authorize reuse.
 	assert(Result::Equal == validator.Observe(key, equal, frames));
+	assert(first == validator.Lookup(key, frames));
+	auto translated = key; translated.Translation[7] = 8;
+	assert(!validator.Lookup(translated, frames));
 	assert(Result::Mismatch == validator.Observe(key, different, frames));
+	assert(!validator.Lookup(key, frames));
 	assert(Result::Disabled == validator.Observe(bodyThenTurret, first, frames));
 	key.Epoch = 2;
 	assert(Result::Seeded == validator.Observe(key, first, frames));
 	frames.Clear();
+	assert(!validator.Lookup(key, frames));
 	assert(Result::Missing == validator.Observe(key, first, frames));
 	first = make(4, 7);
 	assert(Result::Seeded == validator.Observe(key, first, frames));
@@ -83,5 +90,32 @@ int main()
 		validator.Observe(key, first, frames);
 	}
 	assert(validator.Size() <= MaxEntries);
+
+	ScratchGuard guard;
+	assert(guard.NeedsSeed(10, 20));
+	guard.Begin(10, 20, true);
+	assert(!guard.CanReuse());
+	guard.Write({20, 30, 40, 50});
+	assert(guard.CanReuse());
+	guard.End(true);
+	assert(!guard.NeedsSeed(10, 20));
+	assert(guard.NeedsSeed(10, 21)); // Same surface, replaced buffer.
+	guard.Begin(10, 20, true); guard.Write({20, 30, 40, 50}); guard.End(false);
+	assert(guard.NeedsSeed(10, 20));
+	guard.Begin(10, 20, false); guard.Write({20, 30, 40, 50});
+	assert(!guard.CanReuse());
+	guard.End(true);
+	guard.Begin(10, 20, true); guard.Write({20, 30, 40, 50});
+	guard.Unknown(10);
+	assert(!guard.CanReuse()); guard.End(true);
+	guard.Begin(10, 20, true); guard.Write({20, 30, 40, 50});
+	guard.Begin(10, 20, true); guard.Write({20, 30, 40, 50});
+	assert(!guard.CanReuse()); guard.End(true);
+	assert(!guard.CanReuse()); guard.End(true);
+	guard.Begin(10, 20, true); guard.Write({250, 0, 20, 20});
+	assert(!guard.CanReuse()); guard.End(true);
+	guard.Begin(10, 20, true); guard.Write({0, 0, 20, 20}); guard.Write({0, 0, 20, 20});
+	assert(!guard.CanReuse()); guard.End(true); // First fast path accepts one component only.
+	guard.BeginFrame(); assert(guard.NeedsSeed(10, 20));
 	std::puts("VoxelIdentityTests passed");
 }

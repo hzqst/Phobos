@@ -2,6 +2,10 @@
 
 This page lists the history of changes across stable Phobos releases and also all the stuff that requires modders to change something in their mods to accommodate.
 
+## GPU render development branch (unreleased)
+
+- Added opt-in [voxel identity diagnostics and restricted FrameID reuse](Miscellanous.md#gpu-voxel-identity-diagnostics-development-branch), with scratch cleanliness checks, pixel validation and CPU cache lifetime tracking. Native drawing is preserved; the fast path is disabled by default.
+
 ## Migration (breaking changes)
 
 ```{important}

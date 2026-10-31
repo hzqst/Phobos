@@ -1,5 +1,6 @@
 // Optimized x86 microbenchmark of the existing acquisition paths, not game FPS.
 #include <Render/BlitFrameSource.h>
+#include <Render/VoxelIdentity.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -12,9 +13,12 @@ namespace
 	volatile std::uint64_t Sink = 0;
 	using Clock = std::chrono::steady_clock;
 
-	void Run(int size, int draws, bool encoded)
+	void Run(int size, int draws, int path)
 	{
+		const bool encoded = path == 1, identity = path == 2;
 		BlitFrameSource::Clear();
+		VoxelIdentity::Validator identities;
+		std::array<VoxelIdentity::Key, PoseCount> keys {};
 		std::vector<std::vector<std::uint8_t>> sources;
 		for (int pose = 0; pose < PoseCount; ++pose)
 		{
@@ -36,7 +40,14 @@ namespace
 		};
 		BlitFrameSource::BeginCapture();
 		for (int pose = 0; pose < PoseCount; ++pose)
-			if (!acquire(pose)) std::exit(2);
+		{
+			const auto id = acquire(pose);
+			if (!id) std::exit(2);
+			auto& key = keys[pose];
+			key.Epoch = BlitFrameSource::Epoch; key.Count = 1;
+			key.Parts[0].Payload = std::uintptr_t(sources[pose].data()); key.Region = {0, 0, size, size};
+			if (identity) { identities.Observe(key, id, BlitFrameSource::Frames); identities.Observe(key, id, BlitFrameSource::Frames); }
+		}
 		const auto decoded = BlitFrameSource::Frames.GetStats().Decoded;
 		std::vector<double> samples;
 		for (int frame = 0; frame < Samples; ++frame)
@@ -46,8 +57,10 @@ namespace
 			const auto start = Clock::now();
 			for (int draw = 0; draw < draws; ++draw)
 			{
-				const auto id = acquire((draw + frame) % PoseCount);
+				const auto pose = (draw + frame) % PoseCount;
+				const auto id = identity ? identities.Lookup(keys[pose], BlitFrameSource::Frames) : acquire(pose);
 				if (!id) std::exit(3);
+				if (identity && !BlitFrameSource::Touch(id)) std::exit(5);
 				sum += id.Value;
 			}
 			samples.push_back(std::chrono::duration<double, std::micro>(Clock::now() - start).count());
@@ -56,10 +69,10 @@ namespace
 		if (BlitFrameSource::Frames.GetStats().Decoded != decoded) std::exit(4);
 		const auto average = std::accumulate(samples.begin(), samples.end(), 0.0) / Samples;
 		std::sort(samples.begin(), samples.end());
-		std::printf("%s,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%llu\n", encoded ? "rle_address_hit" : "plain_content_hit",
+		std::printf("%s,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%llu\n", identity ? "verified_identity_hit" : encoded ? "rle_address_hit" : "plain_content_hit",
 			size, draws, Samples, average, samples[(Samples * 95 + 99) / 100 - 1],
 			samples[(Samples * 99 + 99) / 100 - 1], samples.back(),
-			encoded ? 0ULL : static_cast<unsigned long long>(size) * size * draws);
+			encoded || identity ? 0ULL : static_cast<unsigned long long>(size) * size * draws);
 	}
 }
 
@@ -69,5 +82,5 @@ int main()
 	std::puts("path,size,draws,samples,avg_us,p95_us,p99_us,max_us,copied_and_hashed_bytes_per_sample");
 	for (const auto size : {32, 64, 128})
 		for (const auto draws : {100, 500, 1000})
-			for (const auto encoded : {false, true}) Run(size, draws, encoded);
+			for (const auto path : {0, 1, 2}) Run(size, draws, path);
 }

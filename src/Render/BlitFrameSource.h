@@ -44,6 +44,8 @@ namespace BlitFrameSource
 	extern FrameCache::Cache Frames;
 	extern std::unordered_multimap<std::uint32_t, Entry> ByContent;
 	extern std::unordered_map<Address, Entry, AddressHash> ByAddress;
+	// Last use through a verified identity, bounded by the live frames and removed by Sweep/Clear.
+	extern std::unordered_map<std::uint64_t, unsigned> IdentityUses;
 	// 5F99E0's resets, the captures begun, and the identity of the next resource.
 	extern unsigned Epoch, Serial;
 	extern std::uintptr_t NextIdentity;
@@ -132,15 +134,26 @@ namespace BlitFrameSource
 		return entry.Frame;
 	}
 
+	inline bool Touch(FrameCache::FrameID id)
+	{
+		if (!Frames.Resolve(id)) return false;
+		IdentityUses[id.Value] = Serial;
+		return true;
+	}
+
 	// Drops the entries unused for at least idle captures (at least 1).
 	inline void Sweep(unsigned idle)
 	{
 		if (!idle) idle = 1;
-		const auto stale = [idle](const Entry& entry) { return Serial - entry.LastUse >= idle; };
+		const auto stale = [idle](const Entry& entry)
+		{
+			const auto used = IdentityUses.find(entry.Frame.Value);
+			return Serial - entry.LastUse >= idle && (used == IdentityUses.end() || Serial - used->second >= idle);
+		};
 		for (auto it = ByContent.begin(); it != ByContent.end();)
-			if (stale(it->second)) { Frames.Invalidate(it->second.Resource); it = ByContent.erase(it); } else ++it;
+			if (stale(it->second)) { IdentityUses.erase(it->second.Frame.Value); Frames.Invalidate(it->second.Resource); it = ByContent.erase(it); } else ++it;
 		for (auto it = ByAddress.begin(); it != ByAddress.end();)
-			if (stale(it->second)) { Frames.Invalidate(it->second.Resource); it = ByAddress.erase(it); } else ++it;
+			if (stale(it->second)) { IdentityUses.erase(it->second.Frame.Value); Frames.Invalidate(it->second.Resource); it = ByAddress.erase(it); } else ++it;
 	}
 
 	inline void BeginCapture()
@@ -157,6 +170,7 @@ namespace BlitFrameSource
 	{
 		ByContent.clear();
 		ByAddress.clear();
+		IdentityUses.clear();
 		Frames.Clear();
 	}
 }

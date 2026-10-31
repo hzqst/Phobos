@@ -45,38 +45,107 @@ namespace OverlaySnapshot
 			static constexpr unsigned Window = 120, MaxWindows = 16, ChecksPerFrame = 256;
 			VoxelIdentity::Tracker Context;
 			VoxelIdentity::Validator Oracle;
-			bool Enabled = false, Active = false;
+			VoxelIdentity::ScratchGuard Guard;
+			std::array<std::uint8_t, 256> Translation {};
+			bool Enabled = false, Fast = false, Active = false;
 			unsigned Frames = 0, Windows = 0, Checks = 0;
 			std::uint64_t Scopes = 0, Parts = 0, Unknown = 0, Finals = 0, Ineligible = 0, Budget = 0;
 			std::array<std::uint64_t, 5> Results {};
+			std::uint64_t Hits = 0, VerifiedHits = 0, SavedBytes = 0, SeedBytes = 0, ClearBytes = 0;
+			std::uint64_t SeedFailures = 0, ClearFailures = 0;
+			// Retail BSurface and the byte RLE translator, verified in VoxelIdentityP3.md.
+			static constexpr std::uintptr_t ScratchGlobal = 0xB1D13C, BSurfaceVTable = 0x7E2070, ByteRLEVTable = 0x7E5B00;
 			VoxelShadow()
 			{
 				char value[2] {};
 				Enabled = GetEnvironmentVariableA("PHOBOS_VOXEL_IDENTITY_SHADOW", value, sizeof(value)) == 1 && value[0] == '1';
+				Fast = GetEnvironmentVariableA("PHOBOS_VOXEL_IDENTITY_FAST", value, sizeof(value)) == 1 && value[0] == '1';
 			}
 			void Begin(bool capturing)
 			{
-				Active = Enabled && capturing && Windows < MaxWindows;
-				if (Active) { Context.BeginFrame(BlitFrameSource::Epoch); Checks = 0; }
+				Active = capturing && (Fast || (Enabled && Windows < MaxWindows));
+				if (Active) { Context.BeginFrame(BlitFrameSource::Epoch); Guard.BeginFrame(); Checks = 0; }
 			}
 			void End()
 			{
 				if (!Active) return;
 				Context.BeginFrame(BlitFrameSource::Epoch);
 				Active = false;
-				if (++Frames != Window) return;
+				if (Windows >= MaxWindows || ++Frames != Window) return;
 				Debug::Log("[VoxelP2] window=%u scopes=%llu parts=%llu unknown=%llu finals=%llu ineligible=%llu budget=%llu seeded=%llu equal=%llu mismatch=%llu missing=%llu disabled=%llu scopeErrors=%u entries=%u epoch=%u\n",
 					++Windows, Scopes, Parts, Unknown, Finals, Ineligible, Budget, Results[0], Results[1], Results[2], Results[3], Results[4],
 					Context.ScopeErrors, unsigned(Oracle.Size()), BlitFrameSource::Epoch);
+				if (Fast) Debug::Log("[VoxelP3] window=%u verify=%u hits=%llu verifiedHits=%llu savedBytes=%llu seedBytes=%llu clearBytes=%llu seedFailures=%llu clearFailures=%llu\n",
+					Windows, unsigned(Enabled), Hits, VerifiedHits, SavedBytes, SeedBytes, ClearBytes, SeedFailures, ClearFailures);
 				Frames = 0; Scopes = Parts = Unknown = Finals = Ineligible = Budget = 0; Results = {};
+				Hits = VerifiedHits = SavedBytes = SeedBytes = ClearBytes = 0;
+				SeedFailures = ClearFailures = 0;
+			}
+			static BSurface* Scratch()
+			{
+				auto* surface = *reinterpret_cast<BSurface**>(ScratchGlobal);
+				return surface && *reinterpret_cast<const std::uintptr_t*>(surface) == BSurfaceVTable
+					&& surface->BytesPerPixel == 1 && surface->Width == VoxelIdentity::ScratchGuard::Extent
+					&& surface->Height == VoxelIdentity::ScratchGuard::Extent ? surface : nullptr;
+			}
+			static bool Zero(const std::uint8_t* data, const std::array<int, 4>& rect)
+			{
+				constexpr int extent = VoxelIdentity::ScratchGuard::Extent;
+				static constexpr std::array<std::uint8_t, extent * extent> zero {};
+				if (!rect[0] && rect[2] == extent)
+					return std::memcmp(data + rect[1] * extent, zero.data(), size_t(rect[3]) * extent) == 0;
+				for (int y = rect[1]; y < rect[1] + rect[3]; ++y)
+					if (std::memcmp(data + y * extent + rect[0], zero.data(), rect[2])) return false;
+				return true;
+			}
+			void BeginScratch()
+			{
+				if (!Fast) return;
+				auto* surface = Scratch();
+				const auto* data = surface ? static_cast<const std::uint8_t*>(surface->Lock(0, 0)) : nullptr;
+				bool clean = false;
+				if (data && surface->GetPitch() == VoxelIdentity::ScratchGuard::Extent)
+				{
+					clean = true;
+					if (Guard.NeedsSeed(std::uintptr_t(surface), std::uintptr_t(data)))
+					{
+						constexpr int extent = VoxelIdentity::ScratchGuard::Extent;
+						clean = Zero(data, {0, 0, extent, extent}); SeedBytes += extent * extent;
+						SeedFailures += !clean;
+					}
+				}
+				if (data) surface->Unlock();
+				Guard.Begin(std::uintptr_t(surface), std::uintptr_t(data), clean);
+			}
+			void EndScratch()
+			{
+				if (!Fast) return;
+				bool cleared = false;
+				auto* surface = Scratch();
+				if (Guard.CanReuse() && std::uintptr_t(surface) == Guard.Surface && surface)
+				{
+					if (const auto* data = static_cast<const std::uint8_t*>(surface->Lock(0, 0)))
+					{
+						if (std::uintptr_t(data) == Guard.Buffer && surface->GetPitch() == VoxelIdentity::ScratchGuard::Extent)
+						{
+							cleared = Zero(data, Guard.Dirty);
+							ClearBytes += std::uint64_t(Guard.Dirty[2]) * Guard.Dirty[3];
+						}
+						surface->Unlock();
+					}
+				}
+				if (Guard.CanReuse() && !cleared) ++ClearFailures;
+				Guard.End(cleared);
 			}
 			void UnknownWrite(const void* surface)
 			{
+				if (Active) Guard.Unknown(std::uintptr_t(surface));
 				if (Active && Context.Targets(std::uintptr_t(surface))) { ++Unknown; Context.Unknown(std::uintptr_t(surface)); }
 			}
 			void Part(const BlitCall& call)
 			{
-				if (!Active || !Context.Targets(std::uintptr_t(call.Surface))) return;
+				if (!Active) return;
+				if (!Context.Targets(std::uintptr_t(call.Surface))) { Guard.Unknown(std::uintptr_t(call.Surface)); return; }
 				// 707480's cached image only. Dynamic working-buffer draws (4AF328) stay ineligible.
 				if (!call.Compressed || call.Caller != 0x70773B || !call.Source || call.ZSurface)
 					{ UnknownWrite(call.Surface); return; }
@@ -96,18 +165,57 @@ namespace OverlaySnapshot
 				part.Parameters[16] = call.ZAdjust; part.Parameters[17] = call.Gradient;
 				part.Parameters[18] = call.Brightness; part.Parameters[19] = call.Tint;
 				Context.Add(std::uintptr_t(call.Surface), part, BlitFrameSource::Epoch); ++Parts;
+				if (Fast)
+				{
+					const auto* blitter = static_cast<const std::uintptr_t*>(call.Blitter);
+					const auto& bounds = *call.Bounds;
+					const auto& dest = *call.Dest;
+					if (*blitter != ByteRLEVTable || !blitter[1] || bounds.X || bounds.Y
+						|| bounds.Width != VoxelIdentity::ScratchGuard::Extent || bounds.Height != VoxelIdentity::ScratchGuard::Extent)
+						{ Guard.Unknown(std::uintptr_t(call.Surface)); return; }
+					Guard.Write({dest.X, dest.Y, dest.Width, dest.Height});
+					if (Guard.CanReuse()) std::memcpy(Translation.data(), reinterpret_cast<const void*>(blitter[1]), Translation.size());
+				}
 			}
-			void Final(const BlitCall& call, const RecordedBlit& blit)
+			bool MakeKey(const BlitCall& call, const RecordedBlit& blit, VoxelIdentity::Key& key)
+			{
+				if (!Active || !blit.OnTarget || blit.Issue != BlitIssue::None || call.Compressed
+					|| (call.Caller != 0x73B37C && call.Caller != 0x73B3EA && call.Caller != 0x73B44B)) return false;
+				if (!Context.Candidate(std::uintptr_t(call.Source),
+					{call.Limit->X + blit.Clipped.SourceX, call.Limit->Y + blit.Clipped.SourceY, blit.Clipped.Width, blit.Clipped.Rows},
+					BlitFrameSource::Epoch, key)) return false;
+				if (Fast)
+				{
+					if (call.Caller != 0x73B44B || key.Count != 1 || !Guard.CanReuse()) return false;
+					key.Translation = Translation;
+				}
+				return true;
+			}
+			FrameCache::FrameID Lookup(const BlitCall& call, const RecordedBlit& blit)
+			{
+				if (!Fast || !Active || !blit.OnTarget || call.Compressed || call.Caller != 0x73B44B || !Guard.CanReuse()) return {};
+				VoxelIdentity::Key key;
+				if (!MakeKey(call, blit, key)) return {};
+				const auto id = Oracle.Lookup(key, BlitFrameSource::Frames);
+				return id && BlitFrameSource::Touch(id) ? id : FrameCache::FrameID {};
+			}
+			void Final(const BlitCall& call, RecordedBlit& blit, FrameCache::FrameID cached)
 			{
 				if (!Active || !blit.OnTarget || call.Compressed
 					|| (call.Caller != 0x73B37C && call.Caller != 0x73B3EA && call.Caller != 0x73B44B)) return;
 				++Finals;
+				if (cached && !Enabled)
+				{
+					++Hits; SavedBytes += std::uint64_t(blit.Clipped.Width) * blit.Clipped.Rows;
+					return;
+				}
 				VoxelIdentity::Key key;
-				if (blit.Issue != BlitIssue::None || !blit.ID || !Context.Candidate(std::uintptr_t(call.Source),
-					{call.Limit->X + blit.Clipped.SourceX, call.Limit->Y + blit.Clipped.SourceY, blit.Clipped.Width, blit.Clipped.Rows},
-					BlitFrameSource::Epoch, key)) { ++Ineligible; return; }
-				if (Checks++ >= ChecksPerFrame) { ++Budget; return; }
-				++Results[size_t(Oracle.Observe(key, blit.ID, BlitFrameSource::Frames))];
+				if (!blit.ID || !MakeKey(call, blit, key)) { ++Ineligible; return; }
+				// Verification mode checks every proposed hit; only cold/shadow observations are sampled.
+				if (!cached && Checks++ >= ChecksPerFrame) { ++Budget; return; }
+				const auto result = Oracle.Observe(key, blit.ID, BlitFrameSource::Frames);
+				++Results[size_t(result)];
+				if (cached && result == VoxelIdentity::Result::Equal) { ++VerifiedHits; blit.ID = cached; }
 			}
 		};
 		VoxelShadow& IdentityShadow() { static VoxelShadow value; return value; }
@@ -1773,13 +1881,14 @@ namespace OverlaySnapshot
 		// Retail 73B55B installs B1D13C as Temp. Only its address is retained.
 		const auto scratch = *reinterpret_cast<const std::uintptr_t*>(0xB1D13C);
 		shadow.Context.Begin(stackToken, scratch, BlitFrameSource::Epoch);
+		shadow.BeginScratch();
 		++shadow.Scopes;
 	}
 
 	void EndVoxelIdentity(std::uintptr_t stackToken)
 	{
 		auto& shadow = IdentityShadow();
-		if (shadow.Active) shadow.Context.End(stackToken);
+		if (shadow.Active) { shadow.EndScratch(); shadow.Context.End(stackToken); }
 	}
 
 	void BeginRecording(DSurface* target)
@@ -1848,6 +1957,7 @@ namespace OverlaySnapshot
 		blit.Convert = convert;
 		blit.Flags = flags;
 		auto* source = static_cast<XSurface*>(call.Source);
+		FrameCache::FrameID cached;
 		const auto& bounds = blit.Bounds;
 		if (!convert || !flags) blit.Issue = BlitIssue::Blitter;
 		else if (bounds.X < 0 || bounds.Y < 0 || std::int64_t(bounds.X) + bounds.Width > call.Surface->Width
@@ -1866,16 +1976,21 @@ namespace OverlaySnapshot
 				source->Unlock();
 			}
 		}
-		else if (const auto* first = static_cast<const std::uint8_t*>(source->Lock(limit.X + blit.Clipped.SourceX, limit.Y + blit.Clipped.SourceY)))
+		else
 		{
-			// 7BC040 locks the source at the clipped part's place within the source's rectangle.
-			const auto start = profile.Start ? BlitProfile::Now() : 0;
-			blit.ID = BlitFrameSource::AcquirePixels(first, source->GetPitch(), blit.Clipped.Width, blit.Clipped.Rows);
-			if (start) { profile.AcquireTicks = BlitProfile::Now() - start; profile.Pixels = std::uint64_t(blit.Clipped.Width) * blit.Clipped.Rows; }
-			source->Unlock();
+			cached = IdentityShadow().Lookup(call, blit);
+			if (cached && !IdentityShadow().Enabled) blit.ID = cached;
+			else if (const auto* first = static_cast<const std::uint8_t*>(source->Lock(limit.X + blit.Clipped.SourceX, limit.Y + blit.Clipped.SourceY)))
+			{
+				// 7BC040 locks the source at the clipped part's place within the source's rectangle.
+				const auto start = profile.Start ? BlitProfile::Now() : 0;
+				blit.ID = BlitFrameSource::AcquirePixels(first, source->GetPitch(), blit.Clipped.Width, blit.Clipped.Rows);
+				if (start) { profile.AcquireTicks = BlitProfile::Now() - start; profile.Pixels = std::uint64_t(blit.Clipped.Width) * blit.Clipped.Rows; }
+				source->Unlock();
+			}
 		}
 		if (blit.Issue == BlitIssue::None && !blit.ID) blit.Issue = BlitIssue::Image;
-		IdentityShadow().Final(call, blit);
+		IdentityShadow().Final(call, blit, cached);
 		Recorded.push_back(blit);
 	}
 
