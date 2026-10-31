@@ -26,6 +26,7 @@ namespace OverlaySnapshot
 	unsigned TraceCount = 0;
 	bool RedrawRequested = false;
 	DSurface* RecordingTarget = nullptr;
+	bool RecordingAfter = false;
 
 	namespace
 	{
@@ -891,6 +892,7 @@ namespace OverlaySnapshot
 					++(glyph ? count.Glyphs : count.Lines);
 					if (glyph && !line->Glyph) { ++count.GlyphsUnknown; continue; }
 					if (line->Clip.Width <= 0 || line->Clip.Height <= 0) { if (!glyph) ++count.LinesEmpty; continue; }
+					count.LinesAfter += line->AfterLayers;
 					// 4C0050's depth of a pixel: the ZBuffer's MaxValue and Bounds.Y, less the clip's Y and the pixel's,
 					// plus the Z it steps to from the ends'.
 					const int base = capture.MaxValue + capture.BoundsY - line->Clip.Y;
@@ -909,6 +911,21 @@ namespace OverlaySnapshot
 					placed.Color = line->Color;
 					placed.WritesDepth = line->WritesDepth;
 					placed.Glyph = line->Glyph;
+					placed.AfterLayers = line->AfterLayers;
+					if (line->Kind == Primitive::Dashed)
+					{
+						// 4C0750 steps from the end on the left; drawn from the right, its pattern runs down from the
+						// offset plus the longer of the width and the height plus 1.
+						const bool backward = line->From.X > line->To.X;
+						const auto& first = backward ? line->To : line->From;
+						const auto& last = backward ? line->From : line->To;
+						placed.X0 = first.X; placed.Y0 = first.Y; placed.X1 = last.X; placed.Y1 = last.Y;
+						const int steps = std::max(std::abs(last.X - first.X), std::abs(last.Y - first.Y) + 1);
+						placed.Phase = (((backward ? steps + line->Offset : line->Offset) % 16) + 16) % 16;
+						placed.Backward = backward;
+						placed.Pattern = line->Pattern;
+						placed.Shrouded = line->Shrouded;
+					}
 					placed.Before = capture.Target->size();
 					placed.Caller = line->Caller;
 					Current.CompositeLines.push_back(placed);
@@ -1189,6 +1206,7 @@ namespace OverlaySnapshot
 			};
 			for (const auto& line : lines)
 			{
+				if (line.AfterLayers) continue;
 				if (line.Kind == Primitive::Fill || line.Kind == Primitive::Glyph)
 				{
 					const int left = std::max(line.X0, line.Clip.X), top = std::max(line.Y0, line.Clip.Y);
@@ -1413,7 +1431,7 @@ namespace OverlaySnapshot
 				"firstUnmodeled=%X:flags=%X:remap=%d:zshapeFrame=%d bodies=%d shadows=%d compressed=%d translucent=%d writing=%d tinted=%d palette=%d frame=%d "
 				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u blits=%d blitsElsewhere=%d blitsUnmodeled=%d "
 				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u lines=%d linesElsewhere=%d linesEmpty=%d "
-				"glyphs=%d glyphsElsewhere=%d glyphsUnknown=%d\n",
+				"glyphs=%d glyphsElsewhere=%d glyphsUnknown=%d linesAfter=%d\n",
 				TraceCount, composite.LayerObjects, composite.OthersVisible, composite.OthersUnbounded, composite.Calls, composite.CallsElsewhere,
 				composite.CallsUnmodeled, unsigned(FirstUnmodeled.Caller), FirstUnmodeled.Flags, FirstUnmodeled.Remap, FirstUnmodeled.ZShapeFrame,
 				composite.Bodies, composite.Shadows, composite.Compressed, composite.CallsTranslucent, composite.CallsWriting, composite.CallsTinted,
@@ -1421,7 +1439,7 @@ namespace OverlaySnapshot
 				composite.ZShape, CompositeSnapshot::Failed, composite.Blits, composite.BlitsElsewhere, composite.BlitsUnmodeled,
 				unsigned(FirstUnmodeledBlit.Caller), int(FirstUnmodeledBlit.Issue), FirstUnmodeledBlit.Compressed, FirstUnmodeledBlit.Flags,
 				unsigned(BlitFrameSource::Frames.GetStats().Frames), unsigned(BlitFrameSource::Frames.GetStats().IndexBytes), BlitFrameSource::Epoch,
-				composite.Lines, composite.LinesElsewhere, composite.LinesEmpty, composite.Glyphs, composite.GlyphsElsewhere, composite.GlyphsUnknown);
+				composite.Lines, composite.LinesElsewhere, composite.LinesEmpty, composite.Glyphs, composite.GlyphsElsewhere, composite.GlyphsUnknown, composite.LinesAfter);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
@@ -1431,15 +1449,15 @@ namespace OverlaySnapshot
 				draws += item;
 			}
 			if (!draws.empty()) Debug::Log("[TerrainGPU] compositedraws sample=%u%s\n", TraceCount, draws.c_str());
-			// Each line (l), plain line (p), fill (f) and glyph (g) in order: caller, the draw it precedes, its ends
-			// (a fill's or glyph's corners), depths, color, w where it writes Z.
+			// Each line (l), plain line (p), fill (f), glyph (g) and dashed line (d) in order: caller, the draw it
+			// precedes, its ends (a fill's or glyph's corners), depths, color, w where it writes Z, a after RenderLayers.
 			std::string lines;
 			for (const auto& line : Current.CompositeLines)
 			{
 				char item[96];
-				std::snprintf(item, sizeof(item), " %c%X:%u@%d,%d-%d,%d:z=%d/%d:%04X%s",
-					"lpfg"[size_t(line.Kind)], unsigned(line.Caller), unsigned(line.Before),
-					line.X0, line.Y0, line.X1, line.Y1, line.Depth0, line.Depth1, line.Color, line.WritesDepth ? "w" : "");
+				std::snprintf(item, sizeof(item), " %c%X:%u@%d,%d-%d,%d:z=%d/%d:%04X%s%s",
+					"lpfgd"[size_t(line.Kind)], unsigned(line.Caller), unsigned(line.Before),
+					line.X0, line.Y0, line.X1, line.Y1, line.Depth0, line.Depth1, line.Color, line.WritesDepth ? "w" : "", line.AfterLayers ? "a" : "");
 				lines += item;
 			}
 			if (!lines.empty()) Debug::Log("[TerrainGPU] compositelines sample=%u%s\n", TraceCount, lines.c_str());
@@ -1587,10 +1605,17 @@ namespace OverlaySnapshot
 	{
 		Recorded.clear();
 		RecordingTarget = target;
+		RecordingAfter = false;
 		if (target) BlitFrameSource::BeginCapture();
 	}
 
-	void EndRecording() { RecordingTarget = nullptr; }
+	void RecordAfterLayers() { RecordingAfter = RecordingTarget != nullptr; }
+
+	void EndRecording()
+	{
+		RecordingTarget = nullptr;
+		RecordingAfter = false;
+	}
 
 	void RecordCall(RecordedCall call, DSurface* surface)
 	{
@@ -1660,6 +1685,7 @@ namespace OverlaySnapshot
 	void RecordLine(RecordedLine line, DSurface* surface)
 	{
 		line.OnTarget = surface == RecordingTarget;
+		line.AfterLayers = RecordingAfter;
 		if (line.OnTarget)
 		{
 			// Each cuts the clip to the surface (421B60) and draws nothing where they do not meet; a line's ends are
@@ -1671,12 +1697,14 @@ namespace OverlaySnapshot
 				const std::int64_t bottom = std::min(std::int64_t(a.Y) + a.Height, std::int64_t(b.Y) + b.Height);
 				return RectangleStruct {int(left), int(top), int(std::max<std::int64_t>(right - left, 0)), int(std::max<std::int64_t>(bottom - top, 0))};
 			};
+			// 4C0750 takes no clip: its caller cut the line to ViewBounds first (7BC2B0).
+			if (line.Kind == Primitive::Dashed) line.Clip = {0, 0, surface->Width, surface->Height};
 			const auto clip = cut(line.Clip, {0, 0, surface->Width, surface->Height});
-			if (line.Kind == Primitive::Glyph)
+			if (line.Kind == Primitive::Glyph || line.Kind == Primitive::Dashed)
 			{
-				// 434120 writes its rows and columns inside the font's bounds only.
+				// 434120 writes its rows and columns inside the font's bounds only; a dashed line's ends are on the surface.
 				line.Clip = clip;
-				line.To = {line.From.X + line.Fill.Width, line.From.Y + line.Fill.Height};
+				if (line.Kind == Primitive::Glyph) line.To = {line.From.X + line.Fill.Width, line.From.Y + line.Fill.Height};
 			}
 			else if (line.Kind == Primitive::Fill)
 			{

@@ -56,11 +56,19 @@ DEFINE_HOOK(0x6D4664, TacticalClass_Render_LayersEnd, 0x5)
 	return 0;
 }
 
+// The end of 6D3D10's Techno loop (action lines 6D4750, psychic and capture links), reached from 6D4664 on every
+// path; before the displaced mov al / test al. Ends the recording that goes on after RenderLayers.
+DEFINE_HOOK(0x6D4912, TacticalClass_Render_TechnoLinesEnd, 0x6)
+{
+	OverlaySnapshot::EndRecording();
+	return 0;
+}
+
 // 4AED70 (CC_Draw_Shape) while RenderLayers draws: each call as passed, before the displaced
 // sub esp, for OverlaySnapshot's Composite list. A call without a shape, point or clip draws nothing.
 DEFINE_HOOK(0x4AED70, CC_Draw_Shape_RecordLayers, 0x6)
 {
-	if (!OverlaySnapshot::RecordingTarget) return 0;
+	if (!OverlaySnapshot::RecordingTarget || OverlaySnapshot::RecordingAfter) return 0;
 	GET(DSurface*, pSurface, ECX);
 	GET(ConvertClass*, pConvert, EDX);
 	GET_STACK(std::uintptr_t, caller, 0x0);
@@ -96,7 +104,7 @@ DEFINE_HOOK(0x4AED70, CC_Draw_Shape_RecordLayers, 0x6)
 // value, the Z adjust surface and its offset before the tint.
 static void RecordBlit(REGISTERS* R, bool compressed)
 {
-	if (!OverlaySnapshot::RecordingTarget) return;
+	if (!OverlaySnapshot::RecordingTarget || OverlaySnapshot::RecordingAfter) return;
 	GET_STACK(std::uintptr_t, caller, 0x0);
 	if (caller > OverlaySnapshot::DrawShapeBegin && caller < OverlaySnapshot::DrawShapeEnd) return;
 	OverlaySnapshot::BlitCall call;
@@ -177,6 +185,30 @@ DEFINE_HOOK(0x7BA610, XSurface_DrawLineEx_RecordLayers, 0x6)
 	line.From = *pFrom;
 	line.To = *pTo;
 	line.Color = R->Stack<std::uint16_t>(0x10);
+	line.Caller = R->Stack<std::uintptr_t>(0x0);
+	OverlaySnapshot::RecordLine(line, pSurface);
+	return 0;
+}
+
+// 4C0750 (DSurface::DrawDashedLine_), before the displaced sub esp / mov eax: the action lines' dashed part (7049C0).
+// It takes both ends on the surface (its caller cut them to ViewBounds), the color, a pattern of 16 bools, the
+// offset into it, and whether it draws where A is 0 instead of where it is not. Not the clip.
+DEFINE_HOOK(0x4C0750, DSurface_DrawDashedLine_RecordLayers, 0x7)
+{
+	if (!OverlaySnapshot::RecordingTarget) return 0;
+	GET(DSurface*, pSurface, ECX);
+	GET_STACK(Point2D*, pFrom, 0x4);
+	GET_STACK(Point2D*, pTo, 0x8);
+	GET_STACK(const bool*, pPattern, 0x10);
+	if (!pSurface || !pFrom || !pTo || !pPattern) return 0;
+	OverlaySnapshot::RecordedLine line;
+	line.Kind = OverlaySnapshot::Primitive::Dashed;
+	line.From = *pFrom;
+	line.To = *pTo;
+	line.Color = R->Stack<std::uint16_t>(0xC);
+	for (int i = 0; i < 16; ++i) line.Pattern |= std::uint16_t(pPattern[i] ? 1u << i : 0u);
+	line.Offset = R->Stack<int>(0x14);
+	line.Shrouded = R->Stack<std::uint8_t>(0x18) != 0;
 	line.Caller = R->Stack<std::uintptr_t>(0x0);
 	OverlaySnapshot::RecordLine(line, pSurface);
 	return 0;

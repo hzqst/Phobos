@@ -374,6 +374,11 @@ namespace TerrainPass
 				const bool tested = line.Kind == OverlaySnapshot::Primitive::Line, glyph = line.Kind == OverlaySnapshot::Primitive::Glyph;
 				std::uint32_t flags = line.Kind == OverlaySnapshot::Primitive::Fill ? TerrainBatch::FilledLine : tested ? TerrainBatch::AlphaLine : 0u;
 				int depth0 = line.Depth0;
+				if (line.Kind == OverlaySnapshot::Primitive::Dashed)
+				{
+					flags = TerrainBatch::DashedLine;
+					depth0 = int(TerrainBatch::DashedPattern(line.Pattern, unsigned(line.Phase), line.Backward, line.Shrouded));
+				}
 				const void* page = nullptr;
 				if (glyph)
 				{

@@ -32,7 +32,8 @@
 // gamemd-reverse #23, #26, #27) is recorded call by call as it draws, with the voxels' blits of 4373B0 and
 // 437A10 (D3a-3), its lines and fills (4BFD30, 7BA610, 4BB620) and its text's glyphs (434120), and turned into a
 // list of its own in the same callback, which the trace replays over CompositeSnapshot's copies (D3); the lines
-// and glyphs only the GPU draws.
+// and glyphs only the GPU draws. The lines, fills and glyphs 6D3D10 draws on the same target after RenderLayers up
+// to the end of its Techno loop (6D4664 to 6D4912: the action lines, 7049C0) follow them (D3a-6).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -152,17 +153,19 @@ namespace OverlaySnapshot
 		int Calls = 0, CallsElsewhere = 0, CallsUnmodeled = 0, CallsTranslucent = 0, CallsWriting = 0, CallsTinted = 0;
 		// Its blits outside 4AED70 (4373B0, 437A10): on its target, elsewhere, and not modeled.
 		int Blits = 0, BlitsElsewhere = 0, BlitsUnmodeled = 0;
-		// Its lines and fills (4BFD30, 7BA610, 4BB620): on its target, elsewhere, and those on it that draw nothing;
-		// its glyphs (434120): on its target, elsewhere, and those whose bitmap was not taken.
-		int Lines = 0, LinesElsewhere = 0, LinesEmpty = 0, Glyphs = 0, GlyphsElsewhere = 0, GlyphsUnknown = 0;
+		// Its lines and fills (4BFD30, 7BA610, 4BB620, 4C0750): on its target, elsewhere, and those on it that draw
+		// nothing; its glyphs (434120): on its target, elsewhere, and those whose bitmap was not taken; and of those on
+		// its target, the ones drawn after RenderLayers (6D4664 to 6D4912).
+		int Lines = 0, LinesElsewhere = 0, LinesEmpty = 0, Glyphs = 0, GlyphsElsewhere = 0, GlyphsUnknown = 0, LinesAfter = 0;
 		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.
 		int Buildings = 0, BuildingsFogged = 0, BuildingsOutside = 0, BuildingsUnsupported = 0, Gates = 0, Unloading = 0, Bibs = 0, Doors = 0;
 	};
 	// What a line or fill of RenderLayers draws (Primitive): a line tested against Z and lit by A (4BFD30), a
-	// plain line (7BA610), a filled rectangle (4BB620), or a BitFont glyph (434120) in one color.
-	enum class Primitive : std::uint8_t { Line, PlainLine, Fill, Glyph };
+	// plain line (7BA610), a filled rectangle (4BB620), a BitFont glyph (434120) in one color, or a dashed line drawn
+	// where A is 0 or where it is not (4C0750).
+	enum class Primitive : std::uint8_t { Line, PlainLine, Fill, Glyph, Dashed };
 	// A line from (X0, Y0) to (X1, Y1) on the surface whose depth goes from Depth0 to Depth1 (4BFD30 only), or a
 	// fill or glyph from its first pixel (X0, Y0) to the one past its last (X1, Y1), drawn only inside Clip; drawn before
 	// CompositeDraws[Before]. The GPU draws it approximately (not pixel for pixel like the native) and the trace
@@ -174,10 +177,17 @@ namespace OverlaySnapshot
 		int X0 = 0, Y0 = 0, X1 = 0, Y1 = 0, Depth0 = 0, Depth1 = 0;
 		// A glyph's 1-bit mask in SidebarText's GlyphCache.
 		GlyphCache::GlyphID Glyph;
+		// A dashed line's pattern (bit i set where step i of 16 draws), the step of its first pixel (X0, Y0), whether
+		// the steps count down, and whether it draws where A is 0 instead of where it is not.
+		std::uint16_t Pattern = 0;
+		int Phase = 0;
+		bool Backward = false, Shrouded = false;
 		std::uint16_t Color = 0;
 		bool WritesDepth = false;
 		size_t Before = 0;
 		std::uintptr_t Caller = 0;
+		// Drawn after RenderLayers, so not in native_composite or the trace's check.
+		bool AfterLayers = false;
 	};
 	struct Frame
 	{
@@ -266,15 +276,23 @@ namespace OverlaySnapshot
 		int ZFrom = 0, ZTo = 0;
 		bool WritesDepth = false;
 		GlyphCache::GlyphID Glyph;
+		// 4C0750's pattern of 16 steps, offset and whether it draws where A is 0.
+		std::uint16_t Pattern = 0;
+		int Offset = 0;
+		bool Shrouded = false;
 		std::uintptr_t Caller = 0;
-		bool OnTarget = true;
+		bool OnTarget = true, AfterLayers = false;
 	};
 
 	// The surface RenderLayers draws on while its calls are recorded (between 6D465F and 6D4664 of a
 	// capturing render), else null; the hooks at 4AED70, 4373B0 and 437A10 record through RecordCall and
 	// RecordBlit, those at 4BFD30, 7BA610 and 4BB620 through RecordLine, the glyphs of 434120 too.
+	// After RenderLayers (6D4664) the recording goes on for the lines, fills and glyphs only (RecordingAfter) up to
+	// 6D4912 (EndRecording).
 	extern DSurface* RecordingTarget;
+	extern bool RecordingAfter;
 	void BeginRecording(DSurface* target);
+	void RecordAfterLayers();
 	void EndRecording();
 	void RecordCall(RecordedCall call, DSurface* surface);
 	void RecordBlit(const BlitCall& call);

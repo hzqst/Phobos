@@ -815,7 +815,8 @@ void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
 	// serves only the trace that checks this render.
 	if (drawn)
 	{
-		OverlaySnapshot::EndRecording();
+		// The lines that follow up to the end of the Techno loop (6D4912) are recorded too.
+		OverlaySnapshot::RecordAfterLayers();
 		if (capturing || Automation::IsRunning()) CompositeSnapshot::Record(CompositeSnapshot::Output, pSurface);
 		return;
 	}

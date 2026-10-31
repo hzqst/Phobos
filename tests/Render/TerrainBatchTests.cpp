@@ -80,6 +80,8 @@ int main()
 		"moved and cut");
 	Check(!PlaceLine(0, 0, 10, 10, {900, 0, 20, 20}, 0, 0, 856, 736, 0, 0, 0, 0, line), "clip off the target");
 	Check(!PlaceLine(0, 0, 10, 10, {0, 0, 0, 20}, 0, 0, 856, 736, 0, 0, 0, 0, line), "empty clip");
+	Check(DashedPattern(0xF0F0, 3, false, false) == 0x0003F0F0u && DashedPattern(0x00FF, 19, true, true) == 0x003300FFu,
+		"dashed pattern, phase and direction packing");
 
 	ColorTables tables(100);
 	std::vector<std::uint16_t> first(53 * 256), second(27 * 256), third(40 * 256);
@@ -113,5 +115,5 @@ int main()
 		Check(QuarterMask({11, 5, 0}, {5, 6, 5}) == 0x39E7 && QuarterMask({10, 5, 0}, {5, 5, 5}) == 0x1CE7, "quarter translucency masks");
 	}
 	if (Failures) return 1;
-	std::puts("TerrainBatch: placement, clipping, page runs, shape, line and glyph runs, shape instances, line placement, masks and color table packing passed.");
+	std::puts("TerrainBatch: placement, clipping, page runs, shape, line and glyph runs, shape instances, line placement, dashed packing, masks and color table packing passed.");
 }

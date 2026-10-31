@@ -32,6 +32,7 @@ struct VSOutput
 };
 
 static const uint FilledLine = 1;
+static const uint DashedLine = 8;
 
 VSOutput main(uint vertexId : SV_VertexID)
 {
@@ -53,6 +54,9 @@ VSOutput main(uint vertexId : SV_VertexID)
 		const float2 across = abs(unit.x) >= abs(unit.y) ? float2(0.0, 0.5) : float2(0.5, 0.0);
 		pixel = float2(segment.From) + 0.5 + unit * along + across * corner.y;
 		depth = major > 0.0 ? lerp(float(segment.Depth.x), float(segment.Depth.y), along / major) : float(segment.Depth.x);
+		// A dashed line has no depth: the pixel shader takes its step from the start instead.
+		if (segment.Flags & DashedLine)
+			depth = along;
 	}
 	VSOutput output;
 	output.Position = float4(pixel / float2(View.xy) * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);

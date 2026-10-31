@@ -143,6 +143,8 @@ namespace TerrainBatch
 	// covers From up to To, which is past its last pixel. Only the pixels from ClipMin up to ClipMax draw (packed X
 	// in the low 16 bits). AlphaLine: the pixel needs an ABuffer word other than 0 and its color is scaled by it.
 	// GlyphLine (with FilledLine): a glyph whose mask starts at the atlas texel Depth0 (packed), drawn where it is set.
+	// DashedLine: step i from From draws where bit (Phase ± i) mod 16 of the pattern is set and the ABuffer word is 0
+	// (shrouded) or not; Depth0 packs them (DashedPattern).
 	struct Line
 	{
 		std::int32_t FromX, FromY, ToX, ToY;
@@ -151,7 +153,14 @@ namespace TerrainBatch
 		std::uint32_t Color, Flags;
 	};
 	static_assert(sizeof(Line) == 40);
-	constexpr std::uint32_t FilledLine = 1, AlphaLine = 2, GlyphLine = 4;
+	constexpr std::uint32_t FilledLine = 1, AlphaLine = 2, GlyphLine = 4, DashedLine = 8;
+
+	// A dashed line's Depth0: the 16-step pattern, its phase above, then whether the steps count down and whether it
+	// draws where A is 0.
+	constexpr std::uint32_t DashedPattern(std::uint16_t pattern, unsigned phase, bool backward, bool shrouded)
+	{
+		return pattern | (phase & 15) << 16 | (backward ? 1u << 20 : 0u) | (shrouded ? 1u << 21 : 0u);
+	}
 
 	// A line or fill at Tile coordinates moved to the target by (originX, originY), its clip cut to the target's
 	// width x height. False when nothing of the clip remains.
