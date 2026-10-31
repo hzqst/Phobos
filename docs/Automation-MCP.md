@@ -26,6 +26,12 @@ Dispatcher 通过游戏线程的 16ms Win32 Timer 消费命令，不在 HTTP 线
 不要把构建产物自动覆盖到实际游戏安装。本次实机测试使用 `Debug/AutomationGame` 隔离副本，
 不复制测试存档；仅在该目录部署生成的 DLL/PDB。
 
+Voxel 采集性能调查可在启动进程前设置 `PHOBOS_VOXEL_PROFILE=1`，并关闭 Terrain trace；
+它只输出有界的 `[VoxelP0]` 日志，不增加 MCP 工具。指标范围、独立取图微基准和首轮
+实机证据见 [VoxelIdentityP0](../src/Render/VoxelIdentityP0.md)。2026-10-31 的 P0 测试按用户要求
+使用自带 `Launch-Phobos.cmd`，在单独授权后临时部署到其实际指向的 `D:/Ra2`，测后恢复；
+该次授权不代替未来任务对正式安装的部署许可。
+
 ## 协议与工具
 
 提供 2026-07-28 无握手 `server/discover`、`tools/list`、`tools/call`，以及独立的
