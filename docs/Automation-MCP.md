@@ -32,6 +32,10 @@ Voxel 采集性能调查可在启动进程前设置 `PHOBOS_VOXEL_PROFILE=1`，�
 使用自带 `Launch-Phobos.cmd`，在单独授权后临时部署到其实际指向的 `D:/Ra2`，测后恢复；
 该次授权不代替未来任务对正式安装的部署许可。
 
+`PHOBOS_VOXEL_IDENTITY_SHADOW=1` 开启 P1/P2 身份旁路验证，输出有界的 `[VoxelP2]`
+计数。它仍执行原有像素复制／哈希，不能用其耗时代表优化后的性能；不改变 MCP 协议。
+身份范围、回退规则、Hook 与验收记录见 [VoxelIdentity](../src/Render/VoxelIdentity.md)。
+
 ## 协议与工具
 
 提供 2026-07-28 无握手 `server/discover`、`tools/list`、`tools/call`，以及独立的

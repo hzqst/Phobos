@@ -297,6 +297,8 @@ namespace OverlaySnapshot
 	void RecordCall(RecordedCall call, DSurface* surface);
 	void RecordBlit(const BlitCall& call);
 	void RecordLine(RecordedLine line, DSurface* surface);
+		void BeginVoxelIdentity(std::uintptr_t stackToken);
+		void EndVoxelIdentity(std::uintptr_t stackToken);
 
 	inline void Invalidate() { Current = {}; }
 
