@@ -2,6 +2,8 @@
 
 2026-10-31，基于 `4d616857`，接续 [P0 调查与基线](VoxelIdentityP0.md)。
 
+本文保留 P1/P2 时点的行为与证据。后续显式启用的受限快速路径见 [P3](VoxelIdentityP3.md)；仅设置 SHADOW 时仍使用本文的旁路流程。
+
 ## 当前行为
 
 新增 `PHOBOS_VOXEL_IDENTITY_SHADOW=1`，默认关闭。只观察纯 VXL 车辆的实际缓存部件与最终 scratch 源图；**不使用身份缓存返回图像，不跳过原生绘制，也不减少现有 AcquirePixels 的复制／内容哈希**。P3 尚未开启。

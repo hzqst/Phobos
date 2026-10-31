@@ -36,6 +36,10 @@ Voxel 采集性能调查可在启动进程前设置 `PHOBOS_VOXEL_PROFILE=1`，�
 计数。它仍执行原有像素复制／哈希，不能用其耗时代表优化后的性能；不改变 MCP 协议。
 身份范围、回退规则、Hook 与验收记录见 [VoxelIdentity](../src/Render/VoxelIdentity.md)。
 
+`PHOBOS_VOXEL_IDENTITY_FAST=1` 显式开启 P3 的受限 FrameID 复用；与 SHADOW 同时开启时，
+逐命中重新采集并核对像素。FAST 单独开启才会跳过命中的 scratch 复制／内容哈希。
+准入、清理检查、缓存续期与测量限制见 [VoxelIdentityP3](../src/Render/VoxelIdentityP3.md)。
+
 ## 协议与工具
 
 提供 2026-07-28 无握手 `server/discover`、`tools/list`、`tools/call`，以及独立的

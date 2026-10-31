@@ -4,6 +4,7 @@ This page lists all the individual contributions to the project by their author.
 
 - **hzqst (with Codex)**:
   - GPU voxel acquisition profiling, cache microbenchmark and P0 investigation
+  - GPU voxel composition identity validation and guarded FrameID reuse
 - **Belonit (Gluk-v48)**:
   - Disable empty spawn positions
   - `gamemd.exe` icon customization
