@@ -4,12 +4,19 @@
 
 #include <AnimClass.h>
 #include <AnimTypeClass.h>
+#include <BulletClass.h>
+#include <DropPodLocomotionClass.h>
 #include <FPSCounter.h>
 #include <GameOptionsClass.h>
+#include <InfantryClass.h>
+#include <JumpjetLocomotionClass.h>
+#include <ScenarioClass.h>
+#include <SuperClass.h>
 #include <UnitClass.h>
 #include <Ext/Anim/Body.h>
 #include <Ext/AnimType/Body.h>
 #include <Ext/BuildingType/Body.h>
+#include <Ext/BulletType/Body.h>
 #include <Ext/Rules/Body.h>
 #include <Ext/Techno/Body.h>
 #include <Ext/TechnoType/Body.h>
@@ -562,27 +569,34 @@ namespace OverlaySnapshot
 				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, true);
 			}
 
-			// 705E00's choices for a building that draws its normal visual (gamemd-reverse #22 §5, §7): the
-			// palette, the tint and intensity with Phobos' 70632E and 706389, the shadow, and 43CEA0's point.
+			// 705E00's choices for a Techno it draws (gamemd-reverse #22 §5, §7, #26 §4): the palette, the
+			// tint and intensity with Phobos' 70632E and 706389, the visual's translucency, the shadow, and the
+			// caller's point.
 			struct Wrapper
 			{
-				BuildingClass* Building = nullptr;
-				BuildingTypeClass* Type = nullptr;
+				TechnoClass* Techno = nullptr;
+				// The type's index and the layer the trace files the draws under.
+				int Index = -1;
+				Layer Source = Layer::Building;
+				// A building's TerrainPalette takes the center cell's terrain intensity.
+				bool TerrainPalette = false;
 				CellStruct MapCoords {};
 				const CellClass* Cell = nullptr;
 				const CellClass* CenterCell = nullptr;
 				const ConvertClass* Convert = nullptr;
 				int Height = 0;
 				bool DrawShadow = false;
+				std::uint8_t Translucency = 0;
 				Point Position {};
 
+				// Phobos' 706389 adds the custom intensity to what is not an infantry, whose 51946D added it.
 				int Intensity(int brightness) const
 				{
-					if (Type->TerrainPalette) brightness = std::int16_t(CenterCell->Intensity_Terrain);
-					int value = Building->GetFlashingIntensity(brightness);
-					if (Building->IsIronCurtained()) value = Building->GetInvulnerabilityTintIntensity(value);
-					if (TechnoExt::Fetch(Building)->AirstrikeTargetingMe) value = Building->GetAirstrikeTintIntensity(value);
-					return value + TechnoExt::GetCustomTintIntensity(Building);
+					if (TerrainPalette) brightness = std::int16_t(CenterCell->Intensity_Terrain);
+					int value = Techno->GetFlashingIntensity(brightness);
+					if (Techno->IsIronCurtained()) value = Techno->GetInvulnerabilityTintIntensity(value);
+					if (TechnoExt::Fetch(Techno)->AirstrikeTargetingMe) value = Techno->GetAirstrikeTintIntensity(value);
+					return Techno->WhatAmI() == AbstractType::Infantry ? value : value + TechnoExt::GetCustomTintIntensity(Techno);
 				}
 			};
 
@@ -610,8 +624,9 @@ namespace OverlaySnapshot
 					++count.BuildingsUnsupported;
 					return false;
 				}
-				wrapper.Building = building;
-				wrapper.Type = type;
+				wrapper.Techno = building;
+				wrapper.Index = type->ArrayIndex;
+				wrapper.TerrainPalette = type->TerrainPalette;
 				wrapper.MapCoords = building->GetMapCoords();
 				wrapper.Cell = MapClass::Instance.GetCellAt(wrapper.MapCoords);
 				// 705E00 reads the tint's shroud and the TerrainPalette from the center's cell.
@@ -630,7 +645,8 @@ namespace OverlaySnapshot
 			}
 
 			// A part 705E00 draws, then its own shadow at half the frames: both test Z and write it unless
-			// the part only reads it (2E00, 2E01); the wrapper's tint is shroud-cleared.
+			// the part only reads it (2E00, 2E01); the wrapper's tint is shroud-cleared, and its visual's
+			// translucency only applies to the part.
 			void WrapperPart(const Wrapper& wrapper, const SHPStruct* shape, int frame, int depth, int gradient, int brightness, int tint,
 				bool writes, const SHPStruct* zshape = nullptr, BuildingImage::Offset offset = {})
 			{
@@ -648,19 +664,21 @@ namespace OverlaySnapshot
 				call.ZShape = zshape;
 				call.ZShapeX = offset.X;
 				call.ZShapeY = offset.Y;
-				const int index = wrapper.Type->ArrayIndex;
-				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, false);
+				call.Translucency = wrapper.Translucency;
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, wrapper.Source, wrapper.Index, call, wrapper.Position, false);
 				if (!wrapper.DrawShadow) return;
 				const int frames = FrameCount(shape);
 				if (frames == UnloadedShape) { ++count.Unloaded; return; }
 				if (frames < 0) { ++count.Frame; return; }
 				call.Frame = BuildingImage::Add32(std::int16_t(frames) / 2, frame);
 				call.Brightness = BuildingImage::FullBrightness;
-				call.ZAdjust = BuildingImage::ShadowDepth(wrapper.Height);
+				call.ZAdjust = UnitImage::ShadowDepth(wrapper.Height);
 				call.Gradient = int(ZGradient::Ground);
 				call.Tint = 0;
 				call.ZShape = nullptr;
-				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, true);
+				auto position = wrapper.Position;
+				if (wrapper.Techno->IsOnCarryall) position.Y -= UnitImage::CarryallLift;
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, wrapper.Source, wrapper.Index, call, position, true);
 			}
 
 			// 6D9920 and 43CEA0 (force 1, the clip ViewBounds) and 43D290 for a building of the ground
@@ -673,7 +691,7 @@ namespace OverlaySnapshot
 				if (building->IsFogged && !Unsorted::ArmageddonMode) { ++count.BuildingsFogged; return; }
 				Wrapper wrapper;
 				if (!Wrap(building, wrapper)) return;
-				auto* type = wrapper.Type;
+				auto* type = building->Type;
 				auto* image = building->GetImage();
 				if (!image) { ++count.NoImage; return; }
 				const auto mission = building->GetCurrentMission();
@@ -762,6 +780,188 @@ namespace OverlaySnapshot
 					timer.AreStates00(), damaged);
 				WrapperPart(wrapper, type->DoorAnim, frame, BuildingImage::DoorAnimDepth(wrapper.Height), int(ZGradient::Ground),
 					std::int16_t(wrapper.Cell->Intensity_Normal), 0, false);
+			}
+
+			// 6D8DB0's Foot branch, 5F4B10 (forced) and 518F90 with Phobos' 518FC8, 51933B, 51946D and 5194EF
+			// for an infantry on its normal image (gamemd-reverse #26 §4.4): INFSHDW above the ground, then the
+			// body through 705E00 with its own shadow. In a tube nothing draws; a DropPod, a disguise and an
+			// infantry not clearly visible (705E00's other flags and palette) are not modeled.
+			void Infantry(InfantryClass* infantry, bool inRange)
+			{
+				auto& count = *Count;
+				++count.Infantry;
+				if (!inRange) { ++count.InfantryOutside; return; }
+				const auto location = infantry->Location;
+				if (ScenarioClass::Instance->SpecialFlags.FogOfWar && MapClass::Instance.IsLocationFogged(location)) { ++count.InfantryFogged; return; }
+				if (!TacticalClass::Instance->CoordsToClient(infantry->GetCoords()).second) { ++count.InfantryOutside; return; }
+				if (!Unsorted::ArmageddonMode && Game::hWnd && infantry->InLimbo) { ++count.InfantryOutside; return; }
+				Point2D client {};
+				if (!Project(infantry->GetRenderCoords(), client)) { ++count.InfantryOutside; return; }
+				if (infantry->TubeIndex != -1) return;
+				auto* type = infantry->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(InfantryTypeClass)) || !infantry->Locomotor) { ++count.Frame; return; }
+				if (infantry->GetHeight() > 0 && locomotion_cast<DropPodLocomotionClass*>(infantry->Locomotor)) { ++count.InfantryUnsupported; return; }
+				auto* image = infantry->GetImage();
+				if (!image) return;
+
+				CellStruct mapCoords {};
+				infantry->GetMapCoordsAgain(&mapCoords);
+				const auto* cell = MapClass::Instance.GetCellAt(mapCoords);
+				const auto center = infantry->GetCoords();
+				const auto* centerCell = MapClass::Instance.GetCellAt(CellStruct {std::int16_t(center.X / 256), std::int16_t(center.Y / 256)});
+				Point2D xy {location.X, location.Y};
+				const auto* target = MapClass::Instance.GetTargetCell(xy);
+				if (!cell || !centerCell || !target) { ++count.Palette; return; }
+				// Phobos' 518FC8: the effect and custom tint, which the shroud at GetCoords clears.
+				const int tint = TechnoExt::GetTintColor(infantry, true, true, true) | TechnoExt::GetCustomTintColor(infantry);
+
+				// The light: Phobos' 51933B for a jumpjet, else the height or the ground path, with
+				// ExtraInfantryLight; then Phobos' 51946D.
+				const auto* scenario = ScenarioClass::Instance;
+				int level = scenario->NormalLighting.Level;
+				if (reinterpret_cast<bool(__cdecl*)()>(IonActive)()) level = scenario->IonLighting.Level;
+				else if (PsyDom::Active()) level = scenario->DominatorLighting.Level;
+				else if (NukeFlash::IsFadingIn()) level = scenario->NukeLighting.Level;
+				const int bridgeHeight = *reinterpret_cast<const int*>(InfantryBridgeHeight);
+				const auto targetFlags = std::uint32_t(target->Flags);
+				const auto intensity = std::int16_t(cell->Intensity_Normal);
+				int light = 0;
+				if (locomotion_cast<JumpjetLocomotionClass*>(infantry->Locomotor))
+				{
+					int levelIntensity = 0, cellIntensity = FullBrightness;
+					TechnoExt::GetLevelIntensity(infantry, level, levelIntensity, cellIntensity, RulesExt::Global()->JumpjetLevelLightMultiplier,
+						TechnoExt::IsOnBridge(infantry));
+					light = levelIntensity + cellIntensity;
+				}
+				else
+				{
+					const bool raised = targetFlags & UnitImage::RaisedCellFlag;
+					if (UnitImage::HeightLight(infantry->OnBridge, raised, location.Z, MapClass::Instance.GetCellFloorHeight(location), bridgeHeight))
+					{
+						const int step = *reinterpret_cast<const int*>(InfantryLevelStep);
+						if (!UnitImage::Add32(step, step)) { ++count.InfantryUnsupported; return; }
+						light = UnitImage::LevelLight(infantry->GetHeight(), step, level, intensity);
+					}
+					else light = UnitImage::GroundLight(raised, intensity);
+				}
+				light = UnitImage::Add32(light, *reinterpret_cast<const int*>(&RulesClass::Instance->ExtraInfantryLight));
+				if (infantry->IsIronCurtained()) light = infantry->GetInvulnerabilityTintIntensity(light);
+				if (TechnoExt::Fetch(infantry)->AirstrikeTargetingMe) light = infantry->GetAirstrikeTintIntensity(light);
+				light += TechnoExt::GetCustomTintIntensity(infantry);
+
+				const auto offset = *reinterpret_cast<const std::int8_t*>(&infantry->unknown_bool_6B4);
+				const auto at = [&](int x, int y) { return Point {std::int64_t(x) + ViewX, std::int64_t(y) + ViewY}; };
+				// INFSHDW, which Phobos' 5194EF skips for an infantry that is not uncloaked.
+				const bool bridgeCell = targetFlags & UnitImage::BridgeCellFlag, direction = targetFlags & UnitImage::BridgeDirectionFlag;
+				const auto bridgeAt = [target](FacingType facing)
+				{
+					const auto* neighbour = target->GetNeighbourCell(facing);
+					return neighbour && (std::uint32_t(neighbour->Flags) & UnitImage::BridgeCellFlag);
+				};
+				const int shadowHeight = UnitImage::ShadowHeight(infantry->GetHeight(), bridgeHeight, bridgeCell, direction,
+					bridgeCell && direction && bridgeAt(FacingType::North), bridgeCell && !direction && bridgeAt(FacingType::West));
+				if (shadowHeight > 0 && infantry->CloakState == CloakState::Uncloaked)
+				{
+					Call call;
+					call.Image = *reinterpret_cast<SHPStruct* const*>(InfantryShadowShape);
+					call.Frame = UnitImage::InfantryShadowFrame;
+					call.Convert = FileSystem::PALETTE_PAL;
+					call.Brightness = FullBrightness;
+					call.ZAdjust = UnitImage::InfantryShadowDepth(AdjustZ(UnitImage::Sub32(location.Z, shadowHeight)));
+					call.Gradient = int(ZGradient::Ground);
+					call.Bounded = false;
+					call.WritesDepth = false;
+					const auto drawn = Target->size();
+					Place(mapCoords.X, mapCoords.Y, Layer::Infantry, type->ArrayIndex, call,
+						at(client.X, UnitImage::InfantryShadowY(client.Y, offset, AdjustZ(shadowHeight))), true);
+					count.InfantryShadows += Target->size() != drawn;
+				}
+
+				// 705E00 with the nominal flags 256, ZAdjust [825500], gradient 2 and no Z write.
+				const auto visual = UnitImage::Wrapped(int(infantry->VisualCharacter(VARIANT_FALSE, nullptr)), infantry->CloakProgress.Value != 0,
+					infantry->IsBeingWarpedOut() || infantry->IsWarpingIn(), false);
+				if (!visual.Drawn) { ++count.InfantryHidden; return; }
+				if (infantry->IsDisguised() || !infantry->IsClearlyVisibleTo(HouseClass::CurrentPlayer)) { ++count.InfantryUnsupported; return; }
+				Wrapper wrapper;
+				wrapper.Techno = infantry;
+				wrapper.Index = type->ArrayIndex;
+				wrapper.Source = Layer::Infantry;
+				wrapper.MapCoords = mapCoords;
+				wrapper.Cell = cell;
+				wrapper.CenterCell = centerCell;
+				wrapper.Convert = infantry->GetRemapColour();
+				if (!wrapper.Convert) { ++count.Palette; return; }
+				const bool airborne = infantry->GetHeight() != 0;
+				wrapper.Height = AdjustZ(infantry->GetZ());
+				wrapper.DrawShadow = Game::bDrawShadow && visual.Shadow && !airborne && !type->NoShadow;
+				wrapper.Translucency = visual.Bits;
+				wrapper.Position = at(client.X, UnitImage::InfantryY(client.Y, offset));
+				const int depth = UnitImage::FootDepth(*reinterpret_cast<const int*>(InfantryZAdjust), airborne, wrapper.Height,
+					airborne ? 0 : infantry->GetZAdjustment());
+				const int frame = reinterpret_cast<int(__thiscall*)(InfantryClass*)>(InfantryFrame)(infantry);
+				WrapperPart(wrapper, image, frame, depth, int(ZGradient::Deg90), light, tint, false);
+			}
+
+			// Ares' 468379: the palette its helper finds for the bullet type, else none.
+			static const ConvertClass* AresBulletConvert(const BulletTypeClass* type)
+			{
+				static const bool ares = AresExport("BulletClass_Draw_SetAnimPalette", AresBulletPalette);
+				if (!ares) return nullptr;
+				auto* ext = *reinterpret_cast<void* const*>(reinterpret_cast<const std::uint8_t*>(type) + AresBulletTypeExt);
+				return ext ? reinterpret_cast<const ConvertClass*(__thiscall*)(void*)>(AresHelper::AresBaseAddress + AresBulletPaletteHelper)(ext) : nullptr;
+			}
+
+			// 6D8DB0's plain branch, 5F4B10 (forced) and 468090 with Ares' 468379 and Phobos' 4683F2 for an SHP
+			// bullet (gamemd-reverse #26 §4.6): its shadow, then its body. A voxel bullet is not modeled.
+			void Bullet(BulletClass* bullet, bool inRange)
+			{
+				auto& count = *Count;
+				++count.Bullets;
+				if (!inRange || !TacticalClass::Instance->CoordsToClient(bullet->GetCoords()).second) { ++count.BulletsOutside; return; }
+				if (!Unsorted::ArmageddonMode && Game::hWnd && bullet->InLimbo) { ++count.BulletsOutside; return; }
+				Point2D client {};
+				if (!Project(bullet->GetRenderCoords(), client)) { ++count.BulletsOutside; return; }
+				const auto location = bullet->Location;
+				if (ScenarioClass::Instance->SpecialFlags.FogOfWar && MapClass::Instance.IsLocationFogged(location)) { ++count.BulletsHidden; return; }
+				auto* type = bullet->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(BulletTypeClass))) { ++count.Frame; return; }
+				if (type->Inviso || bullet->SpawnNextAnim) { ++count.BulletsHidden; return; }
+				if (type->Voxel) { ++count.BulletsVoxel; return; }
+				auto* image = bullet->GetImage();
+				if (!image) return;
+				const int frame = reinterpret_cast<int(__thiscall*)(BulletClass*)>((*reinterpret_cast<void* const* const*>(bullet))[BulletFrameSlot / 4])(bullet);
+				Point2D xy {location.X, location.Y};
+				const auto* target = MapClass::Instance.GetTargetCell(xy);
+				if (!target) { ++count.Palette; return; }
+				const auto level = UnitImage::BulletLevel(bullet->OnBridge, std::uint32_t(target->Flags) & UnitImage::BridgeCellFlag, bullet->GetHeight(),
+					MapClass::Instance.GetCellFloorHeight(location), *reinterpret_cast<const int*>(BulletBridgeHeight));
+				const auto at = [&](int x, int y) { return Point {std::int64_t(x) + ViewX, std::int64_t(y) + ViewY}; };
+				Call call;
+				call.Image = image;
+				call.Frame = frame;
+				call.Brightness = FullBrightness;
+				call.Gradient = int(ZGradient::Ground);
+				call.Bounded = false;
+				call.WritesDepth = false;
+				if (level.Height > 0 && type->Shadow)
+				{
+					call.Convert = FileSystem::PALETTE_PAL;
+					call.ZAdjust = UnitImage::BulletShadowDepth(AdjustZ(level.Floor));
+					Place(target->MapCoords.X, target->MapCoords.Y, Layer::Bullet, type->GetArrayIndex(), call,
+						at(client.X, UnitImage::Add32(client.Y, AdjustZ(level.Height))), true);
+				}
+				call.Convert = AresBulletConvert(type);
+				if (!call.Convert)
+				{
+					call.Convert = FileSystem::PALETTE_PAL;
+					if (type->AnimPalette) call.Convert = FileSystem::ANIM_PAL;
+					else if (type->FirersPalette)
+						call.Convert = SchemeConvert(bullet->InheritedColor == -1 ? HouseClass::CurrentPlayer->ColorSchemeIndex : bullet->InheritedColor);
+				}
+				if (!call.Convert) { ++count.Palette; return; }
+				const auto* typeExt = BulletTypeExt::Fetch(type);
+				call.ZAdjust = UnitImage::BulletDepth(AdjustZ(bullet->GetZ()), typeExt ? typeExt->ZAdjust.Get() : 0);
+				Place(target->MapCoords.X, target->MapCoords.Y, Layer::Bullet, type->GetArrayIndex(), call, at(client.X, client.Y), false);
 			}
 
 			// 4D1890's building branch (kind 6) for an enabled record whose saved rectangle meets the
@@ -1138,8 +1338,13 @@ namespace OverlaySnapshot
 					if (object->WhatAmI() != AbstractType::Terrain)
 					{
 						// The Techno branch calls DrawIfVisible whether its point projects or not.
-						if (object->WhatAmI() == AbstractType::Building && inRange && CursorSnapshot::Readable(object, sizeof(BuildingClass)))
+						const auto what = object->WhatAmI();
+						if (what == AbstractType::Building && inRange && CursorSnapshot::Readable(object, sizeof(BuildingClass)))
 							capture.BuildingDynamic(static_cast<BuildingClass*>(object));
+						else if (what == AbstractType::Infantry && CursorSnapshot::Readable(object, sizeof(InfantryClass)))
+							capture.Infantry(static_cast<InfantryClass*>(object), inRange);
+						else if (what == AbstractType::Bullet && CursorSnapshot::Readable(object, sizeof(BulletClass)))
+							capture.Bullet(static_cast<BulletClass*>(object), inRange);
 						++count.Others;
 						count.OthersInRange += inRange;
 						if (object->IsVisible)
@@ -1375,6 +1580,8 @@ namespace OverlaySnapshot
 			int Compared = 0, Drawn = 0, Mismatched = 0, Untouched = 0, Others = 0, Unexplained = 0, Body = 0, Shadow = 0, Rejected = 0, Missing = 0;
 			int Left = INT_MAX, Top = INT_MAX, Right = INT_MIN, Bottom = INT_MIN;
 			int FirstX = -1, FirstY = -1, NativeColor = 0, ModelColor = 0, Owner = NoOwner;
+			// The first mismatch on a pixel a draw of the list owns.
+			int DrawnX = -1, DrawnY = -1, DrawnNative = 0, DrawnModel = 0, DrawnOwner = NoOwner;
 			// The first mismatched pixels: column, row, native and model color, owner.
 			std::vector<std::array<int, 5>> Samples;
 		};
@@ -1442,7 +1649,14 @@ namespace OverlaySnapshot
 						});
 						++(other ? check.Others : check.Unexplained);
 					}
-					else ++(Current.CompositeDraws[size_t(owner)].Shadow ? check.Shadow : check.Body);
+					else
+					{
+						if (!check.Body && !check.Shadow)
+						{
+							check.DrawnX = column; check.DrawnY = row; check.DrawnNative = native; check.DrawnModel = color; check.DrawnOwner = owner;
+						}
+						++(Current.CompositeDraws[size_t(owner)].Shadow ? check.Shadow : check.Body);
+					}
 					if (check.Samples.size() < 24) check.Samples.push_back({column, row, native, color, owner});
 					if (!check.Mismatched++)
 					{
@@ -1464,6 +1678,8 @@ namespace OverlaySnapshot
 			case Layer::Building: return 'b';
 			case Layer::Fogged: return 'f';
 			case Layer::Anim: return 'n';
+			case Layer::Infantry: return 'i';
+			case Layer::Bullet: return 'p';
 			default: return 'a';
 			}
 		}
@@ -1561,6 +1777,10 @@ namespace OverlaySnapshot
 			// D3b-2: 43DA80's buildings in range and the DoorAnims drawn.
 			Debug::Log("[TerrainGPU] compositebuildings sample=%u buildings=%d fogged=%d unloading=%d outside=%d unsupported=%d doors=%d\n", TraceCount,
 				composite.Buildings, composite.BuildingsFogged, composite.Unloading, composite.BuildingsOutside, composite.BuildingsUnsupported, composite.Doors);
+			// D3a-1: the infantry and bullets of the layers.
+			Debug::Log("[TerrainGPU] compositeunits sample=%u infantry=%d outside=%d fogged=%d unsupported=%d hidden=%d infshdw=%d bullets=%d bulletsOutside=%d "
+				"bulletsHidden=%d bulletsVoxel=%d\n", TraceCount, composite.Infantry, composite.InfantryOutside, composite.InfantryFogged, composite.InfantryUnsupported,
+				composite.InfantryHidden, composite.InfantryShadows, composite.Bullets, composite.BulletsOutside, composite.BulletsHidden, composite.BulletsVoxel);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
@@ -1592,6 +1812,9 @@ namespace OverlaySnapshot
 				compositeCheck.Mismatched ? compositeCheck.Right : 0, compositeCheck.Mismatched ? compositeCheck.Bottom : 0,
 				compositeCheck.FirstX, compositeCheck.FirstY, compositeCheck.NativeColor, compositeCheck.ModelColor,
 				describe(compositeCheck.Owner, Current.CompositeDraws));
+			if (compositeCheck.DrawnOwner != NoOwner)
+				Debug::Log("[TerrainGPU] compositedrawn sample=%u first=%d,%d:native=%04X:model=%04X:%s\n", TraceCount, compositeCheck.DrawnX, compositeCheck.DrawnY,
+					compositeCheck.DrawnNative, compositeCheck.DrawnModel, describe(compositeCheck.DrawnOwner, Current.CompositeDraws));
 			samples.clear();
 			for (const auto& sample : compositeCheck.Samples)
 			{

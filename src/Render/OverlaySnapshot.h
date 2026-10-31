@@ -6,6 +6,7 @@
 #include "ShapeDepth.h"
 #include "TerrainObjectImage.h"
 #include "TerrainSnapshot.h"
+#include "UnitImage.h"
 #include <BuildingClass.h>
 #include <ColorScheme.h>
 #include <FileSystem.h>
@@ -29,7 +30,8 @@
 // same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
 // The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1);
 // the building records of 4D1890 (step 4) come first, before the overlays (D1c). The AnimClass objects
-// RenderLayers draws (gamemd-reverse #27) join the animated Terrain in the Composite list (D3b).
+// RenderLayers draws (gamemd-reverse #27) join the animated Terrain in the Composite list (D3b), and
+// so do its infantry and SHP bullets (gamemd-reverse #26, D3a-1).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -87,10 +89,21 @@ namespace OverlaySnapshot
 	// whether the frame rate lets low detail anims draw. Offsets from the DLL's base.
 	constexpr std::uintptr_t AresSetPalette = 0xAD20, AresAnimTypeMap = 0xC2994, AresMapFind = 0x58900, AresAnimPalette = 0x10,
 		AresDrawDetails = 0x5EE10, AresFrameRateHelper = 0x2B1C0;
+	// Ares 3.0p1's 468379 (BulletClass_Draw_SetAnimPalette) asks a helper (thiscall) of the bullet type's
+	// extension, kept at +2C4h of the type, for the palette of the anim type the image belongs to.
+	constexpr std::uintptr_t AresBulletPalette = 0x1AEA0, AresBulletPaletteHelper = 0x19A50;
+	constexpr size_t AresBulletTypeExt = 0x2C4;
+	// 518F90: the bridge height ([A8F234]), the height of a level ([A8F240]), INFSHDW.SHP once loaded,
+	// the body's ZAdjust ([825500]), the frame (518D80) and the lighting states (Ion 53A100, Dominator
+	// 53B400, Nuke 53A110); 468090: its own bridge height ([89DE64]) and the bullet's frame (+1E8h).
+	constexpr std::uintptr_t InfantryBridgeHeight = 0xA8F234, InfantryLevelStep = 0xA8F240, InfantryShadowShape = 0xA8F244,
+		InfantryZAdjust = 0x825500, InfantryFrame = 0x518D80, IonActive = 0x53A100, BulletBridgeHeight = 0x89DE64;
+	constexpr size_t BulletFrameSlot = 0x1E8;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00), a
-	// building (6D9920), a fogged building record's building or anim part (4D1890), or an anim (422CA0).
-	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Anim };
+	// building (6D9920), a fogged building record's building or anim part (4D1890), an anim (422CA0),
+	// an infantry (518F90) or a bullet (468090).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Anim, Infantry, Bullet };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -156,6 +169,12 @@ namespace OverlaySnapshot
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.
 		int Buildings = 0, BuildingsFogged = 0, BuildingsOutside = 0, BuildingsUnsupported = 0, Gates = 0, Unloading = 0, Bibs = 0, Doors = 0;
+		// 6D8DB0's infantry: those it walks, those outside its view range, fogged or beyond the margins, in
+		// limbo or not projected (5F4B10), in a state the capture does not draw (a DropPod, a disguise, not
+		// clearly visible), hidden by their visual, and the INFSHDW drawn; its bullets: those it walks,
+		// outside, hidden (fogged, Inviso, SpawnNextAnim) and voxels.
+		int Infantry = 0, InfantryOutside = 0, InfantryFogged = 0, InfantryUnsupported = 0, InfantryHidden = 0, InfantryShadows = 0,
+			Bullets = 0, BulletsOutside = 0, BulletsHidden = 0, BulletsVoxel = 0;
 	};
 	struct Frame
 	{
