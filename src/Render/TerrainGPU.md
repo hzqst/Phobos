@@ -181,6 +181,8 @@ Tile 第 4 步（`6D3470`）在弹坑之后、overlay 之前调 `4D1890`。快�
 
 ## RenderLayers（mode 2，D3）
 
+Voxel 身份缓存优化的入口调查、可复现微基准与首轮实机计时见 [VoxelIdentityP0.md](VoxelIdentityP0.md)。当前仍使用下述内容／地址缓存，尚未启用新的姿态或组合身份快速路径。
+
 `6D3D10` 的 mode 2 在 `6D465F` 调 RenderLayers（`6D8DB0`），此时目标（`EBX`，正常为 Composite）已锁定并设为 Temp，内容是 mode 1 末尾从 Tile 复制来的 ViewBounds；`6D4664` 返回后才画 Spotlight、激光、计时器等，`4F4583` 时 Composite 已含 UI，不能作对照。`src/Render/Hooks.cpp` 在这两处各加一个只观测的 hook（整条 call 被移出，`return 0` 照常执行），`CompositeSnapshot` 按 #23 §9.2 复制目标的 ViewBounds：核对目标同时是 Temp 与 Composite、`LockLevel>0`、2 字节像素、ViewBounds 在 surface 内，按 pitch 逐行复制到自有缓冲，不再 Lock，失败记原因。`6D465F` 的输入只在本次渲染要做 trace 时复制；`6D4664` 的输出在 GPU 窗口运行或 MCP 服务运行时每次渲染都复制，是 Automation `source=native_composite` 的来源（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
 RenderLayers 画到目标上的 SHP 与体素一律**记录原生调用**，不在 CPU 重推（#26 起由用户确定；D2/D3b/D3a-1 的逐对象重算已删除）：Ares 3.0p1 在 SHP 车辆路径上的 FacingsA/B、WaterType、ChangeType、DrawShadowEarlier、SkipUnitShadow、OreGatherAnim 与 Phobos 的 73C7AC/73CCF4/73CFA7/73D0DB/73D223/73CF46 等改写都直接体现在最终参数里，绘制顺序就是原生顺序，DrawExtras 的 pips 等 SHP 也一并得到。

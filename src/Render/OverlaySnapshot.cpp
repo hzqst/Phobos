@@ -39,6 +39,98 @@ namespace OverlaySnapshot
 		RecordedCall FirstUnmodeled;
 		RecordedBlit FirstUnmodeledBlit;
 
+		// Opt-in, bounded P0 measurements. No pixel validation, extra engine reads or per-draw logging.
+		// Timings include instrumentation overhead; RenderLayers includes native work and recording.
+		struct BlitProfile
+		{
+			static constexpr size_t Window = 120, MaxWindows = 16, Groups = 4;
+			struct Group
+			{
+				std::uint64_t Calls = 0, Ready = 0, NewImages = 0, Pixels = 0, RecordTicks = 0, AcquireTicks = 0;
+			};
+			bool Enabled = false, Active = false;
+			size_t Samples = 0, Windows = 0;
+			std::uint64_t Start = 0, Frequency = 0;
+			std::array<Group, Groups> Counts {};
+			std::array<std::uint64_t, Window> Layers {}, Records {}, Acquires {};
+
+			static std::uint64_t Now()
+			{
+				LARGE_INTEGER value;
+				QueryPerformanceCounter(&value);
+				return std::uint64_t(value.QuadPart);
+			}
+			BlitProfile()
+			{
+				char value[2] {};
+				Enabled = GetEnvironmentVariableA("PHOBOS_VOXEL_PROFILE", value, sizeof(value)) == 1 && value[0] == '1';
+				LARGE_INTEGER frequency;
+				QueryPerformanceFrequency(&frequency);
+				Frequency = std::uint64_t(frequency.QuadPart);
+			}
+			void Begin(bool capturing)
+			{
+				Active = Enabled && capturing && Windows < MaxWindows;
+				if (Active) Start = Now();
+			}
+			void End()
+			{
+				if (!Active) return;
+				Layers[Samples] = Now() - Start;
+				Active = false;
+				if (++Samples != Window) return;
+				++Windows;
+				const auto us = [this](std::uint64_t ticks) { return double(ticks) * 1e6 / double(Frequency); };
+				const auto summary = [&](const char* name, auto values)
+				{
+					std::uint64_t sum = 0;
+					for (const auto value : values) sum += value;
+					std::sort(values.begin(), values.end());
+					Debug::Log("[VoxelP0] window=%u frames=%u metric=%s avgUs=%.3f p95Us=%.3f p99Us=%.3f maxUs=%.3f\n",
+						unsigned(Windows), unsigned(Window), name, us(sum) / Window, us(values[(Window * 95 + 99) / 100 - 1]),
+						us(values[(Window * 99 + 99) / 100 - 1]), us(values.back()));
+				};
+				summary("renderLayersInclusive", Layers);
+				summary("recordBlits", Records);
+				summary("acquireImages", Acquires);
+				constexpr const char* names[Groups] {"unitScratch", "targetRLE", "targetPlainOther", "offTarget"};
+				for (size_t i = 0; i < Groups; ++i)
+				{
+					const auto& c = Counts[i];
+					Debug::Log("[VoxelP0] window=%u group=%s calls=%llu ready=%llu newImages=%llu sourcePixels=%llu recordUs=%.3f acquireUs=%.3f epoch=%u\n",
+						unsigned(Windows), names[i], c.Calls, c.Ready, c.NewImages, c.Pixels, us(c.RecordTicks), us(c.AcquireTicks), BlitFrameSource::Epoch);
+				}
+				Counts = {}; Layers = {}; Records = {}; Acquires = {}; Samples = 0;
+			}
+		};
+		BlitProfile& Profile() { static BlitProfile value; return value; }
+		struct ProfileBlit
+		{
+			BlitProfile& Perf = Profile();
+			const RecordedBlit& Blit;
+			std::uint64_t Start = 0, Decoded = 0, AcquireTicks = 0, Pixels = 0;
+			size_t Group = 0;
+			explicit ProfileBlit(const RecordedBlit& blit) : Blit(blit)
+			{
+				if (!Perf.Active) return;
+				Start = BlitProfile::Now();
+				Decoded = BlitFrameSource::Frames.GetStats().Decoded;
+				// Return PCs of 73B140's three direct 4373B0 calls, checked against the isolated EXE.
+				const bool scratch = blit.Caller == 0x73B37C || blit.Caller == 0x73B3EA || blit.Caller == 0x73B44B;
+				Group = !blit.OnTarget ? 3 : scratch ? 0 : blit.Compressed ? 1 : 2;
+			}
+			~ProfileBlit()
+			{
+				if (!Start) return;
+				const auto ticks = BlitProfile::Now() - Start;
+				auto& c = Perf.Counts[Group];
+				++c.Calls; c.Ready += bool(Blit.ID);
+				c.NewImages += BlitFrameSource::Frames.GetStats().Decoded - Decoded;
+				c.Pixels += Pixels; c.RecordTicks += ticks; c.AcquireTicks += AcquireTicks;
+				Perf.Records[Perf.Samples] += ticks; Perf.Acquires[Perf.Samples] += AcquireTicks;
+			}
+		};
+
 		// 490B90 and 490E50 pick a blitter from the convert's own tables by the flags. The flags each slot
 		// stands for, found by asking them for the combinations the draws model (an Alpha body, a shadow);
 		// and the convert and slot of each blitter of ConvertClass::Array, rebuilt at most once a capture
@@ -1607,9 +1699,14 @@ namespace OverlaySnapshot
 		RecordingTarget = target;
 		RecordingAfter = false;
 		if (target) BlitFrameSource::BeginCapture();
+		Profile().Begin(target != nullptr);
 	}
 
-	void RecordAfterLayers() { RecordingAfter = RecordingTarget != nullptr; }
+	void RecordAfterLayers()
+	{
+		Profile().End();
+		RecordingAfter = RecordingTarget != nullptr;
+	}
 
 	void EndRecording()
 	{
@@ -1640,6 +1737,7 @@ namespace OverlaySnapshot
 		blit.Tint = call.Tint;
 		blit.Caller = call.Caller;
 		blit.OnTarget = call.Surface == RecordingTarget;
+		ProfileBlit profile(blit);
 		if (!blit.OnTarget) { Recorded.push_back(blit); return; }
 		const auto& dest = *call.Dest;
 		const auto& limit = *call.Limit;
@@ -1668,14 +1766,18 @@ namespace OverlaySnapshot
 			// 437A10 reads the frame's rows from the start of the source.
 			if (const auto* data = static_cast<const std::uint8_t*>(source->Lock(0, 0)))
 			{
+				const auto start = profile.Start ? BlitProfile::Now() : 0;
 				blit.ID = BlitFrameSource::AcquireEncoded(data, size_t(limit.Height) * (2 + 2 * size_t(limit.Width)), limit.Width, limit.Height);
+				if (start) { profile.AcquireTicks = BlitProfile::Now() - start; profile.Pixels = std::uint64_t(limit.Width) * limit.Height; }
 				source->Unlock();
 			}
 		}
 		else if (const auto* first = static_cast<const std::uint8_t*>(source->Lock(limit.X + blit.Clipped.SourceX, limit.Y + blit.Clipped.SourceY)))
 		{
 			// 7BC040 locks the source at the clipped part's place within the source's rectangle.
+			const auto start = profile.Start ? BlitProfile::Now() : 0;
 			blit.ID = BlitFrameSource::AcquirePixels(first, source->GetPitch(), blit.Clipped.Width, blit.Clipped.Rows);
+			if (start) { profile.AcquireTicks = BlitProfile::Now() - start; profile.Pixels = std::uint64_t(blit.Clipped.Width) * blit.Clipped.Rows; }
 			source->Unlock();
 		}
 		if (blit.Issue == BlitIssue::None && !blit.ID) blit.Issue = BlitIssue::Image;
