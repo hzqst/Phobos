@@ -543,4 +543,17 @@ HEAD `144dd820` + 本批未提交改动，DLL SHA256 `b4a3e842…`，1024×768�
 | GPUFACT（Vulkan） | 同上 | 同上 | 7 个像素 |
 | GPUINF、GPUANIM（D3D12，回归） | 开局、滚动 | `linesAfter=0`，`mismatched=0` | GPUINF 0，GPUANIM 只有光标 |
 
-移动令在这张图上没有画出行动线（原生也没有：坦克在暂停时还没开始移动），未覆盖。临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/lines`（`action2`、`action-d3d12`、`action-vk`、`action-inf`、`action-anim`）。新 hook `4C0750`、`6D4912` 经 `check_hook_conflicts.py` 无冲突，挪走的指令止于指令边界且无相对跳转。`TerrainBatchTests` 新增虚线打包，回归脚本全部通过；Debug 构建无新警告。未实测：虚线（第 4 个参数为真的调用者）、画在 A 为 0 处的虚线、心灵与控制链接、该段内的 FlyingStrings 字形。
+移动令在这张图上没有画出行动线（原生也没有：坦克在暂停时还没开始移动），未覆盖。临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/lines`（`action2`、`action-d3d12`、`action-vk`、`action-inf`、`action-anim`）。新 hook `4C0750`、`6D4912` 经 `check_hook_conflicts.py` 无冲突，挪走的指令止于指令边界且无相对跳转。`TerrainBatchTests` 新增虚线打包，回归脚本全部通过；Debug 构建无新警告。未实测：画在 A 为 0 处的虚线、心灵与控制链接、该段内的 FlyingStrings 字形（虚线见下节）。
+
+### D3a-6 心灵探测器的虚线（2026-10-31）
+
+HEAD `4269c8b6`，DLL 同上（`b4a3e842…`），1024×768。Techno 循环里非玩家所属的对象若 `43B150` 为真（玩家有通电的 `PsychicDetectionBuildings`，对象的 Target 或 NavCom 在其 `PsychicDetectionRadius` 内）、是 Foot 且不在 Limbo，就由 `4DC340` 画两端 3×3 方块与到目标的虚线：`4C0750`，样式 `822540`（`11111000` 重复），偏移 `((-timeGetTime()) >> 5) & 15`，画在 A 非 0 处，颜色为房屋色并随 `timeGetTime` 脉动。GPUPSY（`scripts/make_psy.py`）在 GPUFACT 上给玩家加心灵探测器与磁能反应炉，给 AI（`<Player @ B>`）三辆 `Hunt` 的犀牛坦克（炮伤害 1）。
+
+暂停后游戏仍在重画，`ddraw` 与 `gpu` 依次截取，相隔约 250 ms，不是同一次重画，虚线的相位与颜色随时间不同，不能逐像素对比。改为分别拟合：按 trace 记下的两端（坦克若已移动，在起点 ±6 像素内搜索）用 Python 照 `4C0750` 的步进与样式（`scripts/phasefit.py`）在每张图上找颜色与偏移，统计该亮未亮或不该亮却亮的像素。
+
+| 地图（后端） | trace | `ddraw` | `gpu` |
+| --- | --- | --- | --- |
+| GPUPSY（D3D12） | 每帧 2–3 条 `d4DC74A…a`，颜色 `FF1C`/`FA69`/`FB8D`/`FC30` 随帧变 | 6 条线全部 0–1 个不符 | 同一组两端，每条 0–3 个不符（斜线的平分点），偏移与颜色各自不同 |
+| GPUPSY（Vulkan） | 同上 | 3 条线 0 个不符 | 起点与 `ddraw` 相同，每条 1 个不符 |
+
+除顶部的版本横幅外，`ddraw` 与 `gpu` 的差异都在虚线上。临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/lines`（`psy`、`psy-vk`）。未实测：画在 A 为 0 处的虚线、控制链接（`472160`）。
