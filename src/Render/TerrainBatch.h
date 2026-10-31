@@ -138,10 +138,11 @@ namespace TerrainBatch
 		return runs;
 	}
 
-	// Matches struct Line in TerrainLine.vs.hlsl: a line or fill RenderLayers drew outside 4AED70 and its blits,
-	// at target pixels. A line goes from From to To, its depth from Depth.x to Depth.y; a fill (FilledLine) covers
-	// From up to To, which is past its last pixel. Only the pixels from ClipMin up to ClipMax draw (packed X in
-	// the low 16 bits). AlphaLine: the pixel needs an ABuffer word other than 0 and its color is scaled by it.
+	// Matches struct Line in TerrainLine.vs.hlsl: a line, fill or glyph RenderLayers drew outside 4AED70 and its
+	// blits, at target pixels. A line goes from From to To, its depth from Depth.x to Depth.y; a fill (FilledLine)
+	// covers From up to To, which is past its last pixel. Only the pixels from ClipMin up to ClipMax draw (packed X
+	// in the low 16 bits). AlphaLine: the pixel needs an ABuffer word other than 0 and its color is scaled by it.
+	// GlyphLine (with FilledLine): a glyph whose mask starts at the atlas texel Depth0 (packed), drawn where it is set.
 	struct Line
 	{
 		std::int32_t FromX, FromY, ToX, ToY;
@@ -150,7 +151,7 @@ namespace TerrainBatch
 		std::uint32_t Color, Flags;
 	};
 	static_assert(sizeof(Line) == 40);
-	constexpr std::uint32_t FilledLine = 1, AlphaLine = 2;
+	constexpr std::uint32_t FilledLine = 1, AlphaLine = 2, GlyphLine = 4;
 
 	// A line or fill at Tile coordinates moved to the target by (originX, originY), its clip cut to the target's
 	// width x height. False when nothing of the clip remains.
@@ -170,13 +171,15 @@ namespace TerrainBatch
 	}
 
 	// Runs of consecutive lines (first one first) that precede the same draw (orders[i], ascending) with the same
-	// depth mode.
-	inline std::vector<Run> SplitLines(std::span<const std::uint32_t> orders, std::span<const std::uint32_t> modes, std::uint32_t first)
+	// mode and atlas page (null for lines and fills).
+	inline std::vector<Run> SplitLines(std::span<const std::uint32_t> orders, std::span<const std::uint32_t> modes,
+		std::span<const void* const> pages, std::uint32_t first)
 	{
 		std::vector<Run> runs;
 		for (std::uint32_t i = 0; i < orders.size(); ++i)
 		{
-			if (runs.empty() || runs.back().Order != orders[i] || runs.back().Mode != modes[i]) runs.push_back({nullptr, first + i, 1, false, modes[i], orders[i]});
+			if (runs.empty() || runs.back().Order != orders[i] || runs.back().Mode != modes[i] || runs.back().Page != pages[i])
+				runs.push_back({pages[i], first + i, 1, false, modes[i], orders[i]});
 			else ++runs.back().Count;
 		}
 		return runs;

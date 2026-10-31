@@ -58,10 +58,17 @@ int main()
 	shapes = SplitShapes(same, mixedModes, orders, breaks, 0);
 	Check(shapes.size() == 4 && shapes[1].Mode == 1 && shapes[1].Count == 1 && shapes[2].Order == 3 && shapes[3].Order == 4, "modes and lines both split");
 
-	const std::uint32_t lineOrders[] {0, 0, 0, 3, 3}, lineModes[] {1, 1, 0, 0, 0};
-	const auto lines = SplitLines(lineOrders, lineModes, 0);
-	Check(lines.size() == 3 && lines[0].Count == 2 && lines[0].Mode == 1 && lines[1].First == 2 && lines[1].Order == 0
-		&& lines[2].First == 3 && lines[2].Count == 2 && lines[2].Order == 3, "line runs by draw and mode");
+	const std::uint32_t lineOrders[] {0, 0, 0, 3, 3, 3}, lineModes[] {1, 1, 0, 0, 0, 3};
+	const void* linePages[] {nullptr, nullptr, nullptr, nullptr, nullptr, &a};
+	const auto lines = SplitLines(lineOrders, lineModes, linePages, 0);
+	Check(lines.size() == 4 && lines[0].Count == 2 && lines[0].Mode == 1 && lines[1].First == 2 && lines[1].Order == 0
+		&& lines[2].First == 3 && lines[2].Count == 2 && lines[2].Order == 3 && lines[3].Page == &a && lines[3].Mode == 3,
+		"line runs by draw, mode and page");
+	const std::uint32_t glyphOrders[] {5, 5, 5}, glyphModes[] {3, 3, 3};
+	const void* glyphPages[] {&a, &a, &b};
+	const auto glyphs = SplitLines(glyphOrders, glyphModes, glyphPages, 7);
+	Check(glyphs.size() == 2 && glyphs[0].First == 7 && glyphs[0].Count == 2 && glyphs[1].First == 9 && glyphs[1].Page == &b,
+		"glyph runs split by page");
 
 	Line line;
 	Check(PlaceLine(563, 271, 563, 286, {0, 0, 856, 736}, 0, 0, 856, 736, 100, 120, 0xFFFF, AlphaLine, line), "selection box edge");
@@ -106,5 +113,5 @@ int main()
 		Check(QuarterMask({11, 5, 0}, {5, 6, 5}) == 0x39E7 && QuarterMask({10, 5, 0}, {5, 5, 5}) == 0x1CE7, "quarter translucency masks");
 	}
 	if (Failures) return 1;
-	std::puts("TerrainBatch: placement, clipping, page runs, shape and line runs, shape instances, line placement, masks and color table packing passed.");
+	std::puts("TerrainBatch: placement, clipping, page runs, shape, line and glyph runs, shape instances, line placement, masks and color table packing passed.");
 }

@@ -886,9 +886,11 @@ namespace OverlaySnapshot
 			{
 				if (const auto* line = std::get_if<RecordedLine>(&item))
 				{
-					if (!line->OnTarget) { ++count.LinesElsewhere; continue; }
-					++count.Lines;
-					if (line->Clip.Width <= 0 || line->Clip.Height <= 0) { ++count.LinesEmpty; continue; }
+					const bool glyph = line->Kind == Primitive::Glyph;
+					if (!line->OnTarget) { ++(glyph ? count.GlyphsElsewhere : count.LinesElsewhere); continue; }
+					++(glyph ? count.Glyphs : count.Lines);
+					if (glyph && !line->Glyph) { ++count.GlyphsUnknown; continue; }
+					if (line->Clip.Width <= 0 || line->Clip.Height <= 0) { if (!glyph) ++count.LinesEmpty; continue; }
 					// 4C0050's depth of a pixel: the ZBuffer's MaxValue and Bounds.Y, less the clip's Y and the pixel's,
 					// plus the Z it steps to from the ends'.
 					const int base = capture.MaxValue + capture.BoundsY - line->Clip.Y;
@@ -906,6 +908,7 @@ namespace OverlaySnapshot
 					}
 					placed.Color = line->Color;
 					placed.WritesDepth = line->WritesDepth;
+					placed.Glyph = line->Glyph;
 					placed.Before = capture.Target->size();
 					placed.Caller = line->Caller;
 					Current.CompositeLines.push_back(placed);
@@ -1174,7 +1177,7 @@ namespace OverlaySnapshot
 
 		// The replay of 6D8DB0's Terrain draws over the native Composite before the layers, against the
 		// one after them (D2). Their input must be Tile's view: nothing else drew before the layers.
-		// The pixels of the clip a recorded line or fill may have drawn: a fill's rectangle, and each pixel a line
+		// The pixels of the clip a recorded line, fill or glyph may have drawn: a fill's or glyph's rectangle, and each pixel a line
 		// steps through with its neighbors, since the GPU's line and the native one may pick the next pixel.
 		std::vector<std::uint8_t> LineCoverage(const std::vector<Line>& lines, const RectangleStruct& clip)
 		{
@@ -1186,10 +1189,13 @@ namespace OverlaySnapshot
 			};
 			for (const auto& line : lines)
 			{
-				if (line.Kind == Primitive::Fill)
+				if (line.Kind == Primitive::Fill || line.Kind == Primitive::Glyph)
 				{
-					for (int y = line.Y0; y < line.Y1; ++y)
-						for (int x = line.X0; x < line.X1; ++x) mark(x, y);
+					const int left = std::max(line.X0, line.Clip.X), top = std::max(line.Y0, line.Clip.Y);
+					const auto right = std::min<std::int64_t>(line.X1, std::int64_t(line.Clip.X) + line.Clip.Width);
+					const auto bottom = std::min<std::int64_t>(line.Y1, std::int64_t(line.Clip.Y) + line.Clip.Height);
+					for (int y = top; y < bottom; ++y)
+						for (int x = left; x < right; ++x) mark(x, y);
 					continue;
 				}
 				const std::int64_t dx = std::int64_t(line.X1) - line.X0, dy = std::int64_t(line.Y1) - line.Y0;
@@ -1406,7 +1412,8 @@ namespace OverlaySnapshot
 			Debug::Log("[TerrainGPU] composite sample=%u layerObjects=%d othersVisible=%d unbounded=%d calls=%d elsewhere=%d unmodeled=%d "
 				"firstUnmodeled=%X:flags=%X:remap=%d:zshapeFrame=%d bodies=%d shadows=%d compressed=%d translucent=%d writing=%d tinted=%d palette=%d frame=%d "
 				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u blits=%d blitsElsewhere=%d blitsUnmodeled=%d "
-				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u lines=%d linesElsewhere=%d linesEmpty=%d\n",
+				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u lines=%d linesElsewhere=%d linesEmpty=%d "
+				"glyphs=%d glyphsElsewhere=%d glyphsUnknown=%d\n",
 				TraceCount, composite.LayerObjects, composite.OthersVisible, composite.OthersUnbounded, composite.Calls, composite.CallsElsewhere,
 				composite.CallsUnmodeled, unsigned(FirstUnmodeled.Caller), FirstUnmodeled.Flags, FirstUnmodeled.Remap, FirstUnmodeled.ZShapeFrame,
 				composite.Bodies, composite.Shadows, composite.Compressed, composite.CallsTranslucent, composite.CallsWriting, composite.CallsTinted,
@@ -1414,7 +1421,7 @@ namespace OverlaySnapshot
 				composite.ZShape, CompositeSnapshot::Failed, composite.Blits, composite.BlitsElsewhere, composite.BlitsUnmodeled,
 				unsigned(FirstUnmodeledBlit.Caller), int(FirstUnmodeledBlit.Issue), FirstUnmodeledBlit.Compressed, FirstUnmodeledBlit.Flags,
 				unsigned(BlitFrameSource::Frames.GetStats().Frames), unsigned(BlitFrameSource::Frames.GetStats().IndexBytes), BlitFrameSource::Epoch,
-				composite.Lines, composite.LinesElsewhere, composite.LinesEmpty);
+				composite.Lines, composite.LinesElsewhere, composite.LinesEmpty, composite.Glyphs, composite.GlyphsElsewhere, composite.GlyphsUnknown);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
@@ -1424,14 +1431,14 @@ namespace OverlaySnapshot
 				draws += item;
 			}
 			if (!draws.empty()) Debug::Log("[TerrainGPU] compositedraws sample=%u%s\n", TraceCount, draws.c_str());
-			// Each line (l), plain line (p) and fill (f) in order: caller, the draw it precedes, its ends (a fill's
-			// corners), depths, color, w where it writes Z.
+			// Each line (l), plain line (p), fill (f) and glyph (g) in order: caller, the draw it precedes, its ends
+			// (a fill's or glyph's corners), depths, color, w where it writes Z.
 			std::string lines;
 			for (const auto& line : Current.CompositeLines)
 			{
 				char item[96];
 				std::snprintf(item, sizeof(item), " %c%X:%u@%d,%d-%d,%d:z=%d/%d:%04X%s",
-					line.Kind == Primitive::Line ? 'l' : line.Kind == Primitive::PlainLine ? 'p' : 'f', unsigned(line.Caller), unsigned(line.Before),
+					"lpfg"[size_t(line.Kind)], unsigned(line.Caller), unsigned(line.Before),
 					line.X0, line.Y0, line.X1, line.Y1, line.Depth0, line.Depth1, line.Color, line.WritesDepth ? "w" : "");
 				lines += item;
 			}
@@ -1665,7 +1672,13 @@ namespace OverlaySnapshot
 				return RectangleStruct {int(left), int(top), int(std::max<std::int64_t>(right - left, 0)), int(std::max<std::int64_t>(bottom - top, 0))};
 			};
 			const auto clip = cut(line.Clip, {0, 0, surface->Width, surface->Height});
-			if (line.Kind == Primitive::Fill)
+			if (line.Kind == Primitive::Glyph)
+			{
+				// 434120 writes its rows and columns inside the font's bounds only.
+				line.Clip = clip;
+				line.To = {line.From.X + line.Fill.Width, line.From.Y + line.Fill.Height};
+			}
+			else if (line.Kind == Primitive::Fill)
 			{
 				const auto fill = cut({line.Clip.X + line.Fill.X, line.Clip.Y + line.Fill.Y, line.Fill.Width, line.Fill.Height}, clip);
 				line.Clip = fill;

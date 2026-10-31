@@ -1,8 +1,8 @@
-// RenderLayers' lines and fills into the tactical target, one instance each, expanded from SV_VertexID into
+// RenderLayers' lines, fills and glyphs into the tactical target, one instance each, expanded from SV_VertexID into
 // two triangles. A line becomes a parallelogram a pixel across its major axis, from half a pixel before its
 // first pixel center to half a pixel past its last, so each column (or row) it crosses covers one pixel center;
 // its depth goes linearly between the ends'. This approximates the native Bresenham lines (4BFD30, 7BA610),
-// whose pixels may differ at ties and at the ends. A fill covers its rectangle.
+// whose pixels may differ at ties and at the ends. A fill or glyph covers its rectangle.
 
 // Matches TerrainBatch::Line.
 struct Line
@@ -28,6 +28,7 @@ struct VSOutput
 	float4 Position : SV_Position;
 	noperspective float Depth : TEXCOORD0;
 	nointerpolation uint4 Data : TEXCOORD1; // ClipMin, ClipMax, color, flags.
+	nointerpolation int4 Glyph : TEXCOORD2; // From, and a glyph's atlas texel (Depth.x).
 };
 
 static const uint FilledLine = 1;
@@ -57,5 +58,6 @@ VSOutput main(uint vertexId : SV_VertexID)
 	output.Position = float4(pixel / float2(View.xy) * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 	output.Depth = depth;
 	output.Data = uint4(segment.ClipMin, segment.ClipMax, segment.Color, segment.Flags);
+	output.Glyph = int4(segment.From, segment.Depth.x, 0);
 	return output;
 }

@@ -156,6 +156,10 @@ namespace
 					requests.push_back(TerrainPass::Request(draw));
 				for (const auto& draw : OverlaySnapshot::Current.CompositeDraws)
 					requests.push_back(TerrainPass::Request(draw));
+				for (const auto& line : OverlaySnapshot::Current.CompositeLines)
+					if (line.Glyph)
+						if (const auto* glyph = SidebarText::Glyphs().Resolve(line.Glyph))
+							requests.push_back({glyph->Storage, {}, FrameAtlas::SourceKind::Mask, &SidebarText::Glyphs().Storage()});
 			}
 			ABufferPass::AppendRequests(ABufferSnapshot::Current, requests);
 		}
@@ -815,7 +819,8 @@ void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
 		if (capturing || Automation::IsRunning()) CompositeSnapshot::Record(CompositeSnapshot::Output, pSurface);
 		return;
 	}
-	// RenderLayers' 4AED70 calls become OverlaySnapshot's Composite list.
+	// RenderLayers' 4AED70 calls become OverlaySnapshot's Composite list; its glyphs need the bound font.
+	if (capturing) SidebarText::BindFont();
 	OverlaySnapshot::BeginRecording(capturing ? pSurface : nullptr);
 	if (capturing && OverlaySnapshot::RedrawRequested) CompositeSnapshot::Record(CompositeSnapshot::Input, pSurface);
 	else CompositeSnapshot::Input.Valid = false;

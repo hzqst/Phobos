@@ -351,8 +351,45 @@ DEFINE_HOOK(0x4A5FF2, SimpleText_PrintEnd_GPUText, 0x5)
 	return 0;
 }
 
+// BitFont::Lock (4348F0), before the displaced sub esp / push esi / push edi: the surface the font's following
+// 434120 glyphs write to, its second argument (ECX is the font). Kept only while RenderLayers draws.
+static const void* GlyphSurface = nullptr;
+
+DEFINE_HOOK(0x4348F0, BitFont_Lock_RecordLayers, 0x5)
+{
+	GlyphSurface = OverlaySnapshot::RecordingTarget ? R->Stack<const void*>(0x4) : nullptr;
+	return 0;
+}
+
+// While RenderLayers draws, its text's glyphs (70AA60's primary and power labels through 4A5EB0 -> 434B90 ->
+// 434500) go to its list; SidebarText takes the bitmap, place, font bounds and color as for the sidebar.
+static void RecordGlyph(REGISTERS* R)
+{
+	OverlaySnapshot::RecordedLine line;
+	line.Kind = OverlaySnapshot::Primitive::Glyph;
+	line.Caller = R->Stack<std::uintptr_t>(0x0);
+	SidebarText::Command command;
+	const auto result = SidebarText::CaptureGlyph(R, command);
+	// A tab moves the pen and draws nothing.
+	if (result == SidebarText::GlyphResult::Skipped) return;
+	if (result == SidebarText::GlyphResult::Captured)
+	{
+		line.Glyph = command.Glyph;
+		line.From = {command.X, command.Y};
+		line.Fill = {0, 0, command.Width, command.Height};
+		line.Clip = {command.ClipLeft, command.ClipTop, command.ClipRight - command.ClipLeft, command.ClipBottom - command.ClipTop};
+		line.Color = std::uint16_t(command.Color);
+	}
+	OverlaySnapshot::RecordLine(line, static_cast<DSurface*>(const_cast<void*>(GlyphSurface)));
+}
+
 DEFINE_HOOK(0x434120, BitFont_Blit_GPUText, 0x5)
 {
+	if (OverlaySnapshot::RecordingTarget && GlyphSurface)
+	{
+		RecordGlyph(R);
+		return 0;
+	}
 	if (!Tooltip::ObserveGlyph(R))
 		SidebarText::ObserveGlyph(R);
 	return 0;

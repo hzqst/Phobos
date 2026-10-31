@@ -22,6 +22,7 @@ struct VSOutput
     float4 Position : SV_Position;
     noperspective float Depth : TEXCOORD0;
     nointerpolation uint4 Data : TEXCOORD1;
+    nointerpolation int4 Glyph : TEXCOORD2;
 };
 
 struct PSOutput

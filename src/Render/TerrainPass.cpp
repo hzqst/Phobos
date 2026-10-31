@@ -1,10 +1,14 @@
 #include "TerrainPass.h"
 
+#include "SidebarText.h"
+
 #include <Unsorted.h>
 #include <Utilities/Debug.h>
 
 #include <Shaders/TerrainComposite.ps.dxil.h>
 #include <Shaders/TerrainComposite.ps.spirv.h>
+#include <Shaders/TerrainGlyph.ps.dxil.h>
+#include <Shaders/TerrainGlyph.ps.spirv.h>
 #include <Shaders/TerrainLine.ps.dxil.h>
 #include <Shaders/TerrainLine.ps.spirv.h>
 #include <Shaders/TerrainLine.vs.dxil.h>
@@ -41,8 +45,11 @@ namespace TerrainPass
 		enum ShapeKind : std::uint32_t { BodyKind, ShadowKind, TranslucentKind, ShapeKinds };
 		enum DepthMode : std::uint32_t { NoDepth, TestDepth, WriteDepth, DepthModes };
 		SDL_GPUGraphicsPipeline* ShapePipelines[ShapeKinds][DepthModes] {};
-		// RenderLayers' lines and fills by Z mode: 4BFD30 tests, and may write; plain lines and fills neither.
+		// RenderLayers' lines and fills by Z mode: 4BFD30 tests, and may write; plain lines and fills neither. Its
+		// glyphs neither, through their own pipeline, the line runs' mode GlyphMode.
 		SDL_GPUGraphicsPipeline* LinePipelines[DepthModes] {};
+		SDL_GPUGraphicsPipeline* GlyphPipeline = nullptr;
+		constexpr std::uint32_t GlyphMode = DepthModes;
 		// A run's Mode: the pipeline, and above it the number of the group of translucent draws, which
 		// ends where one meets an earlier one of the group: each group reads its own copy of the target.
 		constexpr std::uint32_t PipelineMask = 0xFF, GroupShift = 8;
@@ -200,6 +207,11 @@ namespace TerrainPass
 			LinePipelines[mode] = CreatePipeline(device, linePixel, 1, color, &test, DepthFormat, 0, &lineVertex);
 			shapes = shapes && LinePipelines[mode];
 		}
+		// A glyph draws its color opaque where its mask is set (434120 writes the color, no Z).
+		SDL_GPUDepthStencilState untested {};
+		GlyphPipeline = CreatePipeline(device, GPUShader::Make(g_TerrainGlyph_ps_DXIL, g_TerrainGlyph_ps_SPIRV), 1, color, &untested,
+			DepthFormat, 0, &lineVertex);
+		shapes = shapes && GlyphPipeline;
 		SDL_GPUColorTargetDescription window {};
 		window.format = target;
 		CompositePipeline = CreatePipeline(device, GPUShader::Make(g_TerrainComposite_ps_DXIL, g_TerrainComposite_ps_SPIRV), 1, window);
@@ -249,6 +261,8 @@ namespace TerrainPass
 			if (pipeline) SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
 			pipeline = nullptr;
 		}
+		if (GlyphPipeline) SDL_ReleaseGPUGraphicsPipeline(device, GlyphPipeline);
+		GlyphPipeline = nullptr;
 		if (CompositePipeline) SDL_ReleaseGPUGraphicsPipeline(device, CompositePipeline);
 		if (Sampler) SDL_ReleaseGPUSampler(device, Sampler);
 		if (TableTexture) SDL_ReleaseGPUTexture(device, TableTexture);
@@ -347,24 +361,40 @@ namespace TerrainPass
 			return TerrainBatch::SplitShapes(pages, modes, orders, breaks, first);
 		}
 
-		// RenderLayers' lines and fills moved to the target, and their runs; the draws they precede go to breaks.
-		void PrepareLines(const RectangleStruct& view, const std::vector<OverlaySnapshot::Line>& lines, std::vector<std::uint32_t>& breaks)
+		// RenderLayers' lines, fills and glyphs moved to the target, and their runs; the draws they precede go to
+		// breaks. A glyph without its mask in the atlas is skipped.
+		void PrepareLines(const FrameAtlas& atlas, const RectangleStruct& view, const std::vector<OverlaySnapshot::Line>& lines,
+			std::vector<std::uint32_t>& breaks)
 		{
 			std::vector<std::uint32_t> orders, modes;
+			std::vector<const void*> pages;
 			for (const auto& line : lines)
 			{
 				TerrainBatch::Line instance;
-				const bool tested = line.Kind == OverlaySnapshot::Primitive::Line;
-				const std::uint32_t flags = line.Kind == OverlaySnapshot::Primitive::Fill ? TerrainBatch::FilledLine : tested ? TerrainBatch::AlphaLine : 0u;
+				const bool tested = line.Kind == OverlaySnapshot::Primitive::Line, glyph = line.Kind == OverlaySnapshot::Primitive::Glyph;
+				std::uint32_t flags = line.Kind == OverlaySnapshot::Primitive::Fill ? TerrainBatch::FilledLine : tested ? TerrainBatch::AlphaLine : 0u;
+				int depth0 = line.Depth0;
+				const void* page = nullptr;
+				if (glyph)
+				{
+					const auto* mask = SidebarText::Glyphs().Resolve(line.Glyph);
+					const auto atlasView = mask ? atlas.Resolve({mask->Storage, {}, FrameAtlas::SourceKind::Mask, &SidebarText::Glyphs().Storage()})
+						: FrameAtlas::View {};
+					if (!atlasView.Texture || atlasView.X < 0 || atlasView.X > 0xFFFF || atlasView.Y < 0 || atlasView.Y > 0xFFFF) { ++Skipped; continue; }
+					flags = TerrainBatch::FilledLine | TerrainBatch::GlyphLine;
+					depth0 = int(TerrainBatch::Pack(std::uint32_t(atlasView.X), std::uint32_t(atlasView.Y)));
+					page = atlasView.Texture;
+				}
 				const TerrainBatch::Rect clip {line.Clip.X, line.Clip.Y, line.Clip.Width, line.Clip.Height};
 				if (!TerrainBatch::PlaceLine(line.X0, line.Y0, line.X1, line.Y1, clip, -view.X, -view.Y, view.Width, view.Height,
-					line.Depth0, line.Depth1, line.Color, flags, instance)) continue;
+					depth0, line.Depth1, line.Color, flags, instance)) continue;
 				Lines.Instances.push_back(instance);
 				orders.push_back(std::uint32_t(line.Before));
-				modes.push_back(tested ? (line.WritesDepth ? WriteDepth : TestDepth) : NoDepth);
+				modes.push_back(glyph ? GlyphMode : tested ? (line.WritesDepth ? WriteDepth : TestDepth) : NoDepth);
+				pages.push_back(page);
 				if (breaks.empty() || breaks.back() != orders.back()) breaks.push_back(orders.back());
 			}
-			LineRuns = TerrainBatch::SplitLines(orders, modes, 0);
+			LineRuns = TerrainBatch::SplitLines(orders, modes, pages, 0);
 		}
 	}
 
@@ -408,7 +438,7 @@ namespace TerrainPass
 				std::vector<std::uint8_t> packed;
 				ShapeRuns = PrepareShapes(atlas, view, overlays->Draws, packed);
 				std::vector<std::uint32_t> breaks;
-				PrepareLines(view, overlays->CompositeLines, breaks);
+				PrepareLines(atlas, view, overlays->CompositeLines, breaks);
 				LayerRuns = PrepareShapes(atlas, view, overlays->CompositeDraws, packed, breaks);
 				// At least one word: the shader's buffer is bound whenever shapes draw.
 				auto& bytes = ZBytes.Instances;
@@ -527,9 +557,10 @@ namespace TerrainPass
 					SDL_BindGPUVertexStorageBuffers(pass, 0, &Lines.Buffer, 1);
 					for (; nextLine != LineRuns.cend() && nextLine->Order <= order; ++nextLine)
 					{
-						SDL_BindGPUGraphicsPipeline(pass, LinePipelines[nextLine->Mode]);
+						const bool glyphs = nextLine->Mode == GlyphMode;
+						SDL_BindGPUGraphicsPipeline(pass, glyphs ? GlyphPipeline : LinePipelines[nextLine->Mode]);
 						SDL_PushGPUFragmentUniformData(commands, 0, &decode, sizeof(decode));
-						const SDL_GPUTextureSamplerBinding binding {abuffer, Sampler};
+						const SDL_GPUTextureSamplerBinding binding {glyphs ? static_cast<SDL_GPUTexture*>(const_cast<void*>(nextLine->Page)) : abuffer, Sampler};
 						SDL_BindGPUFragmentSamplers(pass, 0, &binding, 1);
 						const ViewUniforms view {{Uint32(Width), Uint32(Height), nextLine->First, 0}};
 						SDL_PushGPUVertexUniformData(commands, 0, &view, sizeof(view));

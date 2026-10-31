@@ -368,6 +368,9 @@
     <PhobosShader Include="src\Render\Shaders\TerrainComposite.ps.hlsl">
       <Profile>ps_6_0</Profile>
     </PhobosShader>
+    <PhobosShader Include="src\Render\Shaders\TerrainGlyph.ps.hlsl">
+      <Profile>ps_6_0</Profile>
+    </PhobosShader>
     <PhobosShader Include="src\Render\Shaders\TerrainLine.vs.hlsl">
       <Profile>vs_6_0</Profile>
     </PhobosShader>
