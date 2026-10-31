@@ -489,4 +489,16 @@ HEAD `861f712e` + 本批未提交改动，DLL SHA256 `a98a601b…`（tint 规则
 | GPUTINT（D3D12） | GPUVXL 加 `[MTNK] Tint.Color=255,0,0`（`scripts/make_tint.py`），坦克移动 | 每帧 `tinted=2`，都是 `73B140` 的非 RLE scratch 合成图，`mismatched=0`（按旧规则会丢掉这两次的 tint） | 只有光标 |
 | GPUINF、GPUBLD（D3D12，复跑） | 开局、滚动 | `mismatched=0`，`tilecheck` 全一致 | GPUINF 0，GPUBLD 只有光标 |
 
-临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a3`。回归脚本新增 `BlitFrameSourceTests`，全部通过；Debug 构建无新警告。未实测：体素碎片（VoxelAnim `749B70`，原版 MTNK 死亡不产生）、体素弹体（`46B0C0`）、`73B140` 桥下分两段提交的两处、`5F99E0` 实际触发（本轮 `epoch=0`）、铁幕与空袭的 tint、体素的半透明 visual、RLE 缓存项带 tint 的绘制（GPUTINT 里坦克只经 scratch）。tint 规则按 IDB 逐表位核对后改为“只有测 Z 的 Alpha 本体 blitter 应用”（原为“只有 RLE 帧应用”），对 `4AED70` 的调用同样生效。
+临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a3`。回归脚本新增 `BlitFrameSourceTests`，全部通过；Debug 构建无新警告。tint 规则按 IDB 逐表位核对后改为“只有测 Z 的 Alpha 本体 blitter 应用”（原为“只有 RLE 帧应用”），对 `4AED70` 的调用同样生效。
+
+**补测（2026-10-31，HEAD `60cf9d32`）**：用只在本地、测后撤掉的诊断构建（逐次记下分段提交与 `4AF2A0` 的外层调用者，按环境变量每 40 次采集调一次 `5F99E0`），对照方法同上。
+
+| 项 | 做法 | 结果 |
+| --- | --- | --- |
+| `73B140` 分两段 | 条件是类型 `TooBigToFitUnderBridge` 且在桥下（`703B10` 真、`703E70` 假）或刚出战车工厂（Destination 非空、radio link 0 是 `WeaponsFactory`（`+16BD`）的建筑）。`GPUFACT.MAP`（`scripts/make_fact.py`，GPUBLD 的 GAWEAP 交给玩家）分三次共排产 10 辆，诊断里一次分段都没有（出厂条件实测未满足，原因未查）；改用 `GPUBRV.MAP`（`scripts/make_brv.py`，GPUBRDG 高桥下放坦克） | 桥下坦克每帧都走 `73B37C`/`73B3EA` 两段，`blitsUnmodeled=0`，`mismatched=0`，GPU 只差光标 |
+| `5F99E0` 清空 | 原生只在 4 MB 体素缓存区（`40F270` 的 `0x3D0900`）写满时由 `706640`/`706BD0` 调用，正常对局难以触发；诊断构建在 GPUVXL 飞行场景里主动清空 20 次 | 分代后 `epoch` 0→20，`mismatched=0`，GPU 只差光标；把分代临时关掉（清空后不加 1）复跑，清空后每帧 `body=185–228` 个像素拿到旧图，确认按 `(地址, 宽, 高, 清空次数)` 取用是必要的 |
+| 体素碎片 | 运行时的 VoxelAnim 只有 `PIECE TIRE GASTANK SONICTURRET 4TNKTURRET CRYSTAL01/02 METEOR01/02 PEBBLE`；`GPUVXL2.MAP`（`scripts/make_vxl2.py`）让 MTNK 死亡掉出 TIRE/PIECE | 碎片本体（`749D73`）与影子（`749EE9`）各 80–110 次，都画在目标上，`mismatched=0` |
+| 体素弹体 | 运行时 `Voxel=yes` 且已加载 VXL 的 BulletType 只有 `BlimpBombP`（ZBOMB）与 `Torpedo`（SUBT）；地图里新定义的体素弹体不加载 VXL；让坦克发射 `BlimpBombP` 会在 `46B0C0`→Phobos `46B0E1`→`7564B4` 读空 VXL 崩溃，关掉 GPU 渲染（记录 hook 不工作）同样崩溃，与本批无关；地图里放的基洛夫（ZEP）没有出现 | 未覆盖。`46B0C0` 经 `4AF2A0 → 4373B0` 提交，与已验证的碎片和未缓存体素同一入口 |
+| 铁幕 tint | `GPUVXL3.MAP` 让坦克炮弹带 Ares `IC.Duration`、目标满血 | 坦克未开火，未覆盖；铁幕与 GPUTINT 的自定义 tint 走同一条 blitter 规则 |
+
+仍未实测：体素弹体、铁幕与空袭的 tint、体素的半透明 visual、RLE 缓存项带 tint 的绘制、出厂条件下的分段提交。
