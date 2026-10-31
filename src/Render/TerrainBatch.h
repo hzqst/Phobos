@@ -110,8 +110,77 @@ namespace TerrainBatch
 		return mask;
 	}
 
-	// Mode: the shape pipeline of a run of shapes, and where it changes.
-	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; std::uint32_t Mode = 0; };
+	// Mode: the shape pipeline of a run of shapes, and where it changes; Order: the place in its draw list of the
+	// run's first draw, which the lines drawn before it precede.
+	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; std::uint32_t Mode = 0; std::uint32_t Order = 0; };
+
+	// Runs of consecutive instances (the first one first) with the same page and mode; orders[i] is instance i's
+	// draw in its list, and a run also ends before each draw a line precedes (breaks, sorted), so lines can
+	// be drawn between runs in the native order.
+	inline std::vector<Run> SplitShapes(std::span<const void* const> pages, std::span<const std::uint32_t> modes,
+		std::span<const std::uint32_t> orders, std::span<const std::uint32_t> breaks, std::uint32_t first)
+	{
+		std::vector<Run> runs;
+		auto next = breaks.begin();
+		for (std::uint32_t i = 0; i < pages.size(); ++i)
+		{
+			// Whether a line precedes a draw after the previous instance's and up to this one's.
+			bool broken = false;
+			while (next != breaks.end() && *next <= orders[i])
+			{
+				broken = broken || (i > 0 && *next > orders[i - 1]);
+				++next;
+			}
+			if (runs.empty() || broken || runs.back().Page != pages[i] || runs.back().Mode != modes[i])
+				runs.push_back({pages[i], first + i, 1, false, modes[i], orders[i]});
+			else ++runs.back().Count;
+		}
+		return runs;
+	}
+
+	// Matches struct Line in TerrainLine.vs.hlsl: a line or fill RenderLayers drew outside 4AED70 and its blits,
+	// at target pixels. A line goes from From to To, its depth from Depth.x to Depth.y; a fill (FilledLine) covers
+	// From up to To, which is past its last pixel. Only the pixels from ClipMin up to ClipMax draw (packed X in
+	// the low 16 bits). AlphaLine: the pixel needs an ABuffer word other than 0 and its color is scaled by it.
+	struct Line
+	{
+		std::int32_t FromX, FromY, ToX, ToY;
+		std::int32_t Depth0, Depth1;
+		std::uint32_t ClipMin, ClipMax;
+		std::uint32_t Color, Flags;
+	};
+	static_assert(sizeof(Line) == 40);
+	constexpr std::uint32_t FilledLine = 1, AlphaLine = 2;
+
+	// A line or fill at Tile coordinates moved to the target by (originX, originY), its clip cut to the target's
+	// width x height. False when nothing of the clip remains.
+	inline bool PlaceLine(int fromX, int fromY, int toX, int toY, const Rect& clip, int originX, int originY, int width, int height,
+		int depth0, int depth1, std::uint16_t color, std::uint32_t flags, Line& out)
+	{
+		const auto left = std::max<std::int64_t>(std::int64_t(clip.X) + originX, 0);
+		const auto top = std::max<std::int64_t>(std::int64_t(clip.Y) + originY, 0);
+		const auto right = std::min<std::int64_t>(std::int64_t(clip.X) + clip.Width + originX, std::min(width, 0xFFFF));
+		const auto bottom = std::min<std::int64_t>(std::int64_t(clip.Y) + clip.Height + originY, std::min(height, 0xFFFF));
+		const auto x0 = std::int64_t(fromX) + originX, y0 = std::int64_t(fromY) + originY;
+		const auto x1 = std::int64_t(toX) + originX, y1 = std::int64_t(toY) + originY;
+		if (right <= left || bottom <= top || std::min({x0, y0, x1, y1}) < INT_MIN || std::max({x0, y0, x1, y1}) > INT_MAX) return false;
+		out = {int(x0), int(y0), int(x1), int(y1), depth0, depth1, Pack(std::uint32_t(left), std::uint32_t(top)),
+			Pack(std::uint32_t(right), std::uint32_t(bottom)), color, flags};
+		return true;
+	}
+
+	// Runs of consecutive lines (first one first) that precede the same draw (orders[i], ascending) with the same
+	// depth mode.
+	inline std::vector<Run> SplitLines(std::span<const std::uint32_t> orders, std::span<const std::uint32_t> modes, std::uint32_t first)
+	{
+		std::vector<Run> runs;
+		for (std::uint32_t i = 0; i < orders.size(); ++i)
+		{
+			if (runs.empty() || runs.back().Order != orders[i] || runs.back().Mode != modes[i]) runs.push_back({nullptr, first + i, 1, false, modes[i], orders[i]});
+			else ++runs.back().Count;
+		}
+		return runs;
+	}
 
 	// Consecutive instances on the same atlas page and with the same depth mode (none when depths is
 	// empty), so each draw keeps the native order.

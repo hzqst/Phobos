@@ -29,8 +29,8 @@
 // records of 4D1890 (step 4) come first, before the overlays (D1c). What RenderLayers (6D8DB0) draws on
 // Composite in mode 2 through 4AED70 (animated Terrain, anims, units, bullets and their extras,
 // gamemd-reverse #23, #26, #27) is recorded call by call as it draws, with the voxels' blits of 4373B0 and
-// 437A10 (D3a-3), and turned into a list of its own in the same callback, which the trace replays over
-// CompositeSnapshot's copies (D3).
+// 437A10 (D3a-3) and its lines and fills (4BFD30, 7BA610, 4BB620), and turned into a list of its own in the same
+// callback, which the trace replays over CompositeSnapshot's copies (D3); the lines only the GPU draws.
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -150,18 +150,38 @@ namespace OverlaySnapshot
 		int Calls = 0, CallsElsewhere = 0, CallsUnmodeled = 0, CallsTranslucent = 0, CallsWriting = 0, CallsTinted = 0;
 		// Its blits outside 4AED70 (4373B0, 437A10): on its target, elsewhere, and not modeled.
 		int Blits = 0, BlitsElsewhere = 0, BlitsUnmodeled = 0;
+		// Its lines and fills (4BFD30, 7BA610, 4BB620): on its target, elsewhere, and those on it that draw nothing.
+		int Lines = 0, LinesElsewhere = 0, LinesEmpty = 0;
 		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.
 		int Buildings = 0, BuildingsFogged = 0, BuildingsOutside = 0, BuildingsUnsupported = 0, Gates = 0, Unloading = 0, Bibs = 0, Doors = 0;
+	};
+	// What a line or fill of RenderLayers draws (Primitive): a line tested against Z and lit by A (4BFD30), a
+	// plain line (7BA610), or a filled rectangle (4BB620).
+	enum class Primitive : std::uint8_t { Line, PlainLine, Fill };
+	// A line from (X0, Y0) to (X1, Y1) on the surface whose depth goes from Depth0 to Depth1 (4BFD30 only), or a
+	// fill from its first pixel (X0, Y0) to the one past its last (X1, Y1), drawn only inside Clip; drawn before
+	// CompositeDraws[Before]. The GPU draws it approximately (not pixel for pixel like the native) and the trace
+	// does not replay it.
+	struct Line
+	{
+		Primitive Kind = Primitive::Line;
+		RectangleStruct Clip {};
+		int X0 = 0, Y0 = 0, X1 = 0, Y1 = 0, Depth0 = 0, Depth1 = 0;
+		std::uint16_t Color = 0;
+		bool WritesDepth = false;
+		size_t Before = 0;
+		std::uintptr_t Caller = 0;
 	};
 	struct Frame
 	{
 		bool Visible = false;
 		std::vector<Draw> Draws;
 		Counters Count;
-		// 6D8DB0's draws on Composite, in its order, and their counters.
+		// 6D8DB0's draws on Composite, in its order, its lines and fills among them, and their counters.
 		std::vector<Draw> CompositeDraws;
+		std::vector<Line> CompositeLines;
 		Counters CompositeCount;
 		// For the trace: the rectangles of those other objects on the clip's surface, where the layers
 		// drew what the replay does not (voxels, lines).
@@ -227,14 +247,30 @@ namespace OverlaySnapshot
 		BlitIssue Issue = BlitIssue::None;
 	};
 
+	// A line or fill of RenderLayers as passed: the clip, the line's ends relative to it (a fill's rectangle
+	// relative to it as X, Y, width and height), the 16-bit color, and for 4BFD30 the Z at each end and whether
+	// it writes Z. Taken on the surface (OnTarget) where it drew on RenderLayers' target.
+	struct RecordedLine
+	{
+		Primitive Kind = Primitive::Line;
+		RectangleStruct Clip {}, Fill {};
+		Point2D From {}, To {};
+		std::uint16_t Color = 0;
+		int ZFrom = 0, ZTo = 0;
+		bool WritesDepth = false;
+		std::uintptr_t Caller = 0;
+		bool OnTarget = true;
+	};
+
 	// The surface RenderLayers draws on while its calls are recorded (between 6D465F and 6D4664 of a
 	// capturing render), else null; the hooks at 4AED70, 4373B0 and 437A10 record through RecordCall and
-	// RecordBlit.
+	// RecordBlit, those at 4BFD30, 7BA610 and 4BB620 through RecordLine.
 	extern DSurface* RecordingTarget;
 	void BeginRecording(DSurface* target);
 	void EndRecording();
 	void RecordCall(RecordedCall call, DSurface* surface);
 	void RecordBlit(const BlitCall& call);
+	void RecordLine(RecordedLine line, DSurface* surface);
 
 	inline void Invalidate() { Current = {}; }
 

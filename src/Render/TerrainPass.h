@@ -20,8 +20,9 @@
 // integer values and a depth buffer holding the native Z, tested and written like 547CF0. The
 // overlays of OverlaySnapshot follow, one instance per 4AED70 draw, with the strict depth test of the
 // shape blitters and a blending pipeline for their shadows (C5.2c). The animated Terrain mode 2
-// draws on Composite, Tile's copy, comes last with the same test and no depth write (D2b), so the
-// target matches the native Composite after the layers. The present pass then draws that
+// draws on Composite, Tile's copy, comes last with the same test and no depth write (D2b), with the lines
+// and fills RenderLayers draws among its runs (one instance each, TerrainLine.vs), so the target matches the
+// native Composite after the layers. The present pass then draws that
 // target onto the window. It runs on the main thread like the rest
 // of the render; the GPU resources and shaders live in TerrainPass.cpp.
 namespace TerrainPass
@@ -92,11 +93,12 @@ namespace TerrainPass
 	};
 	using InstanceBuffer = StorageBuffer<TerrainBatch::Instance>;
 
-	// A pipeline of TerrainTile.vs and the given pixel shader, which reads samplers textures and
-	// storageBuffers buffers, with a depth target of depthFormat when depth is given.
+	// A pipeline of TerrainTile.vs (or the given vertex shader, which reads the same buffer and uniforms) and
+	// the given pixel shader, which reads samplers textures and storageBuffers buffers, with a depth target of
+	// depthFormat when depth is given.
 	SDL_GPUGraphicsPipeline* CreatePipeline(SDL_GPUDevice* device, const GPUShader::Code& pixel, Uint32 samplers,
 		const SDL_GPUColorTargetDescription& color, const SDL_GPUDepthStencilState* depth = nullptr,
-		SDL_GPUTextureFormat depthFormat = SDL_GPU_TEXTUREFORMAT_INVALID, Uint32 storageBuffers = 0);
+		SDL_GPUTextureFormat depthFormat = SDL_GPU_TEXTUREFORMAT_INVALID, Uint32 storageBuffers = 0, const GPUShader::Code* vertexCode = nullptr);
 
 	// Nearest, clamped; ABufferPass samples its frames with it too.
 	extern SDL_GPUSampler* Sampler;

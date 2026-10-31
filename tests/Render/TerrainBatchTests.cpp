@@ -41,6 +41,39 @@ int main()
 		&& modes[2].Page == &b && modes[2].Count == 2 && modes[3].First == 4 && modes[3].Depth && modes[4].Page == &a && modes[4].Depth,
 		"runs also split where the depth mode changes");
 
+	// Shape runs: draws 0, 1, 3, 4 and 6 have instances (2 and 5 were skipped), all on one page in one mode.
+	const void* same[] {&a, &a, &a, &a, &a};
+	const std::uint32_t shapeModes[] {0, 0, 0, 0, 0}, orders[] {0, 1, 3, 4, 6};
+	auto shapes = SplitShapes(same, shapeModes, orders, {}, 10);
+	Check(shapes.size() == 1 && shapes[0].First == 10 && shapes[0].Count == 5 && shapes[0].Order == 0, "no lines, one run");
+	// Lines before draw 0 (no break inside), before the skipped draw 2 (breaks between 1 and 3) and before draw 4.
+	const std::uint32_t breaks[] {0, 2, 4};
+	shapes = SplitShapes(same, shapeModes, orders, breaks, 10);
+	Check(shapes.size() == 3 && shapes[0].Count == 2 && shapes[0].Order == 0 && shapes[1].First == 12 && shapes[1].Count == 1
+		&& shapes[1].Order == 3 && shapes[2].First == 13 && shapes[2].Count == 2 && shapes[2].Order == 4, "runs end before the draws lines precede");
+	const std::uint32_t lateBreaks[] {7};
+	shapes = SplitShapes(same, shapeModes, orders, lateBreaks, 0);
+	Check(shapes.size() == 1 && shapes[0].Count == 5, "lines after the last draw split nothing");
+	const std::uint32_t mixedModes[] {0, 1, 1, 0, 0};
+	shapes = SplitShapes(same, mixedModes, orders, breaks, 0);
+	Check(shapes.size() == 4 && shapes[1].Mode == 1 && shapes[1].Count == 1 && shapes[2].Order == 3 && shapes[3].Order == 4, "modes and lines both split");
+
+	const std::uint32_t lineOrders[] {0, 0, 0, 3, 3}, lineModes[] {1, 1, 0, 0, 0};
+	const auto lines = SplitLines(lineOrders, lineModes, 0);
+	Check(lines.size() == 3 && lines[0].Count == 2 && lines[0].Mode == 1 && lines[1].First == 2 && lines[1].Order == 0
+		&& lines[2].First == 3 && lines[2].Count == 2 && lines[2].Order == 3, "line runs by draw and mode");
+
+	Line line;
+	Check(PlaceLine(563, 271, 563, 286, {0, 0, 856, 736}, 0, 0, 856, 736, 100, 120, 0xFFFF, AlphaLine, line), "selection box edge");
+	Check(line.FromX == 563 && line.FromY == 271 && line.ToX == 563 && line.ToY == 286 && line.Depth0 == 100 && line.Depth1 == 120
+		&& line.ClipMin == Pack(0, 0) && line.ClipMax == Pack(856, 736) && line.Color == 0xFFFF && line.Flags == AlphaLine, "line fields");
+	// Tile coordinates move by the view's origin; the clip is cut to the target.
+	Check(PlaceLine(-20, 40, 900, 50, {-30, 30, 1000, 40}, -10, -20, 856, 736, 0, 0, 0x1234, 0, line), "clip past the target");
+	Check(line.FromX == -30 && line.FromY == 20 && line.ToX == 890 && line.ToY == 30 && line.ClipMin == Pack(0, 10) && line.ClipMax == Pack(856, 50),
+		"moved and cut");
+	Check(!PlaceLine(0, 0, 10, 10, {900, 0, 20, 20}, 0, 0, 856, 736, 0, 0, 0, 0, line), "clip off the target");
+	Check(!PlaceLine(0, 0, 10, 10, {0, 0, 0, 20}, 0, 0, 856, 736, 0, 0, 0, 0, line), "empty clip");
+
 	ColorTables tables(100);
 	std::vector<std::uint16_t> first(53 * 256), second(27 * 256), third(40 * 256);
 	for (size_t i = 0; i < first.size(); ++i) first[i] = std::uint16_t(i);
@@ -73,5 +106,5 @@ int main()
 		Check(QuarterMask({11, 5, 0}, {5, 6, 5}) == 0x39E7 && QuarterMask({10, 5, 0}, {5, 5, 5}) == 0x1CE7, "quarter translucency masks");
 	}
 	if (Failures) return 1;
-	std::puts("TerrainBatch: placement, clipping, page runs, shape instances, masks and color table packing passed.");
+	std::puts("TerrainBatch: placement, clipping, page runs, shape and line runs, shape instances, line placement, masks and color table packing passed.");
 }

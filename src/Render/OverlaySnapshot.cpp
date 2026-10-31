@@ -32,9 +32,9 @@ namespace OverlaySnapshot
 		using TerrainImage::Point;
 		// The first shape that could not be acquired: overlay, frame, frames of the shape.
 		std::array<int, 4> FirstFailure {};
-		// The calls and blits of the last recorded RenderLayers in their order, and the first of each not
-		// modeled.
-		std::vector<std::variant<RecordedCall, RecordedBlit>> Recorded;
+		// The calls, blits and lines of the last recorded RenderLayers in their order, and the first call and
+		// blit not modeled.
+		std::vector<std::variant<RecordedCall, RecordedBlit, RecordedLine>> Recorded;
 		RecordedCall FirstUnmodeled;
 		RecordedBlit FirstUnmodeledBlit;
 
@@ -884,6 +884,33 @@ namespace OverlaySnapshot
 			};
 			for (const auto& item : Recorded)
 			{
+				if (const auto* line = std::get_if<RecordedLine>(&item))
+				{
+					if (!line->OnTarget) { ++count.LinesElsewhere; continue; }
+					++count.Lines;
+					if (line->Clip.Width <= 0 || line->Clip.Height <= 0) { ++count.LinesEmpty; continue; }
+					// 4C0050's depth of a pixel: the ZBuffer's MaxValue and Bounds.Y, less the clip's Y and the pixel's,
+					// plus the Z it steps to from the ends'.
+					const int base = capture.MaxValue + capture.BoundsY - line->Clip.Y;
+					Line placed;
+					placed.Kind = line->Kind;
+					placed.Clip = line->Clip;
+					placed.X0 = line->From.X;
+					placed.Y0 = line->From.Y;
+					placed.X1 = line->To.X;
+					placed.Y1 = line->To.Y;
+					if (line->Kind == Primitive::Line)
+					{
+						placed.Depth0 = base - line->From.Y + line->ZFrom;
+						placed.Depth1 = base - line->To.Y + line->ZTo;
+					}
+					placed.Color = line->Color;
+					placed.WritesDepth = line->WritesDepth;
+					placed.Before = capture.Target->size();
+					placed.Caller = line->Caller;
+					Current.CompositeLines.push_back(placed);
+					continue;
+				}
 				if (const auto* blit = std::get_if<RecordedBlit>(&item))
 				{
 					if (!blit->OnTarget) { ++count.BlitsElsewhere; continue; }
@@ -1147,12 +1174,46 @@ namespace OverlaySnapshot
 
 		// The replay of 6D8DB0's Terrain draws over the native Composite before the layers, against the
 		// one after them (D2). Their input must be Tile's view: nothing else drew before the layers.
+		// The pixels of the clip a recorded line or fill may have drawn: a fill's rectangle, and each pixel a line
+		// steps through with its neighbors, since the GPU's line and the native one may pick the next pixel.
+		std::vector<std::uint8_t> LineCoverage(const std::vector<Line>& lines, const RectangleStruct& clip)
+		{
+			std::vector<std::uint8_t> covered(size_t(clip.Width) * clip.Height, 0);
+			const auto mark = [&](std::int64_t x, std::int64_t y)
+			{
+				if (x >= clip.X && y >= clip.Y && x < std::int64_t(clip.X) + clip.Width && y < std::int64_t(clip.Y) + clip.Height)
+					covered[size_t(y - clip.Y) * clip.Width + size_t(x - clip.X)] = 1;
+			};
+			for (const auto& line : lines)
+			{
+				if (line.Kind == Primitive::Fill)
+				{
+					for (int y = line.Y0; y < line.Y1; ++y)
+						for (int x = line.X0; x < line.X1; ++x) mark(x, y);
+					continue;
+				}
+				const std::int64_t dx = std::int64_t(line.X1) - line.X0, dy = std::int64_t(line.Y1) - line.Y0;
+				const auto steps = std::max<std::int64_t>({dx < 0 ? -dx : dx, dy < 0 ? -dy : dy, 1});
+				// A line far off the clip has no pixels to mark.
+				if (steps > 4 * (std::int64_t(clip.Width) + clip.Height)) continue;
+				for (std::int64_t i = 0; i <= steps; ++i)
+				{
+					const auto x = line.X0 + (dx * i + (dx >= 0 ? steps / 2 : -steps / 2)) / steps;
+					const auto y = line.Y0 + (dy * i + (dy >= 0 ? steps / 2 : -steps / 2)) / steps;
+					for (int ny = -1; ny <= 1; ++ny)
+						for (int nx = -1; nx <= 1; ++nx) mark(x + nx, y + ny);
+				}
+			}
+			return covered;
+		}
+
 		struct CompositeCheck
 		{
 			const char* Input = "", * Output = "";
 			int InputCompared = 0, InputMismatched = 0, InputX = -1, InputY = -1, InputNative = 0, InputCopy = 0;
-			// Untouched mismatches inside another object's rectangle, and the rest.
-			int Compared = 0, Drawn = 0, Mismatched = 0, Untouched = 0, Others = 0, Unexplained = 0, Body = 0, Shadow = 0, Rejected = 0, Missing = 0;
+			// Mismatches by a recorded line or fill, which the replay does not draw; of the others, those untouched
+			// inside another object's rectangle, and the rest.
+			int Compared = 0, Drawn = 0, Mismatched = 0, Lines = 0, Untouched = 0, Others = 0, Unexplained = 0, Body = 0, Shadow = 0, Rejected = 0, Missing = 0;
 			int Left = INT_MAX, Top = INT_MAX, Right = INT_MIN, Bottom = INT_MIN;
 			int FirstX = -1, FirstY = -1, NativeColor = 0, ModelColor = 0, Owner = NoOwner;
 			// The first mismatch on a pixel a draw of the list owns.
@@ -1205,6 +1266,7 @@ namespace OverlaySnapshot
 			ReplayDraws(Current.CompositeDraws, clip, model);
 			check.Rejected = model.Rejected;
 			check.Missing = model.Missing;
+			const auto lines = LineCoverage(Current.CompositeLines, clip);
 			for (int row = 0; row < clip.Height; ++row)
 				for (int column = 0; column < clip.Width; ++column)
 				{
@@ -1214,7 +1276,8 @@ namespace OverlaySnapshot
 					check.Drawn += owner != NoOwner;
 					const auto native = output.Pixels[at], color = model.Color[at];
 					if (native == color) continue;
-					if (owner == NoOwner)
+					if (lines[at]) ++check.Lines;
+					else if (owner == NoOwner)
 					{
 						++check.Untouched;
 						const int x = clip.X + column, y = clip.Y + row;
@@ -1343,14 +1406,15 @@ namespace OverlaySnapshot
 			Debug::Log("[TerrainGPU] composite sample=%u layerObjects=%d othersVisible=%d unbounded=%d calls=%d elsewhere=%d unmodeled=%d "
 				"firstUnmodeled=%X:flags=%X:remap=%d:zshapeFrame=%d bodies=%d shadows=%d compressed=%d translucent=%d writing=%d tinted=%d palette=%d frame=%d "
 				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u blits=%d blitsElsewhere=%d blitsUnmodeled=%d "
-				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u\n",
+				"firstUnmodeledBlit=%X:issue=%d:rle=%d:flags=%X blitImages=%u blitBytes=%u epoch=%u lines=%d linesElsewhere=%d linesEmpty=%d\n",
 				TraceCount, composite.LayerObjects, composite.OthersVisible, composite.OthersUnbounded, composite.Calls, composite.CallsElsewhere,
 				composite.CallsUnmodeled, unsigned(FirstUnmodeled.Caller), FirstUnmodeled.Flags, FirstUnmodeled.Remap, FirstUnmodeled.ZShapeFrame,
 				composite.Bodies, composite.Shadows, composite.Compressed, composite.CallsTranslucent, composite.CallsWriting, composite.CallsTinted,
 				composite.Palette, composite.Frame, composite.NoImage, composite.Unloaded, composite.Empty, composite.Outside, composite.Unsupported,
 				composite.ZShape, CompositeSnapshot::Failed, composite.Blits, composite.BlitsElsewhere, composite.BlitsUnmodeled,
 				unsigned(FirstUnmodeledBlit.Caller), int(FirstUnmodeledBlit.Issue), FirstUnmodeledBlit.Compressed, FirstUnmodeledBlit.Flags,
-				unsigned(BlitFrameSource::Frames.GetStats().Frames), unsigned(BlitFrameSource::Frames.GetStats().IndexBytes), BlitFrameSource::Epoch);
+				unsigned(BlitFrameSource::Frames.GetStats().Frames), unsigned(BlitFrameSource::Frames.GetStats().IndexBytes), BlitFrameSource::Epoch,
+				composite.Lines, composite.LinesElsewhere, composite.LinesEmpty);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
@@ -1360,12 +1424,24 @@ namespace OverlaySnapshot
 				draws += item;
 			}
 			if (!draws.empty()) Debug::Log("[TerrainGPU] compositedraws sample=%u%s\n", TraceCount, draws.c_str());
+			// Each line (l), plain line (p) and fill (f) in order: caller, the draw it precedes, its ends (a fill's
+			// corners), depths, color, w where it writes Z.
+			std::string lines;
+			for (const auto& line : Current.CompositeLines)
+			{
+				char item[96];
+				std::snprintf(item, sizeof(item), " %c%X:%u@%d,%d-%d,%d:z=%d/%d:%04X%s",
+					line.Kind == Primitive::Line ? 'l' : line.Kind == Primitive::PlainLine ? 'p' : 'f', unsigned(line.Caller), unsigned(line.Before),
+					line.X0, line.Y0, line.X1, line.Y1, line.Depth0, line.Depth1, line.Color, line.WritesDepth ? "w" : "");
+				lines += item;
+			}
+			if (!lines.empty()) Debug::Log("[TerrainGPU] compositelines sample=%u%s\n", TraceCount, lines.c_str());
 			const auto compositeCheck = CompositeReplay(TerrainSnapshot::Current.Clip);
 			Debug::Log("[TerrainGPU] compositecheck sample=%u input=%s output=%s inputCompared=%d inputMismatched=%d inputFirst=%d,%d:tile=%04X:copy=%04X "
-				"compared=%d drawn=%d mismatched=%d untouched=%d others=%d unexplained=%d body=%d shadow=%d rejected=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",
+				"compared=%d drawn=%d mismatched=%d lines=%d untouched=%d others=%d unexplained=%d body=%d shadow=%d rejected=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",
 				TraceCount, compositeCheck.Input, compositeCheck.Output, compositeCheck.InputCompared, compositeCheck.InputMismatched, compositeCheck.InputX,
 				compositeCheck.InputY, compositeCheck.InputNative, compositeCheck.InputCopy, compositeCheck.Compared, compositeCheck.Drawn, compositeCheck.Mismatched,
-				compositeCheck.Untouched, compositeCheck.Others, compositeCheck.Unexplained, compositeCheck.Body, compositeCheck.Shadow, compositeCheck.Rejected, compositeCheck.Missing,
+				compositeCheck.Lines, compositeCheck.Untouched, compositeCheck.Others, compositeCheck.Unexplained, compositeCheck.Body, compositeCheck.Shadow, compositeCheck.Rejected, compositeCheck.Missing,
 				compositeCheck.Mismatched ? compositeCheck.Left : 0, compositeCheck.Mismatched ? compositeCheck.Top : 0,
 				compositeCheck.Mismatched ? compositeCheck.Right : 0, compositeCheck.Mismatched ? compositeCheck.Bottom : 0,
 				compositeCheck.FirstX, compositeCheck.FirstY, compositeCheck.NativeColor, compositeCheck.ModelColor,
@@ -1390,6 +1466,7 @@ namespace OverlaySnapshot
 		Current.Draws.clear();
 		Current.Count = {};
 		Current.CompositeDraws.clear();
+		Current.CompositeLines.clear();
 		Current.CompositeCount = {};
 		Current.OtherBounds.clear();
 		FirstFailure = {};
@@ -1571,5 +1648,37 @@ namespace OverlaySnapshot
 		}
 		if (blit.Issue == BlitIssue::None && !blit.ID) blit.Issue = BlitIssue::Image;
 		Recorded.push_back(blit);
+	}
+
+	void RecordLine(RecordedLine line, DSurface* surface)
+	{
+		line.OnTarget = surface == RecordingTarget;
+		if (line.OnTarget)
+		{
+			// Each cuts the clip to the surface (421B60) and draws nothing where they do not meet; a line's ends are
+			// relative to the cut clip, a fill's rectangle to the clip as passed, then cut by the cut clip.
+			const auto cut = [](const RectangleStruct& a, const RectangleStruct& b)
+			{
+				const std::int64_t left = std::max(a.X, b.X), top = std::max(a.Y, b.Y);
+				const std::int64_t right = std::min(std::int64_t(a.X) + a.Width, std::int64_t(b.X) + b.Width);
+				const std::int64_t bottom = std::min(std::int64_t(a.Y) + a.Height, std::int64_t(b.Y) + b.Height);
+				return RectangleStruct {int(left), int(top), int(std::max<std::int64_t>(right - left, 0)), int(std::max<std::int64_t>(bottom - top, 0))};
+			};
+			const auto clip = cut(line.Clip, {0, 0, surface->Width, surface->Height});
+			if (line.Kind == Primitive::Fill)
+			{
+				const auto fill = cut({line.Clip.X + line.Fill.X, line.Clip.Y + line.Fill.Y, line.Fill.Width, line.Fill.Height}, clip);
+				line.Clip = fill;
+				line.From = {fill.X, fill.Y};
+				line.To = {fill.X + fill.Width, fill.Y + fill.Height};
+			}
+			else
+			{
+				line.Clip = clip;
+				line.From = {clip.X + line.From.X, clip.Y + line.From.Y};
+				line.To = {clip.X + line.To.X, clip.Y + line.To.Y};
+			}
+		}
+		Recorded.push_back(line);
 	}
 }

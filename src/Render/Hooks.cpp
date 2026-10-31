@@ -137,6 +137,69 @@ DEFINE_HOOK(0x5F99E0, DestroyVoxelCaches_Purge, 0x5)
 	return 0;
 }
 
+// The lines and fills RenderLayers draws on its target, before each displaced sub esp: the building selection
+// boxes (6F5190 -> 6F5EF0 -> 6DBB60) and the like through 4BFD30, which takes the clip, both ends relative to
+// it, the color, the Z at each end and whether to write Z; plain lines through 7BA610 (DrawLine, DrawRect),
+// which takes the clip, both ends and the color; fills through 4BB620, which takes the clip, the rectangle
+// and the color. All take the surface in ECX.
+DEFINE_HOOK(0x4BFD30, DSurface_DrawLineColor_AZ_RecordLayers, 0x5)
+{
+	if (!OverlaySnapshot::RecordingTarget) return 0;
+	GET(DSurface*, pSurface, ECX);
+	GET_STACK(RectangleStruct*, pClip, 0x4);
+	GET_STACK(Point2D*, pFrom, 0x8);
+	GET_STACK(Point2D*, pTo, 0xC);
+	if (!pSurface || !pClip || !pFrom || !pTo) return 0;
+	OverlaySnapshot::RecordedLine line;
+	line.Clip = *pClip;
+	line.From = *pFrom;
+	line.To = *pTo;
+	line.Color = R->Stack<std::uint16_t>(0x10);
+	line.ZFrom = R->Stack<int>(0x14);
+	line.ZTo = R->Stack<int>(0x18);
+	line.WritesDepth = R->Stack<std::uint8_t>(0x1C) != 0;
+	line.Caller = R->Stack<std::uintptr_t>(0x0);
+	OverlaySnapshot::RecordLine(line, pSurface);
+	return 0;
+}
+
+DEFINE_HOOK(0x7BA610, XSurface_DrawLineEx_RecordLayers, 0x6)
+{
+	if (!OverlaySnapshot::RecordingTarget) return 0;
+	GET(DSurface*, pSurface, ECX);
+	GET_STACK(RectangleStruct*, pClip, 0x4);
+	GET_STACK(Point2D*, pFrom, 0x8);
+	GET_STACK(Point2D*, pTo, 0xC);
+	if (!pSurface || !pClip || !pFrom || !pTo) return 0;
+	OverlaySnapshot::RecordedLine line;
+	line.Kind = OverlaySnapshot::Primitive::PlainLine;
+	line.Clip = *pClip;
+	line.From = *pFrom;
+	line.To = *pTo;
+	line.Color = R->Stack<std::uint16_t>(0x10);
+	line.Caller = R->Stack<std::uintptr_t>(0x0);
+	OverlaySnapshot::RecordLine(line, pSurface);
+	return 0;
+}
+
+// 4BB620 draws nothing for an empty rectangle.
+DEFINE_HOOK(0x4BB620, DSurface_FillRectEx_RecordLayers, 0x6)
+{
+	if (!OverlaySnapshot::RecordingTarget) return 0;
+	GET(DSurface*, pSurface, ECX);
+	GET_STACK(RectangleStruct*, pClip, 0x4);
+	GET_STACK(RectangleStruct*, pFill, 0x8);
+	if (!pSurface || !pClip || !pFill || pFill->Width <= 0 || pFill->Height <= 0) return 0;
+	OverlaySnapshot::RecordedLine line;
+	line.Kind = OverlaySnapshot::Primitive::Fill;
+	line.Clip = *pClip;
+	line.Fill = *pFill;
+	line.Color = R->Stack<std::uint16_t>(0xC);
+	line.Caller = R->Stack<std::uintptr_t>(0x0);
+	OverlaySnapshot::RecordLine(line, pSurface);
+	return 0;
+}
+
 // Observational probes: return 0 preserves every displaced instruction via SyringeEx.
 // No outer MouseMutex transaction is introduced by this diagnostic stage.
 // Intentionally stacked with GScreenClass_DrawText: both return 0 and the observation
