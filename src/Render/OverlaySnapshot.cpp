@@ -562,6 +562,107 @@ namespace OverlaySnapshot
 				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, true);
 			}
 
+			// 705E00's choices for a building that draws its normal visual (gamemd-reverse #22 §5, §7): the
+			// palette, the tint and intensity with Phobos' 70632E and 706389, the shadow, and 43CEA0's point.
+			struct Wrapper
+			{
+				BuildingClass* Building = nullptr;
+				BuildingTypeClass* Type = nullptr;
+				CellStruct MapCoords {};
+				const CellClass* Cell = nullptr;
+				const CellClass* CenterCell = nullptr;
+				const ConvertClass* Convert = nullptr;
+				int Height = 0;
+				bool DrawShadow = false;
+				Point Position {};
+
+				int Intensity(int brightness) const
+				{
+					if (Type->TerrainPalette) brightness = std::int16_t(CenterCell->Intensity_Terrain);
+					int value = Building->GetFlashingIntensity(brightness);
+					if (Building->IsIronCurtained()) value = Building->GetInvulnerabilityTintIntensity(value);
+					if (TechnoExt::Fetch(Building)->AirstrikeTargetingMe) value = Building->GetAirstrikeTintIntensity(value);
+					return value + TechnoExt::GetCustomTintIntensity(Building);
+				}
+			};
+
+			// 43CEA0's normal window path (force 1, the clip ViewBounds) up to its call: on the map, out of
+			// limbo, its rectangle (455C20) meeting the clip, and drawn by 705E00 with these parameters.
+			bool Wrap(BuildingClass* building, Wrapper& wrapper)
+			{
+				auto& count = *Count;
+				if (!building->IsOnMap || building->InLimbo) return false;
+				auto* type = building->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return false; }
+				RectangleStruct dimensions {};
+				building->GetRenderDimensions(&dimensions);
+				if (!TerrainSnapshot::Intersects(Clip, std::int64_t(dimensions.X) + ViewX, std::int64_t(dimensions.Y) + ViewY, dimensions.Width, dimensions.Height))
+				{
+					++count.BuildingsOutside;
+					return false;
+				}
+				if (type->InvisibleInGame) return false;
+				// 705E00 draws the normal visual of a building that neither warps nor hides behind a disguise
+				// with these parameters; the others change its flags or palette.
+				if (building->VisualCharacter(VARIANT_FALSE, nullptr) != VisualType::Normal || building->IsBeingWarpedOut() || building->IsWarpingIn()
+					|| !building->IsClearlyVisibleTo(HouseClass::CurrentPlayer) || building->IsDisguised())
+				{
+					++count.BuildingsUnsupported;
+					return false;
+				}
+				wrapper.Building = building;
+				wrapper.Type = type;
+				wrapper.MapCoords = building->GetMapCoords();
+				wrapper.Cell = MapClass::Instance.GetCellAt(wrapper.MapCoords);
+				// 705E00 reads the tint's shroud and the TerrainPalette from the center's cell.
+				const auto center = building->GetCoords();
+				wrapper.CenterCell = MapClass::Instance.GetCellAt(CellStruct {std::int16_t(center.X / 256), std::int16_t(center.Y / 256)});
+				if (!wrapper.Cell || !wrapper.CenterCell) { ++count.Palette; return false; }
+				wrapper.Convert = type->TerrainPalette ? wrapper.CenterCell->LightConvert : building->GetRemapColour();
+				if (!wrapper.Convert) { ++count.Palette; return false; }
+				wrapper.DrawShadow = Game::bDrawShadow && !type->NoShadow;
+				wrapper.Height = AdjustZ(building->GetZ());
+				const auto coords = building->GetRenderCoords();
+				Point2D client {};
+				Project(coords, client);
+				wrapper.Position = {std::int64_t(client.X) + ViewX, std::int64_t(client.Y) + ViewY};
+				return true;
+			}
+
+			// A part 705E00 draws, then its own shadow at half the frames: both test Z and write it unless
+			// the part only reads it (2E00, 2E01); the wrapper's tint is shroud-cleared.
+			void WrapperPart(const Wrapper& wrapper, const SHPStruct* shape, int frame, int depth, int gradient, int brightness, int tint,
+				bool writes, const SHPStruct* zshape = nullptr, BuildingImage::Offset offset = {})
+			{
+				auto& count = *Count;
+				Call call;
+				call.Image = shape;
+				call.Frame = frame;
+				call.Convert = wrapper.Convert;
+				call.Brightness = wrapper.Intensity(brightness);
+				call.ZAdjust = depth;
+				call.Gradient = gradient;
+				call.Bounded = false;
+				call.Tint = wrapper.CenterCell->IsShrouded() ? 0 : tint;
+				call.WritesDepth = writes;
+				call.ZShape = zshape;
+				call.ZShapeX = offset.X;
+				call.ZShapeY = offset.Y;
+				const int index = wrapper.Type->ArrayIndex;
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, false);
+				if (!wrapper.DrawShadow) return;
+				const int frames = FrameCount(shape);
+				if (frames == UnloadedShape) { ++count.Unloaded; return; }
+				if (frames < 0) { ++count.Frame; return; }
+				call.Frame = BuildingImage::Add32(std::int16_t(frames) / 2, frame);
+				call.Brightness = BuildingImage::FullBrightness;
+				call.ZAdjust = BuildingImage::ShadowDepth(wrapper.Height);
+				call.Gradient = int(ZGradient::Ground);
+				call.Tint = 0;
+				call.ZShape = nullptr;
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, true);
+			}
+
 			// 6D9920 and 43CEA0 (force 1, the clip ViewBounds) and 43D290 for a building of the ground
 			// layer, with Phobos' 43D363, 43D386, 43D6E5 and 43D874 and, through the native calls, Ares'
 			// frame and Foundation hooks: each part through 705E00, which draws it and its own shadow.
@@ -570,81 +671,19 @@ namespace OverlaySnapshot
 				auto& count = *Count;
 				++count.Buildings;
 				if (building->IsFogged && !Unsorted::ArmageddonMode) { ++count.BuildingsFogged; return; }
-				if (!building->IsOnMap || building->InLimbo) return;
-				auto* type = building->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
-				// 6D9920 and 43CEA0: the building's rectangle (455C20) must meet the clip.
-				RectangleStruct dimensions {};
-				building->GetRenderDimensions(&dimensions);
-				if (!TerrainSnapshot::Intersects(Clip, std::int64_t(dimensions.X) + ViewX, std::int64_t(dimensions.Y) + ViewY, dimensions.Width, dimensions.Height))
-				{
-					++count.BuildingsOutside;
-					return;
-				}
+				Wrapper wrapper;
+				if (!Wrap(building, wrapper)) return;
+				auto* type = wrapper.Type;
 				auto* image = building->GetImage();
 				if (!image) { ++count.NoImage; return; }
-				if (type->InvisibleInGame) return;
-				// 705E00 draws the normal visual of a building that neither warps nor hides behind a disguise
-				// with these parameters; the others change its flags or palette.
-				if (building->VisualCharacter(VARIANT_FALSE, nullptr) != VisualType::Normal || building->IsBeingWarpedOut() || building->IsWarpingIn()
-					|| !building->IsClearlyVisibleTo(HouseClass::CurrentPlayer) || building->IsDisguised())
-				{
-					++count.BuildingsUnsupported;
-					return;
-				}
 				const auto mission = building->GetCurrentMission();
-				const auto mapCoords = building->GetMapCoords();
-				const auto* cell = MapClass::Instance.GetCellAt(mapCoords);
-				// 43D290 and 705E00 read the tint's shroud and the TerrainPalette from the center's cell.
-				const auto center = building->GetCoords();
-				auto* centerCell = MapClass::Instance.GetCellAt(CellStruct {std::int16_t(center.X / 256), std::int16_t(center.Y / 256)});
-				if (!cell || !centerCell) { ++count.Palette; return; }
-				const ConvertClass* convert = type->TerrainPalette ? centerCell->LightConvert : building->GetRemapColour();
-				if (!convert) { ++count.Palette; return; }
-				int tint = TechnoExt::GetTintColor(building, true, true, false) | TechnoExt::GetCustomTintColor(building);
-				if (centerCell->IsShrouded()) tint = 0;
-				// 705E00's intensity, with Phobos' 70632E and 706389.
-				const auto intensity = [&](int brightness)
-				{
-					if (type->TerrainPalette) brightness = std::int16_t(centerCell->Intensity_Terrain);
-					int value = building->GetFlashingIntensity(brightness);
-					if (building->IsIronCurtained()) value = building->GetInvulnerabilityTintIntensity(value);
-					if (TechnoExt::Fetch(building)->AirstrikeTargetingMe) value = building->GetAirstrikeTintIntensity(value);
-					return value + TechnoExt::GetCustomTintIntensity(building);
-				};
-				const bool drawShadow = Game::bDrawShadow && !type->NoShadow;
-				const int height = reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(building->GetZ());
-				const auto coords = building->GetRenderCoords();
-				Point2D client {};
-				reinterpret_cast<bool(__thiscall*)(const TacticalClass*, const CoordStruct*, Point2D*)>(CoordsToClient)(TacticalClass::Instance, &coords, &client);
-				const Point position {std::int64_t(client.X) + ViewX, std::int64_t(client.Y) + ViewY};
-				const int index = type->ArrayIndex;
+				const auto* cell = wrapper.Cell;
+				// Phobos' 43D386: the effect and custom tint.
+				const int tint = TechnoExt::GetTintColor(building, true, true, false) | TechnoExt::GetCustomTintColor(building);
+				const int height = wrapper.Height;
 				const auto part = [&](const SHPStruct* shape, int frame, int depth, int gradient, int brightness, const SHPStruct* zshape, BuildingImage::Offset offset)
 				{
-					Call call;
-					call.Image = shape;
-					call.Frame = frame;
-					call.Convert = convert;
-					call.Brightness = intensity(brightness);
-					call.ZAdjust = depth;
-					call.Gradient = gradient;
-					call.Bounded = false;
-					call.Tint = tint;
-					call.ZShape = zshape;
-					call.ZShapeX = offset.X;
-					call.ZShapeY = offset.Y;
-					Place(mapCoords.X, mapCoords.Y, Layer::Building, index, call, position, false);
-					if (!drawShadow) return;
-					const int frames = FrameCount(shape);
-					if (frames == UnloadedShape) { ++count.Unloaded; return; }
-					if (frames < 0) { ++count.Frame; return; }
-					call.Frame = BuildingImage::Add32(std::int16_t(frames) / 2, frame);
-					call.Brightness = BuildingImage::FullBrightness;
-					call.ZAdjust = BuildingImage::ShadowDepth(height);
-					call.Gradient = int(ZGradient::Ground);
-					call.Tint = 0;
-					call.ZShape = nullptr;
-					Place(mapCoords.X, mapCoords.Y, Layer::Building, index, call, position, true);
+					WrapperPart(wrapper, shape, frame, depth, gradient, brightness, tint, true, zshape, offset);
 				};
 				const auto healthy = building->GetHealthPercentage() > RulesClass::Instance->ConditionYellow;
 				auto& timer = building->UnloadTimer;
@@ -697,6 +736,32 @@ namespace OverlaySnapshot
 					++count.Doors;
 					part(door, BuildingImage::DoorFrame(healthy), BuildingImage::DoorDepth(height), int(ZGradient::Ground), light, nullptr, {});
 				}
+			}
+
+			// 43CEA0's mode 2 call (force 1, the ViewBounds, dynamic) of 43DA80 for a building that is not
+			// fogged (gamemd-reverse #27 §3.2): of its parts only DoorAnim, through 705E00 with Z read only and
+			// no tint. The linked objects and the voxel turret and barrel are #26's, as is the tint Phobos'
+			// 43DC1C builds for them.
+			void BuildingDynamic(BuildingClass* building)
+			{
+				auto& count = *Count;
+				++count.Buildings;
+				if (building->IsFogged) { ++count.BuildingsFogged; return; }
+				const auto* type = building->Type;
+				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
+				auto& timer = building->UnloadTimer;
+				if (building->GetCurrentMission() != Mission::Unload) return;
+				++count.Unloading;
+				if (!type->DoorAnim
+					|| !(timer.AreStates00() || timer.AreStates11() || timer.AreStates10() || timer.AreStates01())) return;
+				Wrapper wrapper;
+				if (!Wrap(building, wrapper)) return;
+				++count.Doors;
+				const bool damaged = !(building->GetHealthPercentage() > RulesClass::Instance->ConditionYellow) && type->DamagedDoor;
+				const int frame = BuildingImage::DoorAnimFrame(int(timer.PercentageDone() * type->DoorStages), type->DoorStages, timer.AreStates10(),
+					timer.AreStates00(), damaged);
+				WrapperPart(wrapper, type->DoorAnim, frame, BuildingImage::DoorAnimDepth(wrapper.Height), int(ZGradient::Ground),
+					std::int16_t(wrapper.Cell->Intensity_Normal), 0, false);
 			}
 
 			// 4D1890's building branch (kind 6) for an enabled record whose saved rectangle meets the
@@ -1072,6 +1137,9 @@ namespace OverlaySnapshot
 					}
 					if (object->WhatAmI() != AbstractType::Terrain)
 					{
+						// The Techno branch calls DrawIfVisible whether its point projects or not.
+						if (object->WhatAmI() == AbstractType::Building && inRange && CursorSnapshot::Readable(object, sizeof(BuildingClass)))
+							capture.BuildingDynamic(static_cast<BuildingClass*>(object));
 						++count.Others;
 						count.OthersInRange += inRange;
 						if (object->IsVisible)
@@ -1490,6 +1558,9 @@ namespace OverlaySnapshot
 				composite.AnimsFogged, composite.AnimsDelayed, composite.AnimsLimbo, composite.AnimsUnprojected, composite.AnimsRing, composite.AnimsHidden,
 				composite.AnimsNoImage, composite.AnimsUnsupported, composite.AnimsTranslucent, composite.AnimsWriting, composite.AnimsTiled,
 				composite.AnimsExtras, composite.AnimsTinted);
+			// D3b-2: 43DA80's buildings in range and the DoorAnims drawn.
+			Debug::Log("[TerrainGPU] compositebuildings sample=%u buildings=%d fogged=%d unloading=%d outside=%d unsupported=%d doors=%d\n", TraceCount,
+				composite.Buildings, composite.BuildingsFogged, composite.Unloading, composite.BuildingsOutside, composite.BuildingsUnsupported, composite.Doors);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{

@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 动画/崩塌 Terrain（D2）与对象层动画（D3b-1）：单位、体素炮塔、DoorAnim、粒子与激光等仍不画（D3b-2 与 #26 起）；动画的 tint、Tiled、HasExtras 阴影、AltPalette、MakeInfantry、时停与写 Z 的动画未实测；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- 动画/崩塌 Terrain（D2）与对象层动画（D3b-1）：单位、建筑的 linked 对象与体素炮塔/炮管、粒子与激光等仍不画（#26 起）；DoorAnim 只在注入下实测；动画的 tint、Tiled、HasExtras 阴影、AltPalette、MakeInfantry、时停与写 Z 的动画未实测；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
 - `4D1890` deferred 记录只画建筑（D1c）：开 FogOfWar 实测只出现建筑记录；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾建筑的保存动画在原生按格重画后可能缺失，快照按全量重画画出（见“迷雾建筑”）；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -203,7 +203,7 @@ GPU（D2b）：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之�
 
 ## 对象层动画（mode 2，D3b）
 
-#27 交接 = gamemd-reverse PR #28。RenderLayers 的动画分支（`6D9187`）与 Terrain 同在 `CompositeDraws` 中按层顺序采集（`OverlaySnapshot` 的 `Capture::Anim`，纯规则在 `AnimImage.h`，有单元测试）。不画：体素炮塔、单位（等 #26）、DoorAnim（`43DA80`，D3b-2）。
+#27 交接 = gamemd-reverse PR #28。RenderLayers 的动画分支（`6D9187`）与 Terrain 同在 `CompositeDraws` 中按层顺序采集（`OverlaySnapshot` 的 `Capture::Anim`，纯规则在 `AnimImage.h`，有单元测试）。建筑分支（D3b-2）只画 `43DA80` 的 DoorAnim；linked 对象、体素炮塔/炮管、SHP 炮塔混 VXL 炮管时对 `Anims[9]` 的显式重画与单位一起等 #26。
 
 | 项 | 规则 |
 | --- | --- |
@@ -214,11 +214,12 @@ GPU（D2b）：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之�
 | tint | 只有建筑动画（Phobos `423420`）：所在格的建筑，否则 ParentBuilding，`GetTintColor` 加自定义 tint；格子被 shroud 时清零；单位的 DeployAnim 计入 `unsupported` |
 | 本体 | Tiled（Phobos 间距、对齐、palette，`ZAdjust+Y−h−50`，Deg90，按行循环）、Flat（`Y+ZAdj−h−3`，梯度 0）、其余（`Y+ZAdj−h−2`，Deg90）；`2000` 只测 Z，`4000` 测并写 |
 | 阴影 | HasExtras 且 Phobos `ExtraShadow`：`2601`，地面位置；`Type.Shadow`：帧加 `int16(Frames)/2`，`(F&~6)\|601`，`−2−h`，独立动画为 `E01`（不测不写），建筑槽为 `1E01`（只测） |
+| 建筑（`43CEA0 → 43DA80`） | Techno 分支按 Location 粗筛后不论投影成败都调 `43CEA0(ViewBounds,1,1)`：OnMap、非 Limbo、`455C20` 矩形与视图相交、未 IsFogged。任务 Unload、`DoorAnim` 非空且 UnloadTimer 四种状态之一时画 DoorAnim：帧为 `int(进度×DoorStages)`，关闭中反向、空闲为 0，夹到 `[0,DoorStages−1]`，血量不高于 ConditionYellow 且 DamagedDoor 时加 DoorStages（`BuildingImage::DoorAnimFrame`）；经 `705E00`（与 Tile 建筑共用 `Capture::Wrap`/`WrapperPart`：配色或 TerrainPalette、闪烁/铁幕/空袭/自定义亮度），亮度为 GetMapCoords 格的 `Intensity_Normal`，tint 参数为 0，`2E00`、`−5−h−2`、梯度 0；自身影 `2E01`、`−2−h−2`、帧加 `int16(Frames)/2` |
 | 半透明 | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
 
 GPU：与动画 Terrain 共用 shape 实例与 `TerrainShape.ps`。深度管线按 不测/只测/测并写 × 本体/阴影/半透明 共 9 条；半透明绘制在新的一组开始前结束渲染通道，把目标复制到 `CopyTexture`，着色器读旧值算出整数结果（`RoundedShape` 时按通道 `(a+b+1)>>1`，只在色彩打包为 565 即 `HalfMask == F7DE>>1` 时画，否则跳过），互不重叠的半透明绘制共用一次复制。
 
-trace 在 `composite` 之后多两行：`compositeanims`（`anims` 及上述各跳过原因，`translucent/writing/tiled/extras/tinted` 为已采集绘制数）与 `compositeanimdraws`（`类型:帧[s][t]@x,y,宽x高:z=ZAdjust:q=亮度行`）；`compositedraws` 每项前加层字母（Terrain `t`、动画 `n`），后缀 `s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z。
+trace 在 `composite` 之后多三行：`compositebuildings`（范围内建筑 `buildings`、`fogged`、任务 Unload 的 `unloading`、`outside/unsupported`、画出的 `doors`）、`compositeanims`（`anims` 及上述各跳过原因，`translucent/writing/tiled/extras/tinted` 为已采集绘制数）与 `compositeanimdraws`（`类型:帧[s][t]@x,y,宽x高:z=ZAdjust:q=亮度行`）；`compositedraws` 每项前加层字母（Terrain `t`、建筑 `b`、动画 `n`），后缀 `s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z。
 
 ## 验收（2026-10-30）
 
@@ -443,3 +444,14 @@ HEAD `5851ff0b` + 本批未提交改动，DLL SHA256 `3a5f5ef7…`；最终 DLL 
 S_CLSN22 第一次对照时 746 个像素全部不同，探针证实原生在 RenderLayers 内用相同参数（surface、`ANIM_PAL`、帧、位置、`2E04`、Z、亮度）画了它，且之后到 `6D4664` 没有覆盖；差在每个通道 ±1：Phobos `FixTransparencyBlitters` 已改写 RLE AlphaZRead 半透明 blitter 的机器码（内存中 `4987F7` 起为 `mov dx,F7DE` 与 or/xor/sub 序列），按向上取整平均混合，40/40 个采样只与 `(old+in+1)>>1` 吻合。按“半透明”一行改为 `RoundedBlend` 后一致。此前把强制攻击光标的绿色箭头误当作 S_CLSN22 的碎片：`gpu` 带光标、`native_composite` 不带，光标移开后该处一致。
 
 临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3b`（`anim`、`bld`、`dmg9`、`dmg10`、`vk-*`）。回归新增 `AnimImageTests` 与 `ShapeDepthTests` 的补丁混合，全部通过；Debug 构建无新警告。未实测：DoorAnim（D3b-2）、建筑槽动画的 tint、Tiled/HasExtras/写 Z 的动画、非 565 色彩打包。
+
+### D3b-2 DoorAnim（2026-10-31）
+
+HEAD `27cd14d9` + 本批未提交改动，DLL SHA256 `3ba5ee73…`（最终 `33482699…` 只删了一个未用字段），1024×768。原版 YR 的建筑类型都没有设 `DoorAnim`（运行时列出只有 GAWEAP/NAWEAP/YAWEAP 有 `UnderDoorAnim` 与 `DeployingAnim`，DoorStages=0），所以验收用临时注入：第一次卸载时把 GAWEAP 的 `DeployingAnim` 设为 `DoorAnim`、`DoorStages=int16(帧数)/2`（=2），原生 `43DA80` 与采集读同一字段。受控地图 `GPUDOOR.MAP`（`scripts/make_door.py`，GPUANIM 加规则：MCV 展开成不耗电的 GAWEAP，灰熊坦克 Cost=10）：展开、造一辆后再造一辆，卸载期间左右轻点滚屏触发 trace。
+
+| 后端 | `compositebuildings` | `compositecheck` | GPU 对 `native_composite`（门附近） |
+| --- | --- | --- | --- |
+| D3D12 | `unloading=1 doors=1`，门本体约 390 像素通过、约 1.2 万被建筑本体的 Z 拒绝 | 归属门本体/影子的不同像素全部在建筑的“主要”标签边框行（y=329–331，DrawExtras 后画） | 只有选择框、血条、标签与单位 |
+| Vulkan | 同上 | 同上（182 个全在标签行） | 同上 |
+
+不加注入时 GPUBLD（D3D12）`tilecheck` 全一致，GPU 差异与 D3b-1 同为 3217 像素（重构的 `Wrap`/`WrapperPart` 不改 Tile 建筑）。临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原；注入与像素日志已删除。证据 `Debug/AutomationTests/stage-d/d3b`（`door*`、`vk-door`、`bld3`）。回归 `BuildingImageTests` 新增 DoorAnim 帧与深度，全部通过；Debug 构建无新警告。未实测：DamagedDoor、关闭阶段的反向帧（注入时 DoorStages 只有 2）、TerrainPalette 建筑的 DoorAnim。

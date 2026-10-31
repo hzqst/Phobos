@@ -56,6 +56,21 @@ namespace BuildingImage
 	// 43D290's door below: frame 1 unless healthier than ConditionYellow.
 	constexpr int DoorFrame(bool healthy) { return healthy ? 0 : 1; }
 
+	// 43DA80's DoorAnim while unloading (gamemd-reverse #27 §3.2): truncated progress times DoorStages,
+	// reversed while closing (states 1, 0), 0 when idle (0, 0), clamped to the stages, then after the
+	// DoorStages frames when damaged with DamagedDoor. Its ZAdjust -5 - h, less 705E00's 2, only reads Z
+	// (2E00); the wrapper's shadow keeps ShadowDepth and reads Z (2E01).
+	constexpr int DoorAnimZAdjust = -5;
+	constexpr int DoorAnimFrame(int progress, int stages, bool closing, bool idle, bool damaged)
+	{
+		int frame = closing ? Sub32(stages, progress) : progress;
+		if (idle) frame = 0;
+		if (frame >= stages) frame = Sub32(stages, 1);
+		if (frame < 0) frame = 0;
+		return damaged ? Add32(frame, stages) : frame;
+	}
+	constexpr int DoorAnimDepth(int height) { return Sub32(Sub32(DoorAnimZAdjust, height), WrapperDepth); }
+
 	// 4D1890's building records (kind 6, step 4, gamemd-reverse #22 §6.2) call 4AED70 directly, with
 	// h of the saved Location: the body N - h - 2 with gradient 2 and the Z shape at its own offset
 	// (no width guard, no mission condition), or -h - 2 with gradient 0 and none for a laser fence or
