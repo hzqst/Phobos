@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnimImage.h"
 #include "BuildingImage.h"
 #include "OverlayImage.h"
 #include "ShapeDepth.h"
@@ -27,7 +28,8 @@
 // objects RenderLayers (6D8DB0) draws on Composite in mode 2 (gamemd-reverse #23) are captured in the
 // same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
 // The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1);
-// the building records of 4D1890 (step 4) come first, before the overlays (D1c).
+// the building records of 4D1890 (step 4) come first, before the overlays (D1c). The AnimClass objects
+// RenderLayers draws (gamemd-reverse #27) join the animated Terrain in the Composite list (D3b).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -78,10 +80,17 @@ namespace OverlaySnapshot
 	// (6D1FE0), and the Foundation width and height (45EC90, 45ECA0, which Ares takes over), read
 	// as the whole EAX.
 	constexpr std::uintptr_t BuildingZShape = 0x89DDBC, ZShapeMove = 0x6D1FE0, FoundationWidth = 0x45EC90, FoundationHeight = 0x45ECA0;
+	// 422CA0 draws RING1 through Direct3D (4A3840) when this byte is set and a ZBuffer exists.
+	constexpr std::uintptr_t Direct3DUsable = 0x8A0DF0;
+	// Ares 3.0p1's 4232CE (AnimClass_Draw_SetPalette) looks the type up in its extension map (Find,
+	// thiscall) and takes the ConvertClass at +10h; its 422FCC (AnimClass_Draw_Details) asks a helper
+	// whether the frame rate lets low detail anims draw. Offsets from the DLL's base.
+	constexpr std::uintptr_t AresSetPalette = 0xAD20, AresAnimTypeMap = 0xC2994, AresMapFind = 0x58900, AresAnimPalette = 0x10,
+		AresDrawDetails = 0x5EE10, AresFrameRateHelper = 0x2B1C0;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00), a
-	// building (6D9920), or a fogged building record's building or anim part (4D1890).
-	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim };
+	// building (6D9920), a fogged building record's building or anim part (4D1890), or an anim (422CA0).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Anim };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -96,15 +105,21 @@ namespace OverlaySnapshot
 		ShapeDepth::Rows Rows;
 		ShapeDepth::Gradient Gradient {};
 		bool Compressed = false;
-		// The shadow blitter (4601) halves the old color with Mask; the body one (4E00) draws.
+		// The shadow blitter (4601) halves the old color with Mask; the body one (4E00) draws, mixed with
+		// the old color by the translucency bits (2, 4, 6 of the flags) through Mask and QuarterMask.
 		bool Shadow = false;
-		std::uint32_t Mask = 0;
+		std::uint32_t Mask = 0, QuarterMask = 0;
+		std::uint8_t Translucency = 0;
+		// The translucent draw goes through a blitter Phobos' FixTransparencyBlitters patched
+		// (ShapeDepth::RoundedBlend).
+		bool Rounded = false;
 		// An RLE frame with a Z shape: the byte 437A10 subtracts from each drawn pixel's depth,
 		// Width x Height.
 		bool ZShaped = false;
 		std::vector<std::uint8_t> ZBytes;
-		// 4AED70's Z write: the Tile pass writes Z (4E00, 4601), mode 2's Terrain only tests it (2E00).
-		bool WritesDepth = true;
+		// 4AED70's Z test and write: the Tile pass writes Z (4E00, 4601), mode 2's Terrain only tests it
+		// (2E00), a standalone anim's shadow (E01) does neither.
+		bool TestsDepth = true, WritesDepth = true;
 		// The tint an RLE body ORs into each color (705E00's, 0 where the frame is plain).
 		std::uint16_t Tint = 0;
 		// For the trace: the layer, the overlay, Terrain type or tile type index, and the shape's frame.
@@ -129,6 +144,14 @@ namespace OverlaySnapshot
 		// The other objects 6D8DB0 marked IsVisible (it clears the flag of each and sets it where it draws),
 		// and those of them whose rectangle (GetRenderDimensions) is empty.
 		int OthersVisible = 0, OthersUnbounded = 0;
+		// 6D8DB0's anims: those it walks, those outside the view range or at a fogged Location, then
+		// 422C70 / 5F4B10 / 422CA0: delayed (LoopDelay), in limbo, not projected, drawn by Direct3D (RING1),
+		// hidden (frame rate, Invisible, detail, fog, Phobos' visibility, a level of 15), without an image,
+		// in a state the capture does not draw; and the draws: translucent, writing Z, tiled rounds,
+		// HasExtras shadows and tinted.
+		int Anims = 0, AnimsOutOfRange = 0, AnimsFogged = 0, AnimsDelayed = 0, AnimsLimbo = 0, AnimsUnprojected = 0, AnimsRing = 0,
+			AnimsHidden = 0, AnimsNoImage = 0, AnimsUnsupported = 0, AnimsTranslucent = 0, AnimsWriting = 0, AnimsTiled = 0, AnimsExtras = 0,
+			AnimsTinted = 0;
 		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.

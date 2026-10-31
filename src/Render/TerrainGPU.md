@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 动画/崩塌 Terrain（D2）：只画 Terrain，对象层中的单位、建筑、动画（如矿石闪光）、粒子与 Extras 都不画（阶段 D3 起）；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- 动画/崩塌 Terrain（D2）与对象层动画（D3b-1）：单位、体素炮塔、DoorAnim、粒子与激光等仍不画（D3b-2 与 #26 起）；动画的 tint、Tiled、HasExtras 阴影、AltPalette、MakeInfantry、时停与写 Z 的动画未实测；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
 - `4D1890` deferred 记录只画建筑（D1c）：开 FogOfWar 实测只出现建筑记录；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾建筑的保存动画在原生按格重画后可能缺失，快照按全量重画画出（见“迷雾建筑”）；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -200,6 +200,25 @@ trace（`PHOBOS_TERRAIN_TRACE=1`，与 `tilecheck` 同一次采集）在 `tilede
 GPU（D2b）：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之后，共用 shape 实例、atlas 与着色器，另建两条只测不写深度的管线（本体、阴影各一，严格 `<`，阴影仍是乘 1/2 的混合），按列表顺序提交；战术目标因此是“Tile + 动画 Terrain”，对照基准改为同一暂停帧的 `native_composite`。
 
 - `compositecheck`：`input/output` 为两份副本的状态（`ok`、失败原因、`bounds_differ` 或 `stale`=不是本帧）；`inputMismatched` 为输入与原生 Tile 的 ViewBounds 不同的像素（应为 0：RenderLayers 之前没有别的东西画进来）；在输入上用原生 Z、A 按顺序重放 `CompositeDraws`，与输出比较：`drawn` 为被 Terrain 画到的像素，`mismatched` 分为 `body/shadow`（Terrain 像素不同）与 `untouched`（Terrain 没画到的像素不同，即别的对象画的），后者再按是否落在 IsVisible 对象的 `GetRenderDimensions` 矩形内分为 `others/unexplained`。`compositesamples` 列前 24 个不同像素。
+
+## 对象层动画（mode 2，D3b）
+
+#27 交接 = gamemd-reverse PR #28。RenderLayers 的动画分支（`6D9187`）与 Terrain 同在 `CompositeDraws` 中按层顺序采集（`OverlaySnapshot` 的 `Capture::Anim`，纯规则在 `AnimImage.h`，有单元测试）。不画：体素炮塔、单位（等 #26）、DoorAnim（`43DA80`，D3b-2）。
+
+| 项 | 规则 |
+| --- | --- |
+| 选择 | `GetCoords`（Phobos 替换的 vslot `+48`）在视图范围内；非建筑动画且 `ShouldFogRemove` 时 Location 在迷雾中跳过；`LoopDelay` 未尽、正常窗口下 InLimbo、`GetRenderCoords` 投影失败跳过 |
+| `422CA0` 前段 | RING1 的 Direct3D 路径不建模（`ring`）；Ares `422FCC` 帧率门限、Invisible、DetailLevel、`IsFogged && ShouldFogRemove`、无图像、Phobos `423061` 可见性计入 `hidden/noImage` |
+| 帧与标志 | 帧 `Start+Value`；`AnimFlags`，时停加 `4/6`；`Translucent=yes` 按 Value 超过 End 的 0.6/0.4/0.2 分 75/50/25%，否则 Phobos `423183` 曲线（无曲线时等级 >15 跳过、>5 为 50%、其余 25%）；彩色绘制加 `800`，本体加 `2000` |
+| palette 与亮度 | IsVeins、UseCellLightConvert、`Anim.LightConvert`（MakeInfantry 按 Phobos `4232BF` 取本格亮度）、`ANIM_PAL` 或 Ares 自定义 palette、AltPalette（Phobos 拥有者配色）；UseNormalLight 为 1000 |
+| tint | 只有建筑动画（Phobos `423420`）：所在格的建筑，否则 ParentBuilding，`GetTintColor` 加自定义 tint；格子被 shroud 时清零；单位的 DeployAnim 计入 `unsupported` |
+| 本体 | Tiled（Phobos 间距、对齐、palette，`ZAdjust+Y−h−50`，Deg90，按行循环）、Flat（`Y+ZAdj−h−3`，梯度 0）、其余（`Y+ZAdj−h−2`，Deg90）；`2000` 只测 Z，`4000` 测并写 |
+| 阴影 | HasExtras 且 Phobos `ExtraShadow`：`2601`，地面位置；`Type.Shadow`：帧加 `int16(Frames)/2`，`(F&~6)\|601`，`−2−h`，独立动画为 `E01`（不测不写），建筑槽为 `1E01`（只测） |
+| 半透明 | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
+
+GPU：与动画 Terrain 共用 shape 实例与 `TerrainShape.ps`。深度管线按 不测/只测/测并写 × 本体/阴影/半透明 共 9 条；半透明绘制在新的一组开始前结束渲染通道，把目标复制到 `CopyTexture`，着色器读旧值算出整数结果（`RoundedShape` 时按通道 `(a+b+1)>>1`，只在色彩打包为 565 即 `HalfMask == F7DE>>1` 时画，否则跳过），互不重叠的半透明绘制共用一次复制。
+
+trace 在 `composite` 之后多两行：`compositeanims`（`anims` 及上述各跳过原因，`translucent/writing/tiled/extras/tinted` 为已采集绘制数）与 `compositeanimdraws`（`类型:帧[s][t]@x,y,宽x高:z=ZAdjust:q=亮度行`）；`compositedraws` 每项前加层字母（Terrain `t`、动画 `n`），后缀 `s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z。
 
 ## 验收（2026-10-30）
 
@@ -410,3 +429,17 @@ HEAD `5851ff0b` + 本批未提交改动，DLL SHA256 `3a5f5ef7…`；最终 DLL 
 | Vulkan | 上滚、左滚 | 12 个样本全一致 | 同上（690、43 像素在动画内，建筑 part 内 0） |
 
 差异处原生屏幕（`ddraw`）也没有这些动画：原生按格重画时动画被 Z 拒绝（见“迷雾建筑”末），全量重画时才画出；建筑本体、阴影、底座与 GPU 一致。这是原生增量缓存的历史状态，不按当前状态复现。未实测：Armageddon、LaserFence/FirestormWall 的平铺本体、TerrainPalette 记录、InvisibleInGame、超出细节等级的动画、未排序的记录表。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d1c`（`fog`、`fog2`–`fog4`、`vk`、`final`；`fog3` 之前的 DLL 没有 `foggeddraws`）。回归 `BuildingImageTests` 新增迷雾规则，全部通过；Debug 构建无警告。
+
+### D3b-1 独立与建筑槽动画（2026-10-31）
+
+#27 交接 = gamemd-reverse PR #28。HEAD `09967aac` + 本批未提交改动，DLL SHA256 `c4072d93…`，1024×768，D3D12 与 Vulkan，每个状态在同一暂停帧比较 `native_composite` 与 `gpu`（`scripts/cmpcomp.py`）。
+
+| 地图 | 状态 | `compositecheck` | GPU 对 `native_composite` |
+| --- | --- | --- | --- |
+| GPUANIM | 开局、上滚、左滚、右滚 | 滚动后 `mismatched=0`；开局 2302 像素全在单位上（`unexplained`） | 只有光标 187–188 像素（D2b 的 6 像素闪光差异消失） |
+| GPUBLD | 开局 3 秒 | Vulkan `body=143 unexplained=2302`（D3D12 时逐像素核对过，建筑槽动画——机场、油井、雷达、火焰等——一致，差异在单位处） | 差异是单位与光标，Vulkan 与 D3D12 同为 3217 像素 |
+| GPUDMG | MCV 强制攻击地面，爆炸 S_CLSN22（`Translucent=yes`，25→50→75%）| 炮口 GUNFIRE 落在单位上（`body` 来自未画的单位旧色）；S_CLSN22 `body=0` | 爆炸区域 0 差异；整帧只有单位与移开后的光标 |
+
+S_CLSN22 第一次对照时 746 个像素全部不同，探针证实原生在 RenderLayers 内用相同参数（surface、`ANIM_PAL`、帧、位置、`2E04`、Z、亮度）画了它，且之后到 `6D4664` 没有覆盖；差在每个通道 ±1：Phobos `FixTransparencyBlitters` 已改写 RLE AlphaZRead 半透明 blitter 的机器码（内存中 `4987F7` 起为 `mov dx,F7DE` 与 or/xor/sub 序列），按向上取整平均混合，40/40 个采样只与 `(old+in+1)>>1` 吻合。按“半透明”一行改为 `RoundedBlend` 后一致。此前把强制攻击光标的绿色箭头误当作 S_CLSN22 的碎片：`gpu` 带光标、`native_composite` 不带，光标移开后该处一致。
+
+临时改 `spawn.ini` 的 Scenario 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3b`（`anim`、`bld`、`dmg9`、`dmg10`、`vk-*`）。回归新增 `AnimImageTests` 与 `ShapeDepthTests` 的补丁混合，全部通过；Debug 构建无新警告。未实测：DoorAnim（D3b-2）、建筑槽动画的 tint、Tiled/HasExtras/写 Z 的动画、非 565 色彩打包。

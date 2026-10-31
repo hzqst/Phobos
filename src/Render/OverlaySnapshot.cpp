@@ -2,13 +2,22 @@
 #include "CompositeSnapshot.h"
 #include "TerrainPass.h"
 
+#include <AnimClass.h>
 #include <AnimTypeClass.h>
+#include <FPSCounter.h>
 #include <GameOptionsClass.h>
+#include <UnitClass.h>
+#include <Ext/Anim/Body.h>
+#include <Ext/AnimType/Body.h>
 #include <Ext/BuildingType/Body.h>
 #include <Ext/Rules/Body.h>
 #include <Ext/Techno/Body.h>
 #include <Ext/TechnoType/Body.h>
+#include <Misc/BlittersFix.h>
+#include <New/Entity/ShieldClass.h>
+#include <Utilities/AresHelper.h>
 #include <Utilities/Debug.h>
+#include <Utilities/EnumFunctions.h>
 
 #include <algorithm>
 #include <array>
@@ -31,6 +40,135 @@ namespace OverlaySnapshot
 
 		bool Representable(Point point) { return point.X >= INT_MIN && point.X <= INT_MAX && point.Y >= INT_MIN && point.Y <= INT_MAX; }
 
+		// 6D2140: the client position of coordinates, false outside its margin.
+		bool Project(const CoordStruct& coords, Point2D& client)
+		{
+			return reinterpret_cast<bool(__thiscall*)(const TacticalClass*, const CoordStruct*, Point2D*)>(CoordsToClient)(TacticalClass::Instance, &coords, &client);
+		}
+
+		// 6D20E0: the screen height of a Z.
+		int AdjustZ(int z) { return reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(z); }
+
+		// Ares 3.0p1's entry, when its export is the one these offsets belong to.
+		bool AresExport(const char* name, std::uintptr_t offset)
+		{
+			const auto base = AresHelper::AresBaseAddress;
+			return AresHelper::CanUseAres && AresHelper::AresVersion == AresHelper::Version::Ares30p
+				&& reinterpret_cast<std::uintptr_t>(GetProcAddress(reinterpret_cast<HMODULE>(base), name)) == base + offset;
+		}
+
+		// 422CA0 skips an anim above detail level 1 while the frame rate is below 55AF60's minimum; Ares'
+		// 422FCC lets it draw when its helper finds the rate high enough.
+		bool FrameRateAllows(int detailLevel)
+		{
+			if (detailLevel <= 1) return true;
+			static const bool ares = AresExport("AnimClass_Draw_Details", AresDrawDetails);
+			if (ares) return reinterpret_cast<bool(__cdecl*)()>(AresHelper::AresBaseAddress + AresFrameRateHelper)();
+			return FPSCounter::CurrentFrameRate >= Detail::GetMinFrameRate();
+		}
+
+		// Ares' 4232CE: the custom palette of the type's Ares extension, which replaces ANIM_PAL.
+		const ConvertClass* AresPalette(const AnimTypeClass* type)
+		{
+			static const bool ares = AresExport("AnimClass_Draw_SetPalette", AresSetPalette);
+			if (!ares) return nullptr;
+			const auto base = AresHelper::AresBaseAddress;
+			const auto* ext = static_cast<const std::uint8_t*>(reinterpret_cast<void*(__thiscall*)(void*, const AnimTypeClass*)>(base + AresMapFind)(
+				reinterpret_cast<void*>(base + AresAnimTypeMap), type));
+			return ext ? *reinterpret_cast<ConvertClass* const*>(ext + AresAnimPalette) : nullptr;
+		}
+
+		// Phobos' 423061: VisibleTo and RestrictVisibilityIfCloaked.
+		bool VisibleToPlayer(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext)
+		{
+			if (!typeExt->RestrictVisibilityIfCloaked && typeExt->VisibleTo == AffectedHouse::All) return true;
+			auto* techno = abstract_cast<TechnoClass*>(anim->OwnerObject);
+			auto* player = HouseClass::CurrentPlayer;
+			if (!techno && ext->IsTechnoTrailerAnim) techno = ext->Invoker;
+			if (typeExt->RestrictVisibilityIfCloaked && techno && !HouseClass::IsCurrentPlayerObserver()
+				&& (techno->CloakState == CloakState::Cloaked || techno->CloakState == CloakState::Cloaking)
+				&& !techno->Owner->IsAlliedWith(player) && !techno->GetCell()->Sensors_InclHouse(player->ArrayIndex)) return false;
+			auto* owner = anim->OwnerObject ? anim->OwnerObject->GetOwningHouse() : anim->Owner;
+			if (typeExt->VisibleTo_ConsiderInvokerAsOwner)
+			{
+				if (ext->Invoker) owner = ext->Invoker->Owner;
+				else if (ext->InvokerHouse) owner = ext->InvokerHouse;
+			}
+			return HouseClass::IsCurrentPlayerObserver() || EnumFunctions::CanTargetHouse(typeExt->VisibleTo, player, owner);
+		}
+
+		// Phobos' 423183: the level of Translucency.Cloaked while the owner cloaks, else of Translucency,
+		// at Value / End; 0 for none.
+		std::uint32_t CurveLevel(const AnimClass* anim, const AnimTypeClass* type, const AnimTypeExt* typeExt)
+		{
+			const double progress = static_cast<double>(anim->Animation.Value) / type->End;
+			if (typeExt->Translucency_Cloaked.HasValues())
+				if (const auto* techno = abstract_cast<TechnoClass*>(anim->OwnerObject))
+					if (techno->CloakState == CloakState::Cloaked || techno->CloakState == CloakState::Cloaking)
+						return std::uint32_t(typeExt->Translucency_Cloaked.Get(progress).GetBlitterFlags());
+			if (typeExt->Translucency.HasValues()) return std::uint32_t(typeExt->Translucency.Get(progress).GetBlitterFlags());
+			return 0;
+		}
+
+		// Phobos' 423122: XDrawOffset, the selection bracket alignments and the AttachEffect offset move
+		// the client point every part draws from.
+		void ApplyDrawOffset(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext, Point2D& point)
+		{
+			point.X += typeExt->XDrawOffset;
+			const bool applyX = typeExt->XDrawOffset_ApplyBracketWidth, applyY = typeExt->YDrawOffset_ApplyBracketHeight;
+			if ((applyX || applyY) && anim->OwnerObject && anim->OwnerObject->AbstractFlags & AbstractFlags::Techno)
+			{
+				// As 423122 and the shield's health bar.
+				constexpr int ShieldHealthBarOffset = -3;
+				auto* techno = static_cast<TechnoClass*>(anim->OwnerObject);
+				const bool invertX = typeExt->XDrawOffset_InvertBracketShift, invertY = typeExt->YDrawOffset_InvertBracketShift;
+				if (auto* building = abstract_cast<BuildingClass*>(techno))
+				{
+					auto* type = building->Type;
+					const auto position = TechnoExt::GetBuildingSelectBracketPosition(building, type, BuildingSelectBracketPosition::Top);
+					if (applyY && ((type->Height >= 0 && !invertY) || (type->Height < 0 && invertY)))
+						point.Y = position.Y + typeExt->YDrawOffset_BracketAdjust_Buildings.Get(typeExt->YDrawOffset_BracketAdjust);
+					if (applyX)
+					{
+						const int shift = static_cast<int>(Unsorted::CellWidthInPixels * (type->GetFoundationWidth() / 2.0) * (invertX ? -1 : 1));
+						point.X = position.X + shift + typeExt->XDrawOffset_BracketAdjust_Buildings.Get(typeExt->XDrawOffset_BracketAdjust);
+					}
+				}
+				else
+				{
+					auto* type = techno->GetTechnoType();
+					const auto position = TechnoExt::GetFootSelectBracketPosition(techno, Anchor(invertX ? HorizontalPosition::Left : HorizontalPosition::Right,
+						VerticalPosition::Top), techno->WhatAmI() == AbstractType::Infantry);
+					if (applyY && ((type->PixelSelectionBracketDelta <= 0 && !invertY) || (type->PixelSelectionBracketDelta > 0 && invertY)))
+						point.Y = position.Y + type->PixelSelectionBracketDelta + typeExt->YDrawOffset_BracketAdjust;
+					if (applyX) point.X = position.X + typeExt->XDrawOffset_BracketAdjust;
+				}
+				if (applyY)
+					if (auto* shield = TechnoExt::Fetch(techno)->Shield.get())
+					{
+						auto* shieldType = shield->GetType();
+						if (!shield->IsBrokenAndNonRespawning() && (shield->GetHealthRatio() > 0.0 || !shieldType->Pips_HideIfNoStrength)
+							&& ((shieldType->BracketDelta <= 0 && !invertY) || (shieldType->BracketDelta > 0 && invertY)))
+							point.Y += shieldType->BracketDelta + ShieldHealthBarOffset;
+					}
+			}
+			point += ext->AEDrawOffset;
+		}
+
+		// Phobos' 4232E2: the scheme of the anim's owner, else of its invoker's house when the fallback is on,
+		// else the default one, the next one when it applies lighting.
+		const ConvertClass* AltPalette(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext)
+		{
+			const auto* rulesExt = RulesExt::Global();
+			const auto* owner = anim->Owner;
+			if (typeExt->AltPalette_UseInvokerFallback.Get(rulesExt->AnimRemapUseInvokerFallback) && !owner) owner = ext->InvokerHouse;
+			const int scheme = (owner ? owner->ColorSchemeIndex - 1 : rulesExt->AnimRemapDefaultColorScheme) + (typeExt->AltPalette_ApplyLighting ? 1 : 0);
+			return SchemeConvert(scheme);
+		}
+
+		// The rounds of a tiled anim beyond which the capture gives up (the native loop never ends).
+		constexpr size_t MaxTiles = 4096;
+
 		// What one overlay draws: a frame of an image, lit and Z-adjusted, with an optional Z shape.
 		struct Call
 		{
@@ -45,8 +183,11 @@ namespace OverlaySnapshot
 			// Whether 6D6D10's test of 47FB90's rectangle applies; 6D97D0 tests the object's own one
 			// and 6D7C00 none.
 			bool Bounded = true;
-			// 2E00 and 2E01 (an animated or crumbling Terrain object) test Z without writing it.
-			bool WritesDepth = true;
+			// 2E00 and 2E01 (an animated or crumbling Terrain object) test Z without writing it; E01 (a
+			// standalone anim's shadow) does not test it either.
+			bool TestsDepth = true, WritesDepth = true;
+			// The translucency bits of a colored draw (2, 4, 6).
+			std::uint8_t Translucency = 0;
 			// 705E00's tint, which only an RLE frame's blitter applies.
 			int Tint = 0;
 			// 4D1890 cuts a fogged body's clip shorter.
@@ -206,9 +347,15 @@ namespace OverlaySnapshot
 				draw.Compressed = compressed;
 				draw.Shadow = shadow;
 				draw.Mask = call.Convert->HalfTranslucencyMask;
+				draw.QuarterMask = call.Convert->QuatTranslucencyMask;
+				draw.Translucency = shadow ? 0 : call.Translucency;
 				draw.ZShaped = zshaped;
+				draw.TestsDepth = call.TestsDepth || call.WritesDepth;
 				draw.WritesDepth = call.WritesDepth;
-				draw.Tint = compressed ? std::uint16_t(call.Tint) : 0;
+				// 437A10 takes an RLE AlphaZRead blitter for a frame that reads Z without writing it.
+				draw.Rounded = draw.Translucency && compressed && call.TestsDepth && !call.WritesDepth && BlittersFix::Applied;
+				// The translucent blitters' tinted copies ignore the tint (gamemd-reverse #22 §7).
+				draw.Tint = compressed && !draw.Translucency ? std::uint16_t(call.Tint) : 0;
 				if (zshaped && !ReadZBytes(shape, cut, draw)) { ++count.ZShape; return; }
 				draw.ZAdjust = call.ZAdjust;
 				draw.GradientIndex = call.Gradient;
@@ -661,6 +808,182 @@ namespace OverlaySnapshot
 				}
 			}
 
+			// 422C70 -> 5F4B10 -> 422CA0 for an anim RenderLayers dispatched (gamemd-reverse #27 §4), with
+			// Phobos' 423061, 423122, 423183, 4232BF, 4232E2, 423365, 423420, 423654, 423660, 4236F0 and 423855
+			// and Ares' 422FCC and 4232CE: the HasExtras shadow, then a tiled, flat or plain body, the plain one
+			// followed by its Type.Shadow shadow.
+			void Anim(AnimClass* anim)
+			{
+				auto& count = *Count;
+				// 422C70 draws once the loop delay has run out; 5F4B10 (forced) skips limbo in a normal window
+				// and needs the render coords projected.
+				if (anim->LoopDelay) { ++count.AnimsDelayed; return; }
+				if (!Unsorted::ArmageddonMode && Game::hWnd && anim->InLimbo) { ++count.AnimsLimbo; return; }
+				const auto coords = anim->GetRenderCoords();
+				Point2D client {};
+				if (!Project(coords, client)) { ++count.AnimsUnprojected; return; }
+				auto* type = anim->Type;
+				// 422CA0 draws RING1 as two Direct3D triangles, which the capture does not model.
+				if (*reinterpret_cast<const bool*>(Direct3DUsable) && ZBuffer::Instance && !_strcmpi(type->ID, "RING1")) { ++count.AnimsRing; return; }
+				if (!FrameRateAllows(type->DetailLevel) || anim->Invisible || type->DetailLevel > GameOptionsClass::Instance.DetailLevel
+					|| (anim->IsFogged && type->ShouldFogRemove)) { ++count.AnimsHidden; return; }
+				auto* image = anim->GetImage();
+				if (!image) { ++count.AnimsNoImage; return; }
+				const auto* typeExt = AnimTypeExt::Fetch(type);
+				const auto* ext = AnimExt::Fetch(anim);
+				if (!typeExt || !ext) { ++count.AnimsUnsupported; return; }
+				if (!VisibleToPlayer(anim, typeExt, ext)) { ++count.AnimsHidden; return; }
+				const int frame = AnimImage::Frame(type->Start, anim->Animation.Value);
+				std::uint32_t flags = std::uint32_t(anim->AnimFlags);
+				if (anim->UnderTemporal) flags |= AnimImage::TemporalBits(type->DoubleThick);
+				if (type->TranslucencyDetailLevel <= GameOptionsClass::Instance.DetailLevel)
+				{
+					const auto translucency = type->Translucent ? AnimImage::Staged(std::int8_t(anim->TranslucencyLevel), anim->Animation.Value, type->End)
+						: AnimImage::Curve(anim->TranslucencyLevel, CurveLevel(anim, type, typeExt));
+					if (translucency.Skip) { ++count.AnimsHidden; return; }
+					flags |= translucency.Bits;
+				}
+				flags = AnimImage::ColorFlags(flags);
+				Point2D point = client;
+				ApplyDrawOffset(anim, typeExt, ext, point);
+
+				// #27 §4.3: the palette and brightness.
+				auto* renderCell = MapClass::Instance.TryGetCellAt(coords);
+				if (!renderCell) { ++count.Palette; return; }
+				const bool normalLight = type->UseNormalLight;
+				const ConvertClass* convert = nullptr;
+				int brightness = FullBrightness;
+				if (type->IsVeins)
+				{
+					convert = HouseClass::CurrentPlayer ? SchemeConvert(HouseClass::CurrentPlayer->ColorSchemeIndex) : nullptr;
+					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Terrain);
+				}
+				else if (anim->UseCellLightConvert)
+				{
+					// The native draw ran first and made the cell's LightConvert where it was missing.
+					convert = renderCell->LightConvert;
+					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Terrain);
+				}
+				else if (anim->LightConvert)
+				{
+					// The building's drawer and intensity a slot anim keeps; Phobos' 4232BF lights a MakeInfantry
+					// anim by its own cell.
+					convert = anim->LightConvert;
+					if (!normalLight) brightness = type->MakeInfantry != -1 ? int(anim->GetCell()->Intensity_Normal) : anim->TintColor;
+				}
+				else
+				{
+					convert = FileSystem::ANIM_PAL;
+					if (const auto* custom = AresPalette(type)) convert = custom;
+					if (type->AltPalette) convert = AltPalette(anim, typeExt, ext);
+					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Normal);
+				}
+				if (!convert) { ++count.Palette; return; }
+
+				// Phobos' 423420 replaces the tint of a building anim: the building on its cell, else the one it
+				// belongs to, with the custom tint and intensity; a shrouded cell clears it.
+				const auto center = anim->GetCoords();
+				auto* centerCell = MapClass::Instance.TryGetCellAt(center);
+				if (!centerCell) { ++count.Palette; return; }
+				int tint = 0;
+				if (anim->IsBuildingAnim)
+				{
+					// For a unit's deploying anim it takes the unit's own intensity, which the capture does not model.
+					const auto* unit = abstract_cast<UnitClass*>(anim->OwnerObject);
+					if (unit && unit->DeployAnim == anim) { ++count.AnimsUnsupported; return; }
+					TechnoClass* techno = centerCell->GetBuilding();
+					if (!techno) techno = ext->ParentBuilding;
+					if (techno)
+					{
+						tint |= TechnoExt::GetTintColor(techno, true, true, false);
+						int discard = 0;
+						TechnoExt::ApplyCustomTintValues(techno, tint, normalLight ? discard : brightness);
+					}
+				}
+				if (centerCell->IsShrouded()) tint = 0;
+
+				const int height = AdjustZ(anim->GetZ()), y = type->YDrawOffset, index = type->ArrayIndex;
+				const auto at = [&](int x, int row) { return Point {std::int64_t(x) + ViewX, std::int64_t(row) + ViewY}; };
+				const auto submit = [&](const ConvertClass* palette, int shapeFrame, Point position, std::uint32_t partFlags, int zAdjust, ZGradient gradient,
+					int light, int partTint)
+				{
+					Call call;
+					call.Image = image;
+					call.Frame = shapeFrame;
+					call.Convert = palette;
+					call.Brightness = light;
+					call.ZAdjust = zAdjust;
+					call.Gradient = int(gradient);
+					call.Bounded = false;
+					call.Tint = partTint;
+					const auto mode = AnimImage::DepthMode(partFlags);
+					call.TestsDepth = mode.Test;
+					call.WritesDepth = mode.Write;
+					const bool shadow = partFlags & AnimImage::ShadowFlag;
+					call.Translucency = std::uint8_t(partFlags & AnimImage::TranslucencyMask);
+					const auto drawn = Target->size();
+					Place(renderCell->MapCoords.X, renderCell->MapCoords.Y, Layer::Anim, index, call, position, shadow);
+					if (Target->size() == drawn) return;
+					const auto& draw = Target->back();
+					count.AnimsTranslucent += draw.Translucency != 0;
+					count.AnimsWriting += draw.WritesDepth;
+					count.AnimsTinted += draw.Tint != 0;
+				};
+				// Phobos' 423365 draws the HasExtras shadow only with ExtraShadow: at the ground below, over the
+				// current frame.
+				if (anim->HasExtras && typeExt->ExtraShadow)
+				{
+					++count.AnimsExtras;
+					submit(convert, frame, at(point.X, AnimImage::Add32(AnimImage::Add32(point.Y, AdjustZ(anim->GetHeight())), y)), AnimImage::ExtrasShadowFlags,
+						AnimImage::ExtrasZAdjust(y, height), ZGradient::Ground, FullBrightness, 0);
+				}
+				const auto body = AnimImage::BodyFlags(flags);
+				if (type->Tiled)
+				{
+					// 69E7E0's frame 0 height, or Phobos' Tiled.Interval (423654), steps the tiles; Phobos'
+					// 423660 may start them at the point itself, and its 4236F0 gives them the type's palette.
+					const auto* data = ShapeData(image);
+					const auto base = reinterpret_cast<std::uintptr_t>(data);
+					if (!data || data->Frames <= 0 || !CursorSnapshot::Readable(reinterpret_cast<const void*>(base + sizeof(SHPStruct)), sizeof(SHPFrame)))
+					{
+						++count.Frame;
+						return;
+					}
+					const int step = typeExt->Tiled_Interval > 0 ? int(typeExt->Tiled_Interval) : int(data->AsFile()->GetFrameHeader(0).Height);
+					std::vector<AnimImage::TiledStep> steps;
+					if (!AnimImage::TiledSteps(point.Y, step, typeExt->Tiled_AlignToCenter ? 0 : step / 2,
+						AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::TiledDepth), steps, MaxTiles)) { ++count.AnimsUnsupported; return; }
+					const auto* palette = typeExt->Palette.GetOrDefaultConvert(FileSystem::ANIM_PAL);
+					for (const auto& tile : steps)
+					{
+						++count.AnimsTiled;
+						submit(palette, frame, at(point.X, AnimImage::Add32(tile.Y, y)), body, tile.ZAdjust, ZGradient::Deg90, brightness, tint);
+					}
+					return;
+				}
+				const auto position = at(point.X, AnimImage::Add32(point.Y, y));
+				if (type->Flat)
+				{
+					submit(convert, frame, position, body, AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::FlatDepth), ZGradient::Ground, brightness, tint);
+					return;
+				}
+				submit(convert, frame, position, body, AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::BodyDepth), ZGradient::Deg90, brightness, tint);
+				if (!type->Shadow) return;
+				const int frames = FrameCount(image);
+				if (frames == UnloadedShape) { ++count.Unloaded; return; }
+				if (frames < 0) { ++count.Frame; return; }
+				// Phobos' 423855 casts the shadow of a deploying anim in the air onto its unit's cell.
+				int z = anim->GetZ();
+				if (auto* unit = abstract_cast<UnitClass*>(anim->OwnerObject); unit && unit->DeployAnim == anim && unit->GetHeight() > 0)
+				{
+					const auto ground = unit->GetCell()->GetCenterCoords();
+					point = TacticalClass::Instance->CoordsToClient(ground).first;
+					z = ground.Z;
+				}
+				submit(convert, AnimImage::ShadowFrame(frame, std::int16_t(frames)), at(point.X, point.Y), AnimImage::ShadowOf(flags),
+					AnimImage::ShadowZAdjust(AdjustZ(z)), ZGradient::Ground, FullBrightness, 0);
+			}
+
 			// 4802A0 and 547230 for a cell of 6D7C00's scan: the C_SHADOW.SHP frame its tile casts.
 			void Cliff(const CellClass* cell, int cellX, int cellY)
 			{
@@ -714,7 +1037,8 @@ namespace OverlaySnapshot
 
 		// 6D8DB0: every layer in order and each of its objects in place. Its Terrain branch (6D9224)
 		// draws an animated or crumbling object whose Location is in the view range and not fogged
-		// (5865E0); the other objects only count, for the trace's conditions.
+		// (5865E0); its anim branch (6D9187) draws an anim whose GetCoords are in the range and, unless it
+		// is a building's or keeps out of fog, not fogged. The other objects only count, for the trace.
 		void CaptureComposite(Capture& capture, const TacticalClass& tactical)
 		{
 			capture.Target = &Current.CompositeDraws;
@@ -731,6 +1055,21 @@ namespace OverlaySnapshot
 					++count.LayerObjects;
 					const auto location = object->Location;
 					const bool inRange = TerrainObjectImage::InViewRange(range, location.X, location.Y);
+					if (object->WhatAmI() == AbstractType::Anim)
+					{
+						auto* anim = static_cast<AnimClass*>(object);
+						if (!CursorSnapshot::Readable(anim, sizeof(AnimClass)) || !CursorSnapshot::Readable(anim->Type, sizeof(AnimTypeClass)))
+						{
+							++count.Frame;
+							continue;
+						}
+						++count.Anims;
+						const auto coords = anim->GetCoords();
+						if (!TerrainObjectImage::InViewRange(range, coords.X, coords.Y)) { ++count.AnimsOutOfRange; continue; }
+						if (!anim->IsBuildingAnim && anim->Type->ShouldFogRemove && MapClass::Instance.IsLocationFogged(coords)) { ++count.AnimsFogged; continue; }
+						capture.Anim(anim);
+						continue;
+					}
 					if (object->WhatAmI() != AbstractType::Terrain)
 					{
 						++count.Others;
@@ -852,7 +1191,7 @@ namespace OverlaySnapshot
 						if (!index) continue;
 						const auto at = size_t(draw.Y - clip.Y + j) * clip.Width + size_t(draw.X - clip.X + i);
 						const auto value = ShapeDepth::Depth(base, zrow ? zrow[i] : 0);
-						if (!ShapeDepth::Passes(value, model.Depth[at])) { ++model.Rejected; continue; }
+						if (draw.TestsDepth && !ShapeDepth::Passes(value, model.Depth[at])) { ++model.Rejected; continue; }
 						if (draw.WritesDepth) model.Depth[at] = std::uint16_t(value);
 						if (draw.Shadow)
 						{
@@ -862,8 +1201,15 @@ namespace OverlaySnapshot
 						else
 						{
 							const int shade = TerrainImage::ShadeRow(int(draw.Table->Shades), draw.LightRow, model.Alpha[at]);
-							model.Color[at] = colors[size_t(shade) * 256 + index] | draw.Tint;
-							model.Unknown[at] = 0;
+							const auto incoming = std::uint16_t(colors[size_t(shade) * 256 + index] | draw.Tint);
+							// A translucent draw over a color the model does not know stays unknown.
+							if (draw.Rounded) model.Color[at] = ShapeDepth::RoundedBlend(model.Color[at], incoming, draw.Translucency);
+							else if (draw.Translucency) model.Color[at] = ShapeDepth::Blend(model.Color[at], incoming, draw.Translucency, draw.Mask, draw.QuarterMask);
+							else
+							{
+								model.Color[at] = incoming;
+								model.Unknown[at] = 0;
+							}
 						}
 						model.Owner[at] = int(drawIndex);
 					}
@@ -1049,6 +1395,7 @@ namespace OverlaySnapshot
 			case Layer::Cliff: return 'c';
 			case Layer::Building: return 'b';
 			case Layer::Fogged: return 'f';
+			case Layer::Anim: return 'n';
 			default: return 'a';
 			}
 		}
@@ -1137,14 +1484,33 @@ namespace OverlaySnapshot
 				TraceCount, composite.LayerObjects, composite.Others, composite.OthersInRange, composite.OthersVisible, composite.OthersUnbounded, composite.Animated, composite.OutOfRange, composite.LocationFogged,
 				composite.TerrainOutside, composite.Bodies, composite.Shadows, composite.Compressed, composite.Palette, composite.Frame, composite.NoImage,
 				composite.Unloaded, composite.Empty, composite.Outside, composite.Unsupported, composite.Damaged, CompositeSnapshot::Failed);
+			// D3b: the anims of the layers.
+			Debug::Log("[TerrainGPU] compositeanims sample=%u anims=%d outOfRange=%d fogged=%d delayed=%d limbo=%d unprojected=%d ring=%d hidden=%d noImage=%d "
+				"unsupported=%d translucent=%d writing=%d tiled=%d extras=%d tinted=%d\n", TraceCount, composite.Anims, composite.AnimsOutOfRange,
+				composite.AnimsFogged, composite.AnimsDelayed, composite.AnimsLimbo, composite.AnimsUnprojected, composite.AnimsRing, composite.AnimsHidden,
+				composite.AnimsNoImage, composite.AnimsUnsupported, composite.AnimsTranslucent, composite.AnimsWriting, composite.AnimsTiled,
+				composite.AnimsExtras, composite.AnimsTinted);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
-				char item[48];
-				std::snprintf(item, sizeof(item), " %d@%d,%d:%d%s", draw.Index, draw.CellX, draw.CellY, draw.ShapeFrame, draw.Shadow ? "s" : "");
+				char item[64];
+				std::snprintf(item, sizeof(item), " %c%d@%d,%d:%d%s%s%s", LayerLetter(draw.Source), draw.Index, draw.CellX, draw.CellY, draw.ShapeFrame,
+					draw.Shadow ? "s" : "", draw.Translucency ? "t" : "", draw.WritesDepth ? "w" : (draw.TestsDepth ? "" : "n"));
 				draws += item;
 			}
 			if (!draws.empty()) Debug::Log("[TerrainGPU] compositedraws sample=%u%s\n", TraceCount, draws.c_str());
+			// D3b: each anim draw's type, frame, flags, Tile rectangle, ZAdjust and light row.
+			std::string anims;
+			for (const auto& draw : Current.CompositeDraws)
+			{
+				if (draw.Source != Layer::Anim) continue;
+				const auto* type = draw.Index >= 0 && draw.Index < AnimTypeClass::Array.Count ? AnimTypeClass::Array.Items[draw.Index] : nullptr;
+				char item[96];
+				std::snprintf(item, sizeof(item), " %s:%d%s%s@%d,%d,%dx%d:z=%d:q=%d", type ? type->ID : "?", draw.ShapeFrame, draw.Shadow ? "s" : "",
+					draw.Translucency ? "t" : "", draw.X, draw.Y, draw.Width, draw.Height, draw.ZAdjust, draw.LightRow);
+				anims += item;
+			}
+			if (!anims.empty()) Debug::Log("[TerrainGPU] compositeanimdraws sample=%u%s\n", TraceCount, anims.c_str());
 			const auto compositeCheck = CompositeReplay(TerrainSnapshot::Current.Clip);
 			Debug::Log("[TerrainGPU] compositecheck sample=%u input=%s output=%s inputCompared=%d inputMismatched=%d inputFirst=%d,%d:tile=%04X:copy=%04X "
 				"compared=%d drawn=%d mismatched=%d untouched=%d others=%d unexplained=%d body=%d shadow=%d rejected=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",

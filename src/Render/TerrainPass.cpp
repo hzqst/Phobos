@@ -31,10 +31,15 @@ namespace TerrainPass
 
 		// Images without Z data, which neither test nor write it, and images with it.
 		SDL_GPUGraphicsPipeline* TilePipelines[2] {};
-		// Overlay bodies and their shadows, both testing strictly smaller depths and writing them.
-		SDL_GPUGraphicsPipeline* ShapePipelines[2] {};
-		// The same for mode 2's animated Terrain (2E00, 2E01), which tests depths without writing them.
-		SDL_GPUGraphicsPipeline* LayerPipelines[2] {};
+		// 4AED70's draws by kind (a body, a shadow, a translucent body) and Z mode (none, a test of strictly
+		// smaller depths, the test with the write): the Tile pass's overlays, Terrain objects and
+		// buildings test and write, mode 2's animated Terrain (2E00, 2E01) only tests, its anims any.
+		enum ShapeKind : std::uint32_t { BodyKind, ShadowKind, TranslucentKind, ShapeKinds };
+		enum DepthMode : std::uint32_t { NoDepth, TestDepth, WriteDepth, DepthModes };
+		SDL_GPUGraphicsPipeline* ShapePipelines[ShapeKinds][DepthModes] {};
+		// A run's Mode: the pipeline, and above it the number of the group of translucent draws, which
+		// ends where one meets an earlier one of the group: each group reads its own copy of the target.
+		constexpr std::uint32_t PipelineMask = 0xFF, GroupShift = 8;
 		SDL_GPUGraphicsPipeline* CompositePipeline = nullptr;
 		SDL_GPUTextureFormat DepthFormat = SDL_GPU_TEXTUREFORMAT_INVALID;
 		SDL_GPUTexture* TableTexture = nullptr;
@@ -42,12 +47,14 @@ namespace TerrainPass
 		// The tactical target, ViewBounds' size.
 		SDL_GPUTexture* ColorTexture = nullptr;
 		SDL_GPUTexture* DepthTexture = nullptr;
+		// The target's colors before a run of translucent draws.
+		SDL_GPUTexture* CopyTexture = nullptr;
 		int Width = 0, Height = 0;
 		// The tile images, then one instance that draws the tactical target onto the canvas.
 		InstanceBuffer Tiles;
 		std::vector<TerrainBatch::Run> Runs;
-		// Overlay runs follow the tile runs, and 6D8DB0's runs on Composite follow them; their Depth
-		// marks shadows.
+		// Overlay runs follow the tile runs, and 6D8DB0's runs on Composite follow them; their Mode
+		// selects the pipeline.
 		std::vector<TerrainBatch::Run> ShapeRuns, LayerRuns;
 		StorageBuffer<TerrainBatch::Shape> Shapes;
 		// The Z shape bytes of the overlays, four to a word.
@@ -77,18 +84,20 @@ namespace TerrainPass
 		{
 			if (ColorTexture) SDL_ReleaseGPUTexture(device, ColorTexture);
 			if (DepthTexture) SDL_ReleaseGPUTexture(device, DepthTexture);
-			ColorTexture = nullptr; DepthTexture = nullptr;
+			if (CopyTexture) SDL_ReleaseGPUTexture(device, CopyTexture);
+			ColorTexture = nullptr; DepthTexture = nullptr; CopyTexture = nullptr;
 			Width = Height = 0;
 		}
 
 		// Released textures stay alive until the GPU no longer uses them.
 		bool PrepareTargets(SDL_GPUDevice* device, int width, int height)
 		{
-			if (ColorTexture && DepthTexture && width == Width && height == Height) return true;
+			if (ColorTexture && DepthTexture && CopyTexture && width == Width && height == Height) return true;
 			ReleaseTargets(device);
 			ColorTexture = CreateTarget(device, ColorFormat, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER, width, height);
 			DepthTexture = CreateTarget(device, DepthFormat, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET, width, height);
-			if (!ColorTexture || !DepthTexture) { ReleaseTargets(device); return false; }
+			CopyTexture = CreateTarget(device, ColorFormat, SDL_GPU_TEXTUREUSAGE_SAMPLER, width, height);
+			if (!ColorTexture || !DepthTexture || !CopyTexture) { ReleaseTargets(device); return false; }
 			Width = width;
 			Height = height;
 			return true;
@@ -144,11 +153,10 @@ namespace TerrainPass
 		depth.enable_depth_write = true;
 		depth.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
 		TilePipelines[1] = CreatePipeline(device, tile, 3, color, &depth, DepthFormat);
-		// 4AED70's Z-testing blitters draw where the new depth is strictly smaller and write it; a
-		// shadow multiplies the old color by the shader's alpha of 1/2.
+		// 4AED70's Z-testing blitters draw where the new depth is strictly smaller (and may write it); a
+		// shadow multiplies the old color by the shader's alpha of 1/2; a translucent body mixes in the
+		// shader and draws opaque.
 		const auto shape = GPUShader::Make(g_TerrainShape_ps_DXIL, g_TerrainShape_ps_SPIRV);
-		depth.compare_op = SDL_GPU_COMPAREOP_LESS;
-		ShapePipelines[0] = CreatePipeline(device, shape, 3, color, &depth, DepthFormat, 2);
 		SDL_GPUColorTargetDescription darken = color;
 		darken.blend_state.enable_blend = true;
 		darken.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
@@ -157,16 +165,23 @@ namespace TerrainPass
 		darken.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
 		darken.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
 		darken.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-		ShapePipelines[1] = CreatePipeline(device, shape, 3, darken, &depth, DepthFormat, 2);
-		// Composite starts as Tile's copy with Tile's ZBuffer; 2E00 and 2E01 only test it.
-		depth.enable_depth_write = false;
-		LayerPipelines[0] = CreatePipeline(device, shape, 3, color, &depth, DepthFormat, 2);
-		LayerPipelines[1] = CreatePipeline(device, shape, 3, darken, &depth, DepthFormat, 2);
+		bool shapes = true;
+		for (std::uint32_t mode = 0; mode < DepthModes; ++mode)
+		{
+			SDL_GPUDepthStencilState test {};
+			test.enable_depth_test = mode != NoDepth;
+			test.enable_depth_write = mode == WriteDepth;
+			test.compare_op = mode == NoDepth ? SDL_GPU_COMPAREOP_ALWAYS : SDL_GPU_COMPAREOP_LESS;
+			for (std::uint32_t kind = 0; kind < ShapeKinds; ++kind)
+			{
+				ShapePipelines[kind][mode] = CreatePipeline(device, shape, 4, kind == ShadowKind ? darken : color, &test, DepthFormat, 2);
+				shapes = shapes && ShapePipelines[kind][mode];
+			}
+		}
 		SDL_GPUColorTargetDescription window {};
 		window.format = target;
 		CompositePipeline = CreatePipeline(device, GPUShader::Make(g_TerrainComposite_ps_DXIL, g_TerrainComposite_ps_SPIRV), 1, window);
-		if (!TilePipelines[0] || !TilePipelines[1] || !ShapePipelines[0] || !ShapePipelines[1] || !LayerPipelines[0] || !LayerPipelines[1]
-			|| !CompositePipeline) return false;
+		if (!TilePipelines[0] || !TilePipelines[1] || !shapes || !CompositePipeline) return false;
 
 		SDL_GPUSamplerCreateInfo sampler {};
 		sampler.min_filter = SDL_GPU_FILTER_NEAREST;
@@ -196,11 +211,16 @@ namespace TerrainPass
 
 	void Release(SDL_GPUDevice* device)
 	{
-		for (auto* pipelines : {TilePipelines, ShapePipelines, LayerPipelines})
-			for (int i = 0; i < 2; ++i)
+		for (auto*& pipeline : TilePipelines)
+		{
+			if (pipeline) SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+			pipeline = nullptr;
+		}
+		for (auto& pipelines : ShapePipelines)
+			for (auto*& pipeline : pipelines)
 			{
-				if (pipelines[i]) SDL_ReleaseGPUGraphicsPipeline(device, pipelines[i]);
-				pipelines[i] = nullptr;
+				if (pipeline) SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+				pipeline = nullptr;
 			}
 		if (CompositePipeline) SDL_ReleaseGPUGraphicsPipeline(device, CompositePipeline);
 		if (Sampler) SDL_ReleaseGPUSampler(device, Sampler);
@@ -238,16 +258,23 @@ namespace TerrainPass
 			auto& instances = Tiles.Instances;
 			const auto first = std::uint32_t(instances.size());
 			std::vector<const void*> pages;
-			std::vector<std::uint8_t> shadows;
+			std::vector<std::uint32_t> modes;
 			const auto& pack = Unsorted::ColorPackData;
-			const auto mask = TerrainBatch::HalfMask({pack._R_SHL, pack._G_SHL, pack._B_SHL},
-				{int(ChannelBits(pack._R_SHR)), int(ChannelBits(pack._G_SHR)), int(ChannelBits(pack._B_SHR))});
+			const int shifts[3] {pack._R_SHL, pack._G_SHL, pack._B_SHL};
+			const int bits[3] {int(ChannelBits(pack._R_SHR)), int(ChannelBits(pack._G_SHR)), int(ChannelBits(pack._B_SHR))};
+			const auto mask = TerrainBatch::HalfMask(shifts, bits), quarter = TerrainBatch::QuarterMask(shifts, bits);
+			// The translucent draws since the last copy of the target, and their group.
+			std::vector<TerrainBatch::Rect> group;
+			std::uint32_t groups = 0;
 			for (const auto& draw : draws)
 			{
 				const auto atlasView = atlas.Resolve(Request(draw));
 				TerrainBatch::Instance instance;
-				// Halving every channel of the integer target needs the color pack's own mask.
-				if (!atlasView.Texture || !draw.Table || (draw.Shadow && (draw.Mask & 0xFFFF) != mask)
+				// Halving or quartering every channel of the integer target needs the color pack's own masks;
+				// the patched blitters' mask rounds per channel only where it clears the channels' low bits.
+				if (!atlasView.Texture || !draw.Table || ((draw.Shadow || draw.Translucency) && (draw.Mask & 0xFFFF) != mask)
+					|| (draw.Translucency && (draw.QuarterMask & 0xFFFF) != quarter)
+					|| (draw.Rounded && ShapeDepth::RoundedMask >> 1 != mask)
 					|| !TerrainBatch::PlaceShape(draw.X, draw.Y, draw.Width, draw.Height, -view.X, -view.Y,
 						atlasView.X + draw.FrameX, atlasView.Y + draw.FrameY, draw.Table->Row, draw.Table->Shades, draw.LightRow,
 						std::uint32_t(Shapes.Instances.size()), instance))
@@ -256,8 +283,10 @@ namespace TerrainPass
 					continue;
 				}
 				const auto& rows = draw.Rows;
+				const std::uint32_t flags = (draw.Shadow ? TerrainBatch::ShadowShape : 0u) | (draw.Translucency & TerrainBatch::TranslucentShape)
+					| (draw.TestsDepth ? 0u : TerrainBatch::UntestedShape) | (draw.Rounded ? TerrainBatch::RoundedShape : 0u);
 				TerrainBatch::Shape shape {rows.Base, std::uint32_t(rows.Accumulator), rows.Steps ? std::uint32_t(draw.Gradient.RowsPerBand) : 0u,
-					std::uint32_t(draw.Gradient.BandLimit), draw.Gradient.BandDelta, TerrainBatch::NoZ, draw.Shadow ? TerrainBatch::ShadowShape : 0u, draw.Tint};
+					std::uint32_t(draw.Gradient.BandLimit), draw.Gradient.BandDelta, TerrainBatch::NoZ, flags, draw.Tint};
 				if (draw.ZShaped)
 				{
 					shape.ZOffset = std::uint32_t(packed.size());
@@ -266,10 +295,30 @@ namespace TerrainPass
 				Shapes.Instances.push_back(shape);
 				instances.push_back(instance);
 				pages.push_back(atlasView.Texture);
-				shadows.push_back(draw.Shadow ? 1 : 0);
+				const auto kind = draw.Shadow ? ShadowKind : draw.Translucency ? TranslucentKind : BodyKind;
+				const auto depth = draw.WritesDepth ? WriteDepth : draw.TestsDepth ? TestDepth : NoDepth;
+				// Any other draw changes the target, and a translucent one over a pixel of its group would read
+				// the color from before the group.
+				const TerrainBatch::Rect rect {draw.X, draw.Y, draw.Width, draw.Height};
+				const auto meets = [&rect](const TerrainBatch::Rect& other)
+				{
+					return rect.X < other.X + other.Width && other.X < rect.X + rect.Width && rect.Y < other.Y + other.Height && other.Y < rect.Y + rect.Height;
+				};
+				if (kind != TranslucentKind) group.clear();
+				else if (std::any_of(group.begin(), group.end(), meets) || modes.empty() || (modes.back() & PipelineMask) / DepthModes != TranslucentKind)
+				{
+					group.assign(1, rect);
+					++groups;
+				}
+				else group.push_back(rect);
+				modes.push_back(std::uint32_t(kind) * DepthModes + std::uint32_t(depth) + (kind == TranslucentKind ? groups << GroupShift : 0u));
 			}
-			auto runs = TerrainBatch::Split(pages, shadows);
-			for (auto& run : runs) run.First += first;
+			std::vector<TerrainBatch::Run> runs;
+			for (std::uint32_t i = 0; i < pages.size(); ++i)
+			{
+				if (runs.empty() || runs.back().Page != pages[i] || runs.back().Mode != modes[i]) runs.push_back({pages[i], first + i, 1, false, modes[i]});
+				else ++runs.back().Count;
+			}
 			return runs;
 		}
 	}
@@ -370,19 +419,20 @@ namespace TerrainPass
 		target.load_op = SDL_GPU_LOADOP_CLEAR;
 		target.store_op = SDL_GPU_STOREOP_STORE;
 		target.cycle = true;
+		// The depth outlives a pass that a run of translucent draws ends to copy the colors.
 		SDL_GPUDepthStencilTargetInfo depth {};
 		depth.texture = DepthTexture;
 		depth.clear_depth = ClearDepth;
 		depth.load_op = SDL_GPU_LOADOP_CLEAR;
-		depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+		depth.store_op = SDL_GPU_STOREOP_STORE;
 		depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
 		depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
 		depth.cycle = true;
 		auto* pass = SDL_BeginGPURenderPass(commands, &target, 1, &depth);
 		if (!pass) return false;
+		const SDL_GPUViewport viewport {0.0f, 0.0f, float(Width), float(Height), 0.0f, 1.0f};
 		if (!Runs.empty() && Tiles.Buffer && abuffer)
 		{
-			const SDL_GPUViewport viewport {0.0f, 0.0f, float(Width), float(Height), 0.0f, 1.0f};
 			SDL_SetGPUViewport(pass, &viewport);
 			SDL_BindGPUVertexStorageBuffers(pass, 0, &Tiles.Buffer, 1);
 			const auto& pack = Unsorted::ColorPackData;
@@ -410,12 +460,36 @@ namespace TerrainPass
 			{
 				SDL_GPUBuffer* buffers[2] {Shapes.Buffer, ZBytes.Buffer};
 				// The Tile pass's shapes, then what RenderLayers draws over Tile's copy.
-				std::vector<std::pair<const TerrainBatch::Run*, SDL_GPUGraphicsPipeline*>> ordered;
-				for (const auto& run : ShapeRuns) ordered.push_back({&run, ShapePipelines[run.Depth ? 1 : 0]});
-				for (const auto& run : LayerRuns) ordered.push_back({&run, LayerPipelines[run.Depth ? 1 : 0]});
-				for (const auto& [shapeRun, pipeline] : ordered)
+				std::vector<const TerrainBatch::Run*> ordered;
+				for (const auto& run : ShapeRuns) ordered.push_back(&run);
+				for (const auto& run : LayerRuns) ordered.push_back(&run);
+				std::uint32_t copied = 0;
+				for (const auto* shapeRun : ordered)
 				{
 					const auto& run = *shapeRun;
+					const auto pipelineIndex = run.Mode & PipelineMask;
+					// A new group of translucent draws reads the colors drawn so far from a copy.
+					if (pipelineIndex / DepthModes == TranslucentKind && run.Mode >> GroupShift != copied)
+					{
+						copied = run.Mode >> GroupShift;
+						SDL_EndGPURenderPass(pass);
+						auto* copy = SDL_BeginGPUCopyPass(commands);
+						if (!copy) return false;
+						const SDL_GPUTextureLocation from {ColorTexture, 0, 0, 0, 0, 0};
+						const SDL_GPUTextureLocation to {CopyTexture, 0, 0, 0, 0, 0};
+						SDL_CopyGPUTextureToTexture(copy, &from, &to, Uint32(Width), Uint32(Height), 1, true);
+						SDL_EndGPUCopyPass(copy);
+						target.load_op = SDL_GPU_LOADOP_LOAD;
+						target.cycle = false;
+						depth.load_op = SDL_GPU_LOADOP_LOAD;
+						depth.cycle = false;
+						pass = SDL_BeginGPURenderPass(commands, &target, 1, &depth);
+						if (!pass) return false;
+						SDL_SetGPUViewport(pass, &viewport);
+						SDL_BindGPUVertexStorageBuffers(pass, 0, &Tiles.Buffer, 1);
+						bound = nullptr;
+					}
+					auto* pipeline = ShapePipelines[pipelineIndex / DepthModes][pipelineIndex % DepthModes];
 					if (pipeline != bound)
 					{
 						SDL_BindGPUGraphicsPipeline(pass, pipeline);
@@ -423,9 +497,9 @@ namespace TerrainPass
 						SDL_BindGPUFragmentStorageBuffers(pass, 0, buffers, 2);
 						bound = pipeline;
 					}
-					const SDL_GPUTextureSamplerBinding bindings[3] {
-						{static_cast<SDL_GPUTexture*>(const_cast<void*>(run.Page)), Sampler}, {TableTexture, Sampler}, {abuffer, Sampler}};
-					SDL_BindGPUFragmentSamplers(pass, 0, bindings, 3);
+					const SDL_GPUTextureSamplerBinding bindings[4] {
+						{static_cast<SDL_GPUTexture*>(const_cast<void*>(run.Page)), Sampler}, {TableTexture, Sampler}, {abuffer, Sampler}, {CopyTexture, Sampler}};
+					SDL_BindGPUFragmentSamplers(pass, 0, bindings, 4);
 					const ViewUniforms view {{Uint32(Width), Uint32(Height), run.First, 0}};
 					SDL_PushGPUVertexUniformData(commands, 0, &view, sizeof(view));
 					SDL_DrawGPUPrimitives(pass, run.Count * VerticesPerTile, 1, 0, 0);

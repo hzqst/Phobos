@@ -194,4 +194,42 @@ namespace ShapeDepth
 
 	// The shadow blitter's darkening of the old 16-bit color.
 	constexpr std::uint16_t Darken(std::uint16_t color, std::uint32_t mask) { return std::uint16_t((color >> 1) & mask); }
+
+	// The translucent blitters (flag bits 2, 4, 6) add integer channel parts of the incoming and the old
+	// 16-bit color (gamemd-reverse #22 §7): 25% keeps three quarters of the incoming one, 50% half of
+	// each, 75% a quarter of the incoming one. half and quarter are the HalfTranslucencyMask and
+	// QuarterTranslucencyMask. Other bits leave the incoming color.
+	constexpr std::uint16_t Blend(std::uint16_t old, std::uint16_t incoming, std::uint32_t bits, std::uint32_t half, std::uint32_t quarter)
+	{
+		const std::uint32_t a = (incoming >> 2) & quarter, b = (old >> 2) & quarter;
+		switch (bits)
+		{
+		case 2: return std::uint16_t(3 * a + b);
+		case 4: return std::uint16_t(((incoming >> 1) & half) + ((old >> 1) & half));
+		case 6: return std::uint16_t(a + 3 * b);
+		default: return incoming;
+		}
+	}
+
+	// Phobos' FixTransparencyBlitters (BlittersFix.cpp) replaces the mixing of the RLE AlphaZRead blitters
+	// (437A10's frames that read but do not write Z) with Average, the rounded-up mean of two 16-bit colors
+	// for 565's channel low bits: 50% averages once, 25% and 75% average the mean again with the incoming
+	// and the old color. The other blitters keep Blend.
+	constexpr std::uint32_t RoundedMask = 0xF7DE;
+	constexpr std::uint16_t Average(std::uint16_t a, std::uint16_t b)
+	{
+		return std::uint16_t((a | b) - (((a ^ b) & RoundedMask) >> 1));
+	}
+
+	constexpr std::uint16_t RoundedBlend(std::uint16_t old, std::uint16_t incoming, std::uint32_t bits)
+	{
+		const auto mean = Average(incoming, old);
+		switch (bits)
+		{
+		case 2: return Average(mean, incoming);
+		case 4: return mean;
+		case 6: return Average(mean, old);
+		default: return incoming;
+		}
+	}
 }

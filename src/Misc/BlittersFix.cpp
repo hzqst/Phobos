@@ -85,5 +85,8 @@ void BlittersFix::Apply()
 	Blit50TranslucencyFix1->Apply();
 	Blit50TranslucencyFix2->Apply();
 	Blit75TranslucencyFix->Apply();
+	Applied = true;
 }
+
+bool BlittersFix::Applied = false;
 #pragma endregion

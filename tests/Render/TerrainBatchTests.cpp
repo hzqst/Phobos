@@ -70,6 +70,7 @@ int main()
 			"shape instances out of range");
 		// RGB565 and RGB555.
 		Check(HalfMask({11, 5, 0}, {5, 6, 5}) == 0x7BEF && HalfMask({10, 5, 0}, {5, 5, 5}) == 0x3DEF, "half translucency masks");
+		Check(QuarterMask({11, 5, 0}, {5, 6, 5}) == 0x39E7 && QuarterMask({10, 5, 0}, {5, 5, 5}) == 0x1CE7, "quarter translucency masks");
 	}
 	if (Failures) return 1;
 	std::puts("TerrainBatch: placement, clipping, page runs, shape instances, masks and color table packing passed.");

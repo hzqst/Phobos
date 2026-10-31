@@ -132,8 +132,19 @@ int main()
 	Check(Passes(-1, 0) && !Passes(70000, 65535), "the test is signed against the stored word");
 	Check(Darken(0xFFFF, 0xFFFF7BEF) == 0x7BEF && Darken(0x1084, 0x7BEF) == 0x0842 && Darken(0x0842, 0x7BEF) == 0x0021,
 		"darkening halves every channel and drops the bits shifted across");
+	Check(Blend(0xFFFF, 0x0000, 2, 0x7BEF, 0x39E7) == 0x39E7 && Blend(0xFFFF, 0x0000, 4, 0x7BEF, 0x39E7) == 0x7BEF
+		&& Blend(0xFFFF, 0x0000, 6, 0x7BEF, 0x39E7) == 0xADB5, "translucency keeps 1/4, 1/2 and 3/4 of the old color in integer parts");
+	Check(Blend(0x0000, 0xFFFF, 2, 0x7BEF, 0x39E7) == 0xADB5 && Blend(0x0000, 0xFFFF, 6, 0x7BEF, 0x39E7) == 0x39E7,
+		"translucency keeps 3/4 and 1/4 of the incoming color");
+	Check(Blend(0xF800, 0x001F, 4, 0x7BEF, 0x39E7) == 0x780F && Blend(0xF800, 0x001F, 0, 0x7BEF, 0x39E7) == 0x001F,
+		"50% adds the channel halves; no translucency keeps the incoming color");
+	// Native 50% pixels of S_CLSN22 through Phobos' patched RLE blitter (GPUDMG, old and incoming color).
+	Check(RoundedBlend(0x84E7, 0x632C, 4) == 0x740A && RoundedBlend(0x9529, 0x52AA, 4) == 0x73EA && RoundedBlend(0xAD28, 0x632C, 4) == 0x8C2A,
+		"the patched 50% rounds every channel's mean up");
+	Check(RoundedBlend(0xFFFF, 0x0000, 4) == 0x8410 && RoundedBlend(0xFFFF, 0x0000, 6) == 0xC618 && RoundedBlend(0xFFFF, 0x0000, 2) == 0x4208
+		&& RoundedBlend(0xFFFF, 0x0000, 0) == 0x0000, "the patched 25% and 75% average the mean again with the incoming and the old color");
 
 	if (Failures) return 1;
-	std::puts("ShapeDepth: clipping, plain and RLE row depths, bands, Z shapes, the strict test and darkening passed.");
+	std::puts("ShapeDepth: clipping, plain and RLE row depths, bands, Z shapes, the strict test, darkening and the native and patched translucency passed.");
 	return 0;
 }

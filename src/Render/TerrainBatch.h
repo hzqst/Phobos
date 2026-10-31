@@ -60,12 +60,14 @@ namespace TerrainBatch
 		std::uint32_t Accumulator, RowsPerBand, BandLimit;
 		std::int32_t BandDelta;
 		std::uint32_t ZOffset;
-		// ShadowShape: halve the target's color instead of drawing. Tint: the 16 bits an RLE body of
-		// 4AED70 ORs into each palette color (Blit_Copy_Tinted), 0 for the others.
+		// ShadowShape: halve the target's color instead of drawing; TranslucentShape: mix the color with
+		// the target's by the blitter's translucency bits (2, 4, 6), rounded with RoundedShape
+		// (ShapeDepth::RoundedBlend); UntestedShape: no Z test, so no depth is out of range. Tint: the
+		// 16 bits an RLE body of 4AED70 ORs into each palette color (Blit_Copy_Tinted), 0 for the others.
 		std::uint32_t Flags, Tint;
 	};
 	static_assert(sizeof(Shape) == 32);
-	constexpr std::uint32_t NoZ = 0xFFFFFFFF, ShadowShape = 1;
+	constexpr std::uint32_t NoZ = 0xFFFFFFFF, ShadowShape = 1, TranslucentShape = 6, UntestedShape = 8, RoundedShape = 16;
 
 	// A clipped shape draw at (x, y) on Tile, wholly inside the view: the instance that moves it to
 	// the target by (originX, originY) and reads the atlas from (atlasX, atlasY). Frame holds the
@@ -95,7 +97,21 @@ namespace TerrainBatch
 		return mask;
 	}
 
-	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; };
+	// The QuatTranslucencyMask a color pack implies: each channel's two top bits cleared after a shift
+	// right by two.
+	constexpr std::uint32_t QuarterMask(const int (&shift)[3], const int (&bits)[3])
+	{
+		std::uint32_t mask = 0;
+		for (int i = 0; i < 3; ++i)
+		{
+			const auto field = ((1u << bits[i]) - 1u) << shift[i];
+			mask |= (field >> 2) & field;
+		}
+		return mask;
+	}
+
+	// Mode: the shape pipeline of a run of shapes, and where it changes.
+	struct Run { const void* Page; std::uint32_t First, Count; bool Depth = false; std::uint32_t Mode = 0; };
 
 	// Consecutive instances on the same atlas page and with the same depth mode (none when depths is
 	// empty), so each draw keeps the native order.
