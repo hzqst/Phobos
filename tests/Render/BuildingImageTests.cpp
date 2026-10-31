@@ -34,12 +34,6 @@ int main()
 	Check(GateFrame(3, 4, false, true, false, false) == 0 && GateFrame(0, 4, false, false, true, false) == 3, "idle and open gates");
 	Check(GateFrame(2, 4, false, false, false, true) == 7 && GateFrame(-1, 4, false, false, false, false) == 0, "damaged gates, lower clamp");
 	Check(DoorFrame(true) == 0 && DoorFrame(false) == 1, "door frames");
-	Check(DoorAnimFrame(2, 5, false, false, false) == 2 && DoorAnimFrame(1, 5, true, false, false) == 4 && DoorAnimFrame(0, 5, true, false, false) == 4,
-		"DoorAnim opening and closing, clamped to the last stage");
-	Check(DoorAnimFrame(3, 5, false, true, false) == 0 && DoorAnimFrame(5, 5, false, false, false) == 4 && DoorAnimFrame(-2, 5, false, false, false) == 0,
-		"an idle DoorAnim, both clamps");
-	Check(DoorAnimFrame(2, 5, false, false, true) == 7 && DoorAnimFrame(0, 0, false, false, true) == 0, "damaged doors follow the stages; no stages draw 0");
-	Check(DoorAnimDepth(0) == -7 && DoorAnimDepth(30) == -37, "DoorAnim depths");
 
 	Check(FoggedBodyDepth(-20, 15, false) == -37 && FoggedBodyDepth(-20, 15, true) == -17 && FoggedShadowDepth(30) == -32,
 		"fogged body depths ignore N for a flat part, the shadow sits at -h - 2");
@@ -53,6 +47,6 @@ int main()
 	Check(FoggedClipHeight(736, -101, 0) == -50, "fogged clip with a negative image height");
 
 	if (Failures) return 1;
-	std::puts("BuildingImage: frames, depths, Z shape offsets, gate and DoorAnim frames and fogged records passed.");
+	std::puts("BuildingImage: frames, depths, Z shape offsets, gate frames and fogged records passed.");
 	return 0;
 }

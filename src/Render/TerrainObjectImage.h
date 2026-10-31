@@ -6,7 +6,7 @@
 // (gamemd-reverse #19): after the overlays, 6D97D0 draws every static Terrain object of the ground
 // layer, each body (71C1B0) followed by its own shadow, and 6D7C00 then draws the cliff shadows of
 // C_SHADOW.SHP (4802A0, 547230), all through 4AED70 with a Z test. The animated or crumbling objects
-// draw later on Composite (6D8DB0, gamemd-reverse #23) through the same 71C1B0.
+// draw later on Composite (6D8DB0, gamemd-reverse #23), where their 4AED70 calls are recorded.
 namespace TerrainObjectImage
 {
 	using TerrainImage::Point;
@@ -24,52 +24,8 @@ namespace TerrainObjectImage
 	// ones Tile draws: frame 1 when damaged, otherwise 0.
 	constexpr int StaticFrame(bool damaged) { return damaged ? 1 : 0; }
 
-	// Phobos' 71C1FE: the animation length, AnimationLength where set, else the shape's frames over
-	// 2 x (HasDamagedFrames + 1).
-	constexpr int AnimationLength(bool set, int length, std::int16_t frames, bool damagedFrames)
-	{
-		return set ? length : frames / (2 * (damagedFrames + 1));
-	}
-
-	// 71C1B0 with Phobos' 71C1FE for an animated or crumbling object, the ones 6D8DB0 draws on
-	// Composite (gamemd-reverse #23): value is Animation.Value, length AnimationLength's result.
-	constexpr int DynamicFrame(bool animated, bool crumbling, bool crumblingFrames, bool damagedFrames, bool damaged, int value, int length)
-	{
-		if (animated)
-			return crumblingFrames && crumbling ? length * (damagedFrames + 1) + 1 + value : value + (damaged ? length : 0);
-		if (crumblingFrames && crumbling) return 1 + value;
-		return StaticFrame(damaged);
-	}
-
 	// 71C1B0: the shadow is the second half of the shape's frames.
 	constexpr int ShadowFrame(int frame, std::int16_t frames) { return frame + frames / 2; }
-
-	// 6D8DB0's 32-bit arithmetic.
-	constexpr int Add32(int a, int b) { return int(std::uint32_t(a) + std::uint32_t(b)); }
-	constexpr int Sub32(int a, int b) { return int(std::uint32_t(a) - std::uint32_t(b)); }
-	constexpr int Mul32(int a, int b) { return int(std::uint32_t(a) * std::uint32_t(b)); }
-
-	// 6D8DB0's view range of Locations. It applies IsoTransformMatrix (5AFB80) to the three points
-	// RangeProbes gives from TacticalPos and ViewBounds' size (the top, right and left probe, with Z 0),
-	// truncates the top probe's X and Y, the right probe's X and the left probe's Y, and MakeViewRange
-	// spans twice their differences. Not the drawn rectangle: a coarse filter with no Z.
-	struct ViewProbe { int X = 0, Y = 0; };
-	struct ViewProbes { ViewProbe Top, Right, Left; };
-	constexpr ViewProbes RangeProbes(int tacticalX, int tacticalY, int width, int height)
-	{
-		const int lower = Add32(tacticalY, height / 2);
-		return {{Add32(tacticalX, width / 2), Sub32(tacticalY, height)}, {Add32(tacticalX, Mul32(width, 2)), lower}, {Sub32(tacticalX, width), lower}};
-	}
-	struct ViewRange { int Left = 0, Top = 0, Width = 0, Height = 0; };
-	constexpr ViewRange MakeViewRange(int left, int top, int right, int bottom)
-	{
-		return {left, top, Mul32(Sub32(right, left), 2), Mul32(Sub32(bottom, top), 2)};
-	}
-	// The half-open test of 6D8DB0, in its order: x against left and left + width, then y.
-	constexpr bool InViewRange(const ViewRange& range, int x, int y)
-	{
-		return x >= range.Left && x < Add32(range.Left, range.Width) && y >= range.Top && y < Add32(range.Top, range.Height);
-	}
 
 	// 71C1B0's ZAdjust from the object's screen height (6D20E0 of its Z).
 	constexpr int Depth(int screenHeight, bool shadow)

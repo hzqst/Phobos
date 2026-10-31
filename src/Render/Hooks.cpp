@@ -1,5 +1,6 @@
 #include "GPURender.h"
 #include "CursorTrace.h"
+#include "OverlaySnapshot.h"
 #include "SidebarText.h"
 #include "Tooltip.h"
 
@@ -52,6 +53,39 @@ DEFINE_HOOK(0x6D4664, TacticalClass_Render_LayersEnd, 0x5)
 {
 	GET(DSurface*, pSurface, EBX);
 	GPURender::OnRenderLayers(pSurface, true);
+	return 0;
+}
+
+// 4AED70 (CC_Draw_Shape) while RenderLayers draws: each call as passed, before the displaced
+// sub esp, for OverlaySnapshot's Composite list. A call without a shape, point or clip draws nothing.
+DEFINE_HOOK(0x4AED70, CC_Draw_Shape_RecordLayers, 0x6)
+{
+	if (!OverlaySnapshot::RecordingTarget) return 0;
+	GET(DSurface*, pSurface, ECX);
+	GET(ConvertClass*, pConvert, EDX);
+	GET_STACK(std::uintptr_t, caller, 0x0);
+	GET_STACK(SHPStruct*, pShape, 0x4);
+	GET_STACK(Point2D*, pPoint, 0xC);
+	GET_STACK(RectangleStruct*, pBounds, 0x10);
+	if (!pSurface || !pShape || !pPoint || !pBounds) return 0;
+	OverlaySnapshot::RecordedCall call;
+	call.Convert = pConvert;
+	call.Image = pShape;
+	call.Frame = R->Stack<int>(0x8);
+	call.Point = *pPoint;
+	call.Bounds = *pBounds;
+	call.Flags = R->Stack<std::uint32_t>(0x14);
+	call.Remap = R->Stack<int>(0x18);
+	call.ZAdjust = R->Stack<int>(0x1C);
+	call.Gradient = R->Stack<int>(0x20);
+	call.Brightness = R->Stack<int>(0x24);
+	call.Tint = R->Stack<int>(0x28);
+	call.ZShape = R->Stack<SHPStruct*>(0x2C);
+	call.ZShapeFrame = R->Stack<int>(0x30);
+	call.ZShapeX = R->Stack<int>(0x34);
+	call.ZShapeY = R->Stack<int>(0x38);
+	call.Caller = caller;
+	OverlaySnapshot::RecordCall(call, pSurface);
 	return 0;
 }
 

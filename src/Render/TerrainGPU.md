@@ -56,7 +56,7 @@ GPU 合成顺序：地形 → 命令栏 → 侧栏 → tooltip → 光标。地�
 - GPU 深度规则：地块 `547CF0`（旧值 ≥ 新值时画并写）与 overlay 的严格 `<`（含 ZGradient、ZShape，见“Overlay”），Terrain 对象及其阴影、悬崖投影沿用同一规则（C6）。overlay 深度小于 0 时原生总能通过并写入低 16 位，GPU 近似为写 0；未见实际出现。GPU 深度没有回读核对：纯地形 Z 不挡色，正确性靠 CPU 模型的 `depthcheck` 与反向比较实验间接确认（见“C5.2a”）。
 - ABuffer 只有 shroud/fog：alpha shape（阶段 E）与地形之后写 Alpha 的 blitter 不画；每帧按当前格子完整重建，单位移动时原生增量缓存尚未重画的格子会短暂不同（见“ABuffer”）。
 - ABuffer 纹理为 R8_UNORM：正常写入值不超过 255；超过 255 的 WORD 只可能来自异常输入，不能表示。原雪地图开局对照中，已揭示区域内部一致，差异只在迷雾渐变带。
-- 动画/崩塌 Terrain（D2）、对象层动画（D3b-1）与步兵/SHP 弹体（D3a-1）：车辆、飞机、体素弹体、建筑的 linked 对象与体素炮塔/炮管、粒子与激光等仍不画（D3a-2/3）；DropPod 步兵、伪装或不清晰可见的步兵不画；步兵的半透明 visual、warping、tint、桥上 INFSHDW 与 Ares/FirersPalette/AnimPalette 弹体配色未实测；DoorAnim 只在注入下实测；动画的 tint、Tiled、HasExtras 阴影、AltPalette、MakeInfantry、时停与写 Z 的动画未实测；崩塌帧（原版没有崩塌的树，只有模组设 HasCrumblingFrames 时出现，按公式实现、未实测）、扩展 Palette、HasDamagedFrames 类型与滚屏中途的渲染未实测。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
+- RenderLayers（D3）：只有经 `4AED70` 的 SHP；体素单位/弹体/炮塔/炮管（D3a-3）、选中框与目标线等画线、粒子与激光、RING1 仍不画，不居中或带 remap/Warp 等位的调用不建模（实测 GPUINF/GPUANIM/GPUDMG/GPUSHP 均为 0 次）。Alpha（`800`）不调制颜色。GPUINF/GPUSHP 顶部建筑处恒有 32 个 `others` 像素（原生多出的灰色，非 `4AED70`，未查）。`others/unexplained` 的划分只是启发式：体素单位的矩形为空，闪光动画的星形可超出其 10×11 矩形几个像素。
 - `4D1890` deferred 记录只画建筑（D1c）：开 FogOfWar 实测只出现建筑记录；overlay/smudge/Terrain 记录的构造入口没有调用者（#18/#19），实测也从未出现，trace 只计数（见“Terrain 对象与悬崖投影”末与“C7”）。迷雾建筑的保存动画在原生按格重画后可能缺失，快照按全量重画画出（见“迷雾建筑”）；活建筑的 tint、大门、卸载、出售未实测（见“D1a/D1b”）。悬崖投影只有单元测试：本 mod 的温带（838 种）与雪地（964 种）tile 类型都没有 ShadowCaster，常规区间起点全为 0，测试地图上一格都不画，无法动态核对。
 - 锚点用整数逆投影，靠多扫 2 行/列吸收与原生浮点结果的一格差异；极端高度格位于原生窗口边缘时可能多画。
 - 侧栏在左、observer、chrono/Armageddon 等特殊绘制路径、读档、theater 切换、光源变化未实机验证；`6D3D10` 模式记录未接入，特殊路径下仍按当前格子状态出图。
@@ -179,63 +179,27 @@ Tile 第 4 步（`6D3470`）在弹坑之后、overlay 之前调 `4D1890`。快�
 
 **原生增量缓存的差异**：`6D3470` 在增量重画时，除滚屏条带与脏区外，还对每个 VisibleCell 以该格的 60×30 矩形为 clip 调 `4D1890`（第 8 步的 `6D3870` 同样按格重画）。RLE 帧的行深度依赖 clip 顶行（`ShapeDepth::RLE`）：带 ZShape 的本体基值随 clip.Y 以 −1 变化，不带 ZShape 的 gradient2 动画约为 −2/3，所以按格重画时，只读 Z 的动画可能被本体刚写的 Z 拒绝，而全量重画（clip 顶行为 0）时能通过。快照按当前状态整屏重建，等于全量重画的结果；暂停帧的原生 Tile 可能缺少这些动画，见“D1c”。
 
-## 动画 Terrain（mode 2）
+## RenderLayers（mode 2，D3）
 
 `6D3D10` 的 mode 2 在 `6D465F` 调 RenderLayers（`6D8DB0`），此时目标（`EBX`，正常为 Composite）已锁定并设为 Temp，内容是 mode 1 末尾从 Tile 复制来的 ViewBounds；`6D4664` 返回后才画 Spotlight、激光、计时器等，`4F4583` 时 Composite 已含 UI，不能作对照。`src/Render/Hooks.cpp` 在这两处各加一个只观测的 hook（整条 call 被移出，`return 0` 照常执行），`CompositeSnapshot` 按 #23 §9.2 复制目标的 ViewBounds：核对目标同时是 Temp 与 Composite、`LockLevel>0`、2 字节像素、ViewBounds 在 surface 内，按 pitch 逐行复制到自有缓冲，不再 Lock，失败记原因。`6D465F` 的输入只在本次渲染要做 trace 时复制；`6D4664` 的输出在 GPU 窗口运行或 MCP 服务运行时每次渲染都复制，是 Automation `source=native_composite` 的来源（[Automation-MCP.md](../../docs/Automation-MCP.md)）。
 
-采集在 `4F4583` 回调中 Tile 各层之后，`OverlaySnapshot` 另起一个列表 `CompositeDraws`：
+RenderLayers 画到目标上的 SHP 一律**记录原生调用**，不在 CPU 重推（#26 起由用户确定；D2/D3b/D3a-1 的逐对象重算已删除）：Ares 3.0p1 在 SHP 车辆路径上的 FacingsA/B、WaterType、ChangeType、DrawShadowEarlier、SkipUnitShadow、OreGatherAnim 与 Phobos 的 73C7AC/73CCF4/73CFA7/73D0DB/73D223/73CF46 等改写都直接体现在最终参数里，绘制顺序就是原生顺序，DrawExtras 的 pips 等 SHP 也一并得到。
 
 | 项 | 规则 |
 | --- | --- |
-| 遍历 | Layer 0→4，各层 Items 按当前顺序（Ground 层每帧只做一趟相邻交换，不能重排）；非 Terrain 对象只计数 |
-| 选择（`6D9224`） | 类型 `IsAnimated` 或对象 `IsCrumbling`；Location 落在视图范围内；`5865E0` 为假。不查 IsDead/IsAlive |
-| 视图范围 | `IsoTransformMatrix` 由原生 `5AFB80` 作用于 `(tx+W/2, ty−H)`、`(tx+2W, ty+H/2)`、`(tx−W, ty+H/2)`，取前者 X/Y、第二个 X、第三个 Y 向零截断，`[x0, x0+2(xR−x0))×[y0, y0+2(yL−y0))` 半开，32 位回绕（`TerrainObjectImage::RangeProbes/MakeViewRange/InViewRange`，有单元测试）|
-| 绘制 | 与静态 Terrain 共用 `71CC50 → 71C1B0` 的采集（OnMap/Limbo、`71D160` 外接矩形、位置、palette、Y−16、阴影），差别只在帧与 Z：本体 `2E00`、阴影 `2E01` 只测 Z 不写（`Draw::WritesDepth=false`） |
-| 帧（Phobos `71C1FE`） | `A` 为 `AnimationLength`，未设时 `int16(Frames)/(2(D+1))`；动画且 HasCrumblingFrames 且崩塌：`A(D+1)+1+V`；动画其余：`V+(damaged?A:0)`；非动画且 HasCrumblingFrames 且崩塌：`1+V`；否则受损 1、其余 0（`TerrainObjectImage::DynamicFrame`）|
+| 区间 | `GPURender::OnRenderLayers`：`6D465F` 时若本次渲染要采集（GPU 窗口 Running/Hidden 且非镜像）则 `OverlaySnapshot::BeginRecording(目标)`，否则清空并不记录；`6D4664` 时 `EndRecording` |
+| 记录（`4AED70` 入口，6 字节 `sub esp`） | 区间内每次调用按原样保存：ConvertClass、SHP、帧、点、clip（先与 surface 矩形求交，同 `421B60`）、flags、remap、ZAdjust、梯度、亮度、tint、ZShape 与帧/偏移、返回地址；目标不是区间的 surface（SHP 炮塔组合用的 scratch `B1D13C`）计 `elsewhere`。无 SHP、点或 clip 的调用原生不画，不记 |
+| 回放（`4F4583`） | 按顺序经 `Capture::Place`：中心为 `clip 原点 + 点`，clip 用调用自己的；`Darken(1)` 为阴影，`6` 为半透明位，`2000/1000` 测 Z、`4000` 测并写，RLE 半透明且只测不写时按 Phobos 补丁取整（见下）。不建模（`unmodeled`）：无 `Centered(200)`、有 `Warp/ZRemap/Plain/40/80/MultiPass/8000` 等其他位、remap 非 0、ZShape 帧非 0 |
+| 半透明 | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
+| 不在其中 | 体素（`4AF2A0`/`73B140` 经 `4373B0` 直接 blit，D3a-3）、选中框与目标线等画线、RING1 的 Direct3D、粒子等不经 `4AED70` 的绘制；Alpha（`800`）不调制颜色 |
+
+GPU：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之后，共用 shape 实例、atlas 与 `TerrainShape.ps`。深度管线按 不测/只测/测并写 × 本体/阴影/半透明 共 9 条；半透明绘制在新的一组开始前结束渲染通道，把目标复制到 `CopyTexture`，着色器读旧值算出整数结果（`RoundedShape` 时按通道 `(a+b+1)>>1`，只在色彩打包为 565 即 `HalfMask == F7DE>>1` 时画，否则跳过），互不重叠的半透明绘制共用一次复制。战术目标因此是“Tile + RenderLayers 的 SHP”，对照基准为同一暂停帧的 `native_composite`。
 
 trace（`PHOBOS_TERRAIN_TRACE=1`，与 `tilecheck` 同一次采集）在 `tiledepth` 之后输出：
 
-- `composite`：层内对象数 `layerObjects`；非 Terrain 对象 `others`、其中在视图范围内的 `othersInRange`、被 `6D8DB0` 标 IsVisible 的 `othersVisible`（它先清每个对象的该标志，绘制时再置位）、其中 `GetRenderDimensions` 为空的 `unbounded`（体素单位如 MCV）；选中的 Terrain `animated`、不在范围内的 `outOfRange`、Location 在迷雾中的 `locationFogged`；`terrainOutside` 与 `bodies/shadows` 等同 `overlay` 行；`copyFailed` 为复制失败的渲染数。
-- `compositedraws`：每次绘制 `类型@x,y:帧`，阴影加 `s`。
-GPU（D2b）：`TerrainPass` 把 `CompositeDraws` 接在 Tile 层的 shape 之后，共用 shape 实例、atlas 与着色器，另建两条只测不写深度的管线（本体、阴影各一，严格 `<`，阴影仍是乘 1/2 的混合），按列表顺序提交；战术目标因此是“Tile + 动画 Terrain”，对照基准改为同一暂停帧的 `native_composite`。
-
-- `compositecheck`：`input/output` 为两份副本的状态（`ok`、失败原因、`bounds_differ` 或 `stale`=不是本帧）；`inputMismatched` 为输入与原生 Tile 的 ViewBounds 不同的像素（应为 0：RenderLayers 之前没有别的东西画进来）；在输入上用原生 Z、A 按顺序重放 `CompositeDraws`，与输出比较：`drawn` 为被 Terrain 画到的像素，`mismatched` 分为 `body/shadow`（Terrain 像素不同）与 `untouched`（Terrain 没画到的像素不同，即别的对象画的），后者再按是否落在 IsVisible 对象的 `GetRenderDimensions` 矩形内分为 `others/unexplained`。`compositesamples` 列前 24 个不同像素。
-
-## 对象层动画（mode 2，D3b）
-
-#27 交接 = gamemd-reverse PR #28。RenderLayers 的动画分支（`6D9187`）与 Terrain 同在 `CompositeDraws` 中按层顺序采集（`OverlaySnapshot` 的 `Capture::Anim`，纯规则在 `AnimImage.h`，有单元测试）。建筑分支（D3b-2）只画 `43DA80` 的 DoorAnim；linked 对象、体素炮塔/炮管、SHP 炮塔混 VXL 炮管时对 `Anims[9]` 的显式重画与单位一起等 #26。
-
-| 项 | 规则 |
-| --- | --- |
-| 选择 | `GetCoords`（Phobos 替换的 vslot `+48`）在视图范围内；非建筑动画且 `ShouldFogRemove` 时 Location 在迷雾中跳过；`LoopDelay` 未尽、正常窗口下 InLimbo、`GetRenderCoords` 投影失败跳过 |
-| `422CA0` 前段 | RING1 的 Direct3D 路径不建模（`ring`）；Ares `422FCC` 帧率门限、Invisible、DetailLevel、`IsFogged && ShouldFogRemove`、无图像、Phobos `423061` 可见性计入 `hidden/noImage` |
-| 帧与标志 | 帧 `Start+Value`；`AnimFlags`，时停加 `4/6`；`Translucent=yes` 按 Value 超过 End 的 0.6/0.4/0.2 分 75/50/25%，否则 Phobos `423183` 曲线（无曲线时等级 >15 跳过、>5 为 50%、其余 25%）；彩色绘制加 `800`，本体加 `2000` |
-| palette 与亮度 | IsVeins、UseCellLightConvert、`Anim.LightConvert`（MakeInfantry 按 Phobos `4232BF` 取本格亮度）、`ANIM_PAL` 或 Ares 自定义 palette、AltPalette（Phobos 拥有者配色）；UseNormalLight 为 1000 |
-| tint | 只有建筑动画（Phobos `423420`）：所在格的建筑，否则 ParentBuilding，`GetTintColor` 加自定义 tint；格子被 shroud 时清零；单位的 DeployAnim 计入 `unsupported` |
-| 本体 | Tiled（Phobos 间距、对齐、palette，`ZAdjust+Y−h−50`，Deg90，按行循环）、Flat（`Y+ZAdj−h−3`，梯度 0）、其余（`Y+ZAdj−h−2`，Deg90）；`2000` 只测 Z，`4000` 测并写 |
-| 阴影 | HasExtras 且 Phobos `ExtraShadow`：`2601`，地面位置；`Type.Shadow`：帧加 `int16(Frames)/2`，`(F&~6)\|601`，`−2−h`，独立动画为 `E01`（不测不写），建筑槽为 `1E01`（只测） |
-| 建筑（`43CEA0 → 43DA80`） | Techno 分支按 Location 粗筛后不论投影成败都调 `43CEA0(ViewBounds,1,1)`：OnMap、非 Limbo、`455C20` 矩形与视图相交、未 IsFogged。任务 Unload、`DoorAnim` 非空且 UnloadTimer 四种状态之一时画 DoorAnim：帧为 `int(进度×DoorStages)`，关闭中反向、空闲为 0，夹到 `[0,DoorStages−1]`，血量不高于 ConditionYellow 且 DamagedDoor 时加 DoorStages（`BuildingImage::DoorAnimFrame`）；经 `705E00`（与 Tile 建筑共用 `Capture::Wrap`/`WrapperPart`：配色或 TerrainPalette、闪烁/铁幕/空袭/自定义亮度），亮度为 GetMapCoords 格的 `Intensity_Normal`，tint 参数为 0，`2E00`、`−5−h−2`、梯度 0；自身影 `2E01`、`−2−h−2`、帧加 `int16(Frames)/2` |
-| 半透明 | 原生 `(c>>1)&HalfTranslucencyMask`、`(c>>2)&QuatTranslucencyMask` 的整数组合（`ShapeDepth::Blend`），tinted 版本忽略 tint。Phobos `FixTransparencyBlitters`（`[General]`，默认开，`BlittersFix.cpp`）把 RLE 的 AlphaZRead 25/50/75% blitter（`4984D0/4986D0/4988C0`，即 RLE 帧、只测不写 Z）改成 `(a\|b)−(((a^b)&F7DE)>>1)` 的向上取整平均：50% 平均一次，25%/75% 再与新色/旧色平均（`ShapeDepth::RoundedBlend`，`Draw::Rounded`；`BlittersFix::Applied` 记录是否已打补丁）。其余 blitter 不变 |
-
-GPU：与动画 Terrain 共用 shape 实例与 `TerrainShape.ps`。深度管线按 不测/只测/测并写 × 本体/阴影/半透明 共 9 条；半透明绘制在新的一组开始前结束渲染通道，把目标复制到 `CopyTexture`，着色器读旧值算出整数结果（`RoundedShape` 时按通道 `(a+b+1)>>1`，只在色彩打包为 565 即 `HalfMask == F7DE>>1` 时画，否则跳过），互不重叠的半透明绘制共用一次复制。
-
-trace 在 `composite` 之后多三行：`compositebuildings`（范围内建筑 `buildings`、`fogged`、任务 Unload 的 `unloading`、`outside/unsupported`、画出的 `doors`）、`compositeanims`（`anims` 及上述各跳过原因，`translucent/writing/tiled/extras/tinted` 为已采集绘制数）与 `compositeanimdraws`（`类型:帧[s][t]@x,y,宽x高:z=ZAdjust:q=亮度行`）；`compositedraws` 每项前加层字母（Terrain `t`、建筑 `b`、动画 `n`），后缀 `s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z。
-
-## 对象层单位（mode 2，D3a）
-
-#26 交接 = gamemd-reverse PR #29。按用户选定的混合方案：SHP 对象（步兵、SHP 车辆、SHP 弹体、矿车/旗帜、DropPod）在 4F4583 按当前状态在 CPU 重推参数，体素对象（D3a-3）在提交点抓取原生光栅化结果。D3a-1 是步兵与 SHP 弹体：在 `CompositeDraws` 中按层顺序采集（`Capture::Infantry`/`Capture::Bullet`，纯规则在 `UnitImage.h`，有单元测试），走与动画相同的 GPU 管线，GPU 代码不变。705E00 的配色/亮度/visual/自身影由 `Capture::Wrapper/WrapperPart` 与建筑共用（Wrapper 改为任意 Techno；`BuildingImage::ShadowDepth` 转用 `UnitImage::ShadowDepth`）。
-
-| 项 | 规则 |
-| --- | --- |
-| 选择（Foot） | Location 在视图范围内；FogOfWar 时 Location 在迷雾中跳过（`fogged`）；`GetCoords` 经 `6D1F10` 减 TacticalPos 落在 B0CE28 外扩 ±360/±180（含端点，`UnitImage::InMargins`）；`5F4B10` 正常窗口下 InLimbo、`GetRenderCoords` 投影失败跳过（均计 `outside`） |
-| 步兵 `518F90` | TubeIndex≠−1 不画；GetHeight>0 且 DropPod locomotor、伪装、对玩家不 ClearlyVisible（705E00 换 flags/配色）计 `unsupported`；GetImage 为空不画 |
-| 步兵亮度 | Level 取 Ion（`53A100`）/Dominator/Nuke/Normal；Phobos `51933B` 对 jumpjet 用 `TechnoExt::GetLevelIntensity`（JumpjetLevelLightMultiplier，`IsOnBridge` 桥加成，二者由 `Hooks.Tint.cpp` 的文件内 static 提升为 `TechnoExt` 静态成员）；否则 OnBridge 或目标格有 `10000h` 且 Z 高于地面+半桥高时为 `int16(Intensity_Normal)+GetHeight/(2×[A8F240])×Level`，否则有 `10000h` 时减 500；再加 ExtraInfantryLight 的 DWORD；Phobos `51946D` 铁幕/空袭/自定义亮度；705E00 里再走一次闪烁与 Phobos `70632E` 的铁幕/空袭（原生如此叠加），步兵不加 `706389` 的自定义亮度 |
-| 步兵 tint | Phobos `518FC8`：`GetTintColor(铁幕,空袭,狂暴) \| GetCustomTintColor`，GetCoords 所在格被 shroud 时清零 |
-| INFSHDW | 目标格有桥（`100h`）且高度不低于 `[A8F234]` 时，按 `800h` 看北（0）或西（6）邻格是否有桥决定是否扣桥高；剩余高度为正、且 CloakState 为 Uncloaked（Phobos `5194EF`）时画 INFSHDW.SHP 帧 1：Y=`点Y−int8[6B4]+AdjustZ(高度)`，`PALETTE.PAL`，`2601`，`−5−AdjustZ(Location.Z−高度)`，梯度 0，亮度 1000，无 tint |
-| 步兵本体 | `518D80` 取帧；点 Y=`点Y−int8[6B4]`；705E00：visual 0/1 画本体+自身影，1 加 25%，2/3 为 50% 无影，4 按 CloakProgress 为 50%/25% 无影，5 不画（`hidden`）；warping 再 OR 4；GetRemapColour 配色；GetHeight≠0 时 `[825500]−AdjustZ(GetZ)−2` 且无影，否则 `GetZAdjustment+[825500]−2`；Deg90，`2E00`（只测）；自身影帧加 `int16(Frames)/2`，`2E01`，`−2−AdjustZ(GetZ)−2`，在 carryall 上上移 14 |
-| SHP 弹体 `468090` | 范围与外扩同 Foot（无迷雾预筛）；`5F4B10`；FogOfWar 时 Location 在迷雾中、Inviso、SpawnNextAnim 计 `bulletsHidden`；体素计 `bulletsVoxel`（D3a-3）；帧取 vslot `+1E8`；非 OnBridge 且目标格有桥、高度不低于 `[89DE64]` 时高度扣桥高、地面加桥高；Type.Shadow 且高度为正时先画影子：点下移 AdjustZ(高度)，`PALETTE.PAL`，`2601`，`−10−AdjustZ(地面)`；本体 `2E00`，`−30−AdjustZ(GetZ)+TypeExt.ZAdjust`（Phobos `4683F2`）；配色先问 Ares `468379` 的 helper（`+19A50`，类型 `+2C4h` 的扩展，按同名 AnimType 的自定义 palette），否则 AnimPalette→`ANIM_PAL`，FirersPalette→InheritedColor（−1 为当前玩家）的配色，其余 `PALETTE.PAL`；二者梯度 0、亮度 1000、无 tint |
-
-trace 在 `compositebuildings` 后多一行 `compositeunits`（`infantry/outside/fogged/unsupported/hidden/infshdw`、`bullets/bulletsOutside/bulletsHidden/bulletsVoxel`）；`compositedraws` 的层字母加步兵 `i`、弹体 `p`；`compositecheck` 后若有归属绘制的不同像素，再输出 `compositedrawn`（第一个这样的像素与其绘制）。选中框、目标线等 DrawBehind/DrawExtras 的 UI 仍不画，压在已采集像素上时计入 `body`。
+- `composite`：层内对象数 `layerObjects`、被 `6D8DB0` 标 IsVisible 的非 Terrain/动画对象 `othersVisible`（它先清每个对象的该标志，绘制时再置位）及其中 `GetRenderDimensions` 为空的 `unbounded`（体素单位）；`calls/elsewhere/unmodeled` 与第一个不建模调用的 `返回地址:flags:remap:zshapeFrame`；`bodies/shadows/compressed/translucent/writing/tinted` 与 Place 的各失败计数；`copyFailed` 为复制失败的渲染数。
+- `compositedraws`：每次绘制 `返回地址:帧[s][t][w|n]@x,y,宽x高`（`s` 阴影、`t` 半透明、`w` 写 Z、`n` 不测 Z）。
+- `compositecheck`：`input/output` 为两份副本的状态（`ok`、失败原因、`bounds_differ` 或 `stale`=不是本帧）；`inputMismatched` 为输入与原生 Tile 的 ViewBounds 不同的像素（应为 0）；在输入上用原生 Z、A 按顺序重放 `CompositeDraws`，与输出比较：`drawn` 为被画到的像素，`mismatched` 分为 `body/shadow`（已画像素不同）与 `untouched`，后者再按是否落在 IsVisible 对象的 `GetRenderDimensions` 矩形内分为 `others/unexplained`。`compositedrawn` 为第一个归属绘制的不同像素与其绘制，`compositesamples` 列前 24 个不同像素。
 
 ## 验收（2026-10-30）
 
@@ -394,6 +358,8 @@ HEAD `811e3492` + 本批未提交改动，最终 DLL SHA256 `dbd936ec…626c`（
 
 ### D2a 动画 Terrain 的原生对照与 CPU 模型（2026-10-30）
 
+> 这里验收的是逐对象 CPU 重算，已由 D3a-2 的 `4AED70` 调用记录取代并删除；地图与对照方法仍沿用。
+
 HEAD `4a11f135` + 本批未提交改动，最终 DLL SHA256 `82c92fbb…de02c`，1024×768。
 
 受控地图 `GPUANIM.MAP`（`scripts/make_anim.py`，只在 `Debug/AutomationGame`）取自 GPULIBF：保留其 10 棵矿柱（TIBTRE01/03，`x=39…43`、`y=40…44`），再加 TIBTRE02 两棵、TIBTRE03 与 TIBTRE01 各一棵；开局点移到 `(70,70)`，在矿柱下方约 55 行，上滚 1.8 秒后矿柱进入视野、MCV 移出视野。Spawner 的观察者模式（`IsSpectator`）会使 Automation 的暂停返回 `frame_control_requires_active_singleplayer_without_dialog`，不能用。原 GPULIBF 开局视野内没有动画 Terrain（10 棵中 5 棵超出视图范围、5 棵外接矩形不与 clip 相交）。
@@ -408,6 +374,8 @@ HEAD `4a11f135` + 本批未提交改动，最终 DLL SHA256 `82c92fbb…de02c`�
 `tilecheck` 在所有样本中颜色、Z 都一致，说明对象层没有写 Z；Terrain 本体与阴影在原生 Z、A 下的重放与 `6D4664` 的原生 Composite 逐像素相同。MCP 的 `native_composite` 与同帧 `native_terrain` 只在矿柱与 MCV 处不同。临时改 `spawn.ini` 的 Scenario/FogOfWar 与 `RA2MD.INI` 的驱动，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d2a`（D3D12 无迷雾的日志未保留，结果见上表；FogOfWar 与 Vulkan 的日志为 `debug-fog.log`、`debug-vk.log`）。回归新增 `TerrainObjectImageTests` 的动画帧与视图范围、`CaptureTests` 的 `native_composite` 元数据；Debug 构建无警告。
 
 ### D2b GPU 动画 Terrain（2026-10-30）
+
+> 这里验收的是逐对象 CPU 重算，已由 D3a-2 的 `4AED70` 调用记录取代并删除；地图与对照方法仍沿用。
 
 HEAD `d507b7de` + 本批未提交改动，DLL SHA256 `933132e2…8d7d`，1024×768。GPUANIM 同 D2a（开局点 `(70,70)`，上滚 1.8 秒后左右各滚一次），每个状态在同一暂停帧比较 `native_composite` 与 `gpu` 的 ViewBounds 区域（`scripts/cmpcomp.py`）。
 
@@ -449,6 +417,8 @@ HEAD `5851ff0b` + 本批未提交改动，DLL SHA256 `3a5f5ef7…`；最终 DLL 
 
 ### D3b-1 独立与建筑槽动画（2026-10-31）
 
+> 这里验收的是逐对象 CPU 重算，已由 D3a-2 的 `4AED70` 调用记录取代并删除；地图与对照方法仍沿用。
+
 #27 交接 = gamemd-reverse PR #28。HEAD `09967aac` + 本批未提交改动，DLL SHA256 `c4072d93…`，1024×768，D3D12 与 Vulkan，每个状态在同一暂停帧比较 `native_composite` 与 `gpu`（`scripts/cmpcomp.py`）。
 
 | 地图 | 状态 | `compositecheck` | GPU 对 `native_composite` |
@@ -463,6 +433,8 @@ S_CLSN22 第一次对照时 746 个像素全部不同，探针证实原生在 Re
 
 ### D3b-2 DoorAnim（2026-10-31）
 
+> 这里验收的是逐对象 CPU 重算，已由 D3a-2 的 `4AED70` 调用记录取代并删除；地图与对照方法仍沿用。
+
 HEAD `27cd14d9` + 本批未提交改动，DLL SHA256 `3ba5ee73…`（最终 `33482699…` 只删了一个未用字段），1024×768。原版 YR 的建筑类型都没有设 `DoorAnim`（运行时列出只有 GAWEAP/NAWEAP/YAWEAP 有 `UnderDoorAnim` 与 `DeployingAnim`，DoorStages=0），所以验收用临时注入：第一次卸载时把 GAWEAP 的 `DeployingAnim` 设为 `DoorAnim`、`DoorStages=int16(帧数)/2`（=2），原生 `43DA80` 与采集读同一字段。受控地图 `GPUDOOR.MAP`（`scripts/make_door.py`，GPUANIM 加规则：MCV 展开成不耗电的 GAWEAP，灰熊坦克 Cost=10）：展开、造一辆后再造一辆，卸载期间左右轻点滚屏触发 trace。
 
 | 后端 | `compositebuildings` | `compositecheck` | GPU 对 `native_composite`（门附近） |
@@ -474,6 +446,8 @@ HEAD `27cd14d9` + 本批未提交改动，DLL SHA256 `3ba5ee73…`（最终 `334
 
 ### D3a-1 步兵与 SHP 弹体（2026-10-31）
 
+> 这里验收的是逐对象 CPU 重算，已由 D3a-2 的 `4AED70` 调用记录取代并删除；地图与对照方法仍沿用。
+
 #26 交接 = gamemd-reverse PR #29。HEAD `fa089a73` + 本批未提交改动，1024×768。受控地图 `GPUINF.MAP`（`scripts/make_inf.py`，GPUBLD 开局 (117,75) 附近加 Neutral 的 CIV1/CIV2/CIV3/E1/DOG/ENGINEER 与玩家的火箭飞行兵和两个 GI；地图规则让 E1 的武器发射 `Arcing=yes`、`Shadow=yes`、图像借 GI.SHP 的弹体）：Neutral 与玩家的 GI 开局即交火，火箭飞行兵起飞（覆盖 jumpjet 亮度、离地深度与 INFSHDW）。鼠标移出战术区，每个状态在同一暂停帧比较 `native_composite` 与 `gpu`（`scripts/cmpcomp.py`）。
 
 | 后端 | `compositeunits` | `compositecheck` | GPU 对 `native_composite` |
@@ -482,3 +456,17 @@ HEAD `27cd14d9` + 本批未提交改动，DLL SHA256 `3ba5ee73…`（最终 `334
 | Vulkan（5 个状态） | 同上 | 同上，交火样本一次 `body=2` | 2141–2334 像素，全在体素车辆矩形内（车辆动画使数字变化） |
 
 偶发的 `body=2` 由新的 `compositedrawn` 定位（DLL `3137826f…` 复跑 3 次，抓到一次）：GI 本体的像素原生是纯绿 `0460`，是另一个 GI 在其后 DrawBehind 画的目标线压在前一个 GI 身上，属 UI。回归：GPUBLD（D3D12）`tilecheck` 全一致；`compositecheck` 的 `body=143` 属于与体素车辆重叠的建筑动画 n314，与 Wrapper 重构无关。临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a`（`inf-d3d12`、`inf-vk`、`inf-diag*`、`bld-reg`）。回归新增 `UnitImageTests`，全部通过；Debug 构建无新警告。未实测：GPUDOOR 复跑（Wrapper 对建筑只换了字段来源）、步兵的半透明 visual/warping/tint、桥上与 OnBridge 的步兵、DropPod、Ares/AnimPalette/FirersPalette 弹体配色。
+
+### D3a-2 RenderLayers 改为记录 4AED70 调用，SHP 车辆（2026-10-31）
+
+HEAD `28b683dd` + 本批未提交改动，DLL SHA256 `7c7ad539…`，1024×768。读完 `73CEC0/73C5F0` 后发现 Ares 3.0p1 与 Phobos 在 SHP 车辆路径上的改写很多，经用户确认 RenderLayers 期间画到 Composite 的 SHP 全部改为记录 `4AED70` 的最终调用（见“RenderLayers”），删除动画 Terrain、动画、DoorAnim、步兵、弹体的重算（`AnimImage.h`、`UnitImage.h` 及其测试，`TerrainObjectImage` 的动态帧与视图范围、`BuildingImage` 的 DoorAnim 规则，`TechnoExt` 提升的两个 helper 还原为 `Hooks.Tint.cpp` 的 static）。SHP 车辆用 `GPUSHP.MAP`（`scripts/make_shp.py`，GPUINF 加 `[AMCV] Image=DLPH`：开局 MCV 换成海豚的 SHP 美术），选中后移动。每个状态在同一暂停帧比较 `native_composite` 与 `gpu`（`scripts/cmpcomp.py`，鼠标移出战术区）。
+
+| 地图（后端） | 状态 | `composite`/`compositecheck` | GPU 对 `native_composite` |
+| --- | --- | --- | --- |
+| GPUINF（D3D12） | 开局与交火、左右滚 | 每帧 65–96 次调用，`unmodeled=0`；`body=0 shadow=0`，`others+unexplained`=2334 全在体素车辆 | 2325–2334 像素，全在体素车辆矩形内 |
+| GPUANIM（D3D12） | 开局、上滚、左滚 | 滚动后 13–19 次调用，`mismatched=0`；开局 2301 像素为体素 MCV | 滚动后 0；开局只差 MCV |
+| GPUDMG（D3D12） | MCV 对地强制攻击，S_CLSN22 半透明爆炸 | `translucent=1`，S_CLSN22 无差异；`body=147` 归属炮口 GUNFIRE（`42382C`），落在未画的体素坦克上（同 D3b） | 爆炸区域 0；整帧只有体素单位与移开后的光标 |
+| GPUSHP（D3D12） | 开局、选中并移动（血条）、取消选择、右滚 | `unmodeled=0`，`unexplained=0`，只剩 32 个 `others` | 每个状态 32 像素（顶部建筑处，见“未支持与边界”）；SHP 车辆及其影子、血条 pips 一致 |
+| GPUSHP（Vulkan） | 开局、选中并移动、取消选择 | 同上 | 同上 |
+
+临时改 `spawn.ini` 与 `RA2MD.INI`，测后按字节还原。证据 `Debug/AutomationTests/stage-d/d3a`（`rec-inf`、`rec-anim`、`rec-dmg`、`shp1`、`shp2`、`vk-shp`）。回归脚本去掉 `AnimImageTests`、`UnitImageTests`，其余全部通过；Debug 构建无新警告。未实测：带 VXL 炮管的 SHP 车辆（走 scratch 组合，归 D3a-3）、SHP 炮塔、采矿动画与旗帜、GPUDOOR 的 DoorAnim。

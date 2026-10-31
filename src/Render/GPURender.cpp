@@ -811,9 +811,13 @@ void GPURender::OnRenderLayers(DSurface* pSurface, bool drawn)
 	// serves only the trace that checks this render.
 	if (drawn)
 	{
+		OverlaySnapshot::EndRecording();
 		if (capturing || Automation::IsRunning()) CompositeSnapshot::Record(CompositeSnapshot::Output, pSurface);
+		return;
 	}
-	else if (capturing && OverlaySnapshot::RedrawRequested) CompositeSnapshot::Record(CompositeSnapshot::Input, pSurface);
+	// RenderLayers' 4AED70 calls become OverlaySnapshot's Composite list.
+	OverlaySnapshot::BeginRecording(capturing ? pSurface : nullptr);
+	if (capturing && OverlaySnapshot::RedrawRequested) CompositeSnapshot::Record(CompositeSnapshot::Input, pSurface);
 	else CompositeSnapshot::Input.Valid = false;
 }
 

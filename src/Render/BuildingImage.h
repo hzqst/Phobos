@@ -1,7 +1,5 @@
 #pragma once
 
-#include "UnitImage.h"
-
 #include <cstdint>
 
 // Pure rules of the live buildings of the tactical Tile pass (gamemd-reverse #22): step 8
@@ -14,9 +12,9 @@ namespace BuildingImage
 	constexpr int ZShapeX = 198, ZShapeY = 446, NoZShapeWidth = 8;
 	// 43D290: the NormalZAdjust of the roof and of the other unloading images.
 	constexpr int RoofZAdjust = -40, DeployingZAdjust = -20;
-	// 43D290's ZAdjust of a bib (-1 - h) and of a door below (-h); 705E00 subtracts its 2 from each,
+	// 43D290's ZAdjust of a bib (-1 - h) and of a door below (-h); 705E00 subtracts this from each,
 	// and puts a shadow at -2 - h before it.
-	constexpr int BibZAdjust = -1, WrapperDepth = UnitImage::WrapperDepth;
+	constexpr int BibZAdjust = -1, WrapperDepth = 2, ShadowZAdjust = -2;
 	constexpr int FullBrightness = 1000;
 
 	constexpr int Add32(int a, int b) { return int(std::uint32_t(a) + std::uint32_t(b)); }
@@ -30,7 +28,7 @@ namespace BuildingImage
 	constexpr int BodyDepth(int normalZAdjust, int height) { return Sub32(Sub32(normalZAdjust, height), WrapperDepth); }
 	constexpr int BibDepth(int height) { return Sub32(Sub32(BibZAdjust, height), WrapperDepth); }
 	constexpr int DoorDepth(int height) { return Sub32(Sub32(0, height), WrapperDepth); }
-	constexpr int ShadowDepth(int height) { return UnitImage::ShadowDepth(height); }
+	constexpr int ShadowDepth(int height) { return Sub32(Sub32(ShadowZAdjust, height), WrapperDepth); }
 
 	// 43D290's Z shape offset: the type's ZShapePointMove unless it is constructing or selling (Phobos'
 	// 43D6E5 lets OnBuildup keep it), less the projection (6D1FE0) of the Foundation's far corner.
@@ -57,21 +55,6 @@ namespace BuildingImage
 
 	// 43D290's door below: frame 1 unless healthier than ConditionYellow.
 	constexpr int DoorFrame(bool healthy) { return healthy ? 0 : 1; }
-
-	// 43DA80's DoorAnim while unloading (gamemd-reverse #27 §3.2): truncated progress times DoorStages,
-	// reversed while closing (states 1, 0), 0 when idle (0, 0), clamped to the stages, then after the
-	// DoorStages frames when damaged with DamagedDoor. Its ZAdjust -5 - h, less 705E00's 2, only reads Z
-	// (2E00); the wrapper's shadow keeps ShadowDepth and reads Z (2E01).
-	constexpr int DoorAnimZAdjust = -5;
-	constexpr int DoorAnimFrame(int progress, int stages, bool closing, bool idle, bool damaged)
-	{
-		int frame = closing ? Sub32(stages, progress) : progress;
-		if (idle) frame = 0;
-		if (frame >= stages) frame = Sub32(stages, 1);
-		if (frame < 0) frame = 0;
-		return damaged ? Add32(frame, stages) : frame;
-	}
-	constexpr int DoorAnimDepth(int height) { return Sub32(Sub32(DoorAnimZAdjust, height), WrapperDepth); }
 
 	// 4D1890's building records (kind 6, step 4, gamemd-reverse #22 §6.2) call 4AED70 directly, with
 	// h of the saved Location: the body N - h - 2 with gradient 2 and the Z shape at its own offset

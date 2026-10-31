@@ -2,29 +2,14 @@
 #include "CompositeSnapshot.h"
 #include "TerrainPass.h"
 
-#include <AnimClass.h>
 #include <AnimTypeClass.h>
-#include <BulletClass.h>
-#include <DropPodLocomotionClass.h>
-#include <FPSCounter.h>
 #include <GameOptionsClass.h>
-#include <InfantryClass.h>
-#include <JumpjetLocomotionClass.h>
-#include <ScenarioClass.h>
-#include <SuperClass.h>
-#include <UnitClass.h>
-#include <Ext/Anim/Body.h>
-#include <Ext/AnimType/Body.h>
 #include <Ext/BuildingType/Body.h>
-#include <Ext/BulletType/Body.h>
 #include <Ext/Rules/Body.h>
 #include <Ext/Techno/Body.h>
 #include <Ext/TechnoType/Body.h>
 #include <Misc/BlittersFix.h>
-#include <New/Entity/ShieldClass.h>
-#include <Utilities/AresHelper.h>
 #include <Utilities/Debug.h>
-#include <Utilities/EnumFunctions.h>
 
 #include <algorithm>
 #include <array>
@@ -38,12 +23,16 @@ namespace OverlaySnapshot
 	Frame Current;
 	unsigned TraceCount = 0;
 	bool RedrawRequested = false;
+	DSurface* RecordingTarget = nullptr;
 
 	namespace
 	{
 		using TerrainImage::Point;
 		// The first shape that could not be acquired: overlay, frame, frames of the shape.
 		std::array<int, 4> FirstFailure {};
+		// The calls of the last recorded RenderLayers, and the first of them not modeled.
+		std::vector<RecordedCall> Recorded;
+		RecordedCall FirstUnmodeled;
 
 		bool Representable(Point point) { return point.X >= INT_MIN && point.X <= INT_MAX && point.Y >= INT_MIN && point.Y <= INT_MAX; }
 
@@ -55,126 +44,6 @@ namespace OverlaySnapshot
 
 		// 6D20E0: the screen height of a Z.
 		int AdjustZ(int z) { return reinterpret_cast<int(__fastcall*)(int)>(AdjustForZ)(z); }
-
-		// Ares 3.0p1's entry, when its export is the one these offsets belong to.
-		bool AresExport(const char* name, std::uintptr_t offset)
-		{
-			const auto base = AresHelper::AresBaseAddress;
-			return AresHelper::CanUseAres && AresHelper::AresVersion == AresHelper::Version::Ares30p
-				&& reinterpret_cast<std::uintptr_t>(GetProcAddress(reinterpret_cast<HMODULE>(base), name)) == base + offset;
-		}
-
-		// 422CA0 skips an anim above detail level 1 while the frame rate is below 55AF60's minimum; Ares'
-		// 422FCC lets it draw when its helper finds the rate high enough.
-		bool FrameRateAllows(int detailLevel)
-		{
-			if (detailLevel <= 1) return true;
-			static const bool ares = AresExport("AnimClass_Draw_Details", AresDrawDetails);
-			if (ares) return reinterpret_cast<bool(__cdecl*)()>(AresHelper::AresBaseAddress + AresFrameRateHelper)();
-			return FPSCounter::CurrentFrameRate >= Detail::GetMinFrameRate();
-		}
-
-		// Ares' 4232CE: the custom palette of the type's Ares extension, which replaces ANIM_PAL.
-		const ConvertClass* AresPalette(const AnimTypeClass* type)
-		{
-			static const bool ares = AresExport("AnimClass_Draw_SetPalette", AresSetPalette);
-			if (!ares) return nullptr;
-			const auto base = AresHelper::AresBaseAddress;
-			const auto* ext = static_cast<const std::uint8_t*>(reinterpret_cast<void*(__thiscall*)(void*, const AnimTypeClass*)>(base + AresMapFind)(
-				reinterpret_cast<void*>(base + AresAnimTypeMap), type));
-			return ext ? *reinterpret_cast<ConvertClass* const*>(ext + AresAnimPalette) : nullptr;
-		}
-
-		// Phobos' 423061: VisibleTo and RestrictVisibilityIfCloaked.
-		bool VisibleToPlayer(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext)
-		{
-			if (!typeExt->RestrictVisibilityIfCloaked && typeExt->VisibleTo == AffectedHouse::All) return true;
-			auto* techno = abstract_cast<TechnoClass*>(anim->OwnerObject);
-			auto* player = HouseClass::CurrentPlayer;
-			if (!techno && ext->IsTechnoTrailerAnim) techno = ext->Invoker;
-			if (typeExt->RestrictVisibilityIfCloaked && techno && !HouseClass::IsCurrentPlayerObserver()
-				&& (techno->CloakState == CloakState::Cloaked || techno->CloakState == CloakState::Cloaking)
-				&& !techno->Owner->IsAlliedWith(player) && !techno->GetCell()->Sensors_InclHouse(player->ArrayIndex)) return false;
-			auto* owner = anim->OwnerObject ? anim->OwnerObject->GetOwningHouse() : anim->Owner;
-			if (typeExt->VisibleTo_ConsiderInvokerAsOwner)
-			{
-				if (ext->Invoker) owner = ext->Invoker->Owner;
-				else if (ext->InvokerHouse) owner = ext->InvokerHouse;
-			}
-			return HouseClass::IsCurrentPlayerObserver() || EnumFunctions::CanTargetHouse(typeExt->VisibleTo, player, owner);
-		}
-
-		// Phobos' 423183: the level of Translucency.Cloaked while the owner cloaks, else of Translucency,
-		// at Value / End; 0 for none.
-		std::uint32_t CurveLevel(const AnimClass* anim, const AnimTypeClass* type, const AnimTypeExt* typeExt)
-		{
-			const double progress = static_cast<double>(anim->Animation.Value) / type->End;
-			if (typeExt->Translucency_Cloaked.HasValues())
-				if (const auto* techno = abstract_cast<TechnoClass*>(anim->OwnerObject))
-					if (techno->CloakState == CloakState::Cloaked || techno->CloakState == CloakState::Cloaking)
-						return std::uint32_t(typeExt->Translucency_Cloaked.Get(progress).GetBlitterFlags());
-			if (typeExt->Translucency.HasValues()) return std::uint32_t(typeExt->Translucency.Get(progress).GetBlitterFlags());
-			return 0;
-		}
-
-		// Phobos' 423122: XDrawOffset, the selection bracket alignments and the AttachEffect offset move
-		// the client point every part draws from.
-		void ApplyDrawOffset(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext, Point2D& point)
-		{
-			point.X += typeExt->XDrawOffset;
-			const bool applyX = typeExt->XDrawOffset_ApplyBracketWidth, applyY = typeExt->YDrawOffset_ApplyBracketHeight;
-			if ((applyX || applyY) && anim->OwnerObject && anim->OwnerObject->AbstractFlags & AbstractFlags::Techno)
-			{
-				// As 423122 and the shield's health bar.
-				constexpr int ShieldHealthBarOffset = -3;
-				auto* techno = static_cast<TechnoClass*>(anim->OwnerObject);
-				const bool invertX = typeExt->XDrawOffset_InvertBracketShift, invertY = typeExt->YDrawOffset_InvertBracketShift;
-				if (auto* building = abstract_cast<BuildingClass*>(techno))
-				{
-					auto* type = building->Type;
-					const auto position = TechnoExt::GetBuildingSelectBracketPosition(building, type, BuildingSelectBracketPosition::Top);
-					if (applyY && ((type->Height >= 0 && !invertY) || (type->Height < 0 && invertY)))
-						point.Y = position.Y + typeExt->YDrawOffset_BracketAdjust_Buildings.Get(typeExt->YDrawOffset_BracketAdjust);
-					if (applyX)
-					{
-						const int shift = static_cast<int>(Unsorted::CellWidthInPixels * (type->GetFoundationWidth() / 2.0) * (invertX ? -1 : 1));
-						point.X = position.X + shift + typeExt->XDrawOffset_BracketAdjust_Buildings.Get(typeExt->XDrawOffset_BracketAdjust);
-					}
-				}
-				else
-				{
-					auto* type = techno->GetTechnoType();
-					const auto position = TechnoExt::GetFootSelectBracketPosition(techno, Anchor(invertX ? HorizontalPosition::Left : HorizontalPosition::Right,
-						VerticalPosition::Top), techno->WhatAmI() == AbstractType::Infantry);
-					if (applyY && ((type->PixelSelectionBracketDelta <= 0 && !invertY) || (type->PixelSelectionBracketDelta > 0 && invertY)))
-						point.Y = position.Y + type->PixelSelectionBracketDelta + typeExt->YDrawOffset_BracketAdjust;
-					if (applyX) point.X = position.X + typeExt->XDrawOffset_BracketAdjust;
-				}
-				if (applyY)
-					if (auto* shield = TechnoExt::Fetch(techno)->Shield.get())
-					{
-						auto* shieldType = shield->GetType();
-						if (!shield->IsBrokenAndNonRespawning() && (shield->GetHealthRatio() > 0.0 || !shieldType->Pips_HideIfNoStrength)
-							&& ((shieldType->BracketDelta <= 0 && !invertY) || (shieldType->BracketDelta > 0 && invertY)))
-							point.Y += shieldType->BracketDelta + ShieldHealthBarOffset;
-					}
-			}
-			point += ext->AEDrawOffset;
-		}
-
-		// Phobos' 4232E2: the scheme of the anim's owner, else of its invoker's house when the fallback is on,
-		// else the default one, the next one when it applies lighting.
-		const ConvertClass* AltPalette(const AnimClass* anim, const AnimTypeExt* typeExt, const AnimExt* ext)
-		{
-			const auto* rulesExt = RulesExt::Global();
-			const auto* owner = anim->Owner;
-			if (typeExt->AltPalette_UseInvokerFallback.Get(rulesExt->AnimRemapUseInvokerFallback) && !owner) owner = ext->InvokerHouse;
-			const int scheme = (owner ? owner->ColorSchemeIndex - 1 : rulesExt->AnimRemapDefaultColorScheme) + (typeExt->AltPalette_ApplyLighting ? 1 : 0);
-			return SchemeConvert(scheme);
-		}
-
-		// The rounds of a tiled anim beyond which the capture gives up (the native loop never ends).
-		constexpr size_t MaxTiles = 4096;
 
 		// What one overlay draws: a frame of an image, lit and Z-adjusted, with an optional Z shape.
 		struct Call
@@ -190,8 +59,7 @@ namespace OverlaySnapshot
 			// Whether 6D6D10's test of 47FB90's rectangle applies; 6D97D0 tests the object's own one
 			// and 6D7C00 none.
 			bool Bounded = true;
-			// 2E00 and 2E01 (an animated or crumbling Terrain object) test Z without writing it; E01 (a
-			// standalone anim's shadow) does not test it either.
+			// The Tile pass tests and writes Z; a recorded call may only test it (2000h) or do neither.
 			bool TestsDepth = true, WritesDepth = true;
 			// The translucency bits of a colored draw (2, 4, 6).
 			std::uint8_t Translucency = 0;
@@ -199,6 +67,8 @@ namespace OverlaySnapshot
 			int Tint = 0;
 			// 4D1890 cuts a fogged body's clip shorter.
 			int ClipHeight = INT_MAX;
+			// A recorded call's own clip, which its point is relative to, instead of the capture's.
+			const RectangleStruct* Bounds = nullptr;
 		};
 
 		struct Capture
@@ -297,6 +167,7 @@ namespace OverlaySnapshot
 			// clipped and given its row depths by 4373B0 or 437A10.
 			void Place(int cellX, int cellY, Layer source, int index, const Call& call, Point center, bool shadow)
 			{
+				const auto& clip = call.Bounds ? *call.Bounds : Clip;
 				auto& count = *Count;
 				// 4AED70 and 47FB90 draw nothing for a type without an image.
 				if (!call.Image) { ++count.NoImage; return; }
@@ -314,18 +185,18 @@ namespace OverlaySnapshot
 				if (!bounds.Ready) { ++count.Frame; return; }
 				if (!bounds.ID || !shape.ID) { ++count.Empty; return; }
 				const auto boundsAt = OverlayImage::FrameOrigin(center, bounds.CanvasWidth, bounds.CanvasHeight, bounds.Frame.Left, bounds.Frame.Top);
-				if (call.Bounded && !TerrainSnapshot::Intersects(Clip, boundsAt.X, boundsAt.Y, bounds.Frame.Width, bounds.Frame.Height)) { ++count.Outside; return; }
+				if (call.Bounded && !TerrainSnapshot::Intersects(clip, boundsAt.X, boundsAt.Y, bounds.Frame.Width, bounds.Frame.Height)) { ++count.Outside; return; }
 				const auto at = OverlayImage::FrameOrigin(center, shape.CanvasWidth, shape.CanvasHeight, shape.Frame.Left, shape.Frame.Top);
 				if (shape.Frame.Width <= 0 || shape.Frame.Height <= 0) { ++count.Empty; return; }
-				if (!Representable({at.X - Clip.X, at.Y - Clip.Y})) { ++count.Outside; return; }
+				if (!Representable({at.X - clip.X, at.Y - clip.Y})) { ++count.Outside; return; }
 				const bool compressed = (shape.Frame.Flags & CompressedFrame) != 0;
 				Cut cut {{0, 0, shape.Frame.Width, shape.Frame.Height}};
 				if (call.ZShape && !CutByZShape(call, shape, cut)) { ++count.ZShape; return; }
 				if (!cut.Part.Width || !cut.Part.Height) { ++count.Empty; return; }
 				// The surface rectangle keeps the frame's place; only its size follows the cut.
-				const ShapeDepth::Rect dest {int(at.X - Clip.X), int(at.Y - Clip.Y), cut.Part.Width, cut.Part.Height};
+				const ShapeDepth::Rect dest {int(at.X - clip.X), int(at.Y - clip.Y), cut.Part.Width, cut.Part.Height};
 				const auto clipped = ShapeDepth::Clip(dest, cut.Part, compressed ? cut.Part : ShapeDepth::Rect {0, 0, shape.Frame.Width, shape.Frame.Height},
-					Clip.Width, std::min(Clip.Height, call.ClipHeight), compressed);
+					clip.Width, std::min(clip.Height, call.ClipHeight), compressed);
 				if (!clipped.Drawn || clipped.Width <= 0 || clipped.Rows <= 0) { ++count.Outside; return; }
 				if (clipped.SourceX < 0 || clipped.SourceY < 0 || clipped.SourceX + clipped.Width > shape.Frame.Width
 					|| clipped.SourceY + clipped.Rows > shape.Frame.Height) { ++count.Unsupported; return; }
@@ -340,8 +211,8 @@ namespace OverlaySnapshot
 				Draw draw;
 				draw.ID = shape.ID;
 				draw.Table = table;
-				draw.X = Clip.X + clipped.Dest.X;
-				draw.Y = Clip.Y + clipped.Dest.Y;
+				draw.X = clip.X + clipped.Dest.X;
+				draw.Y = clip.Y + clipped.Dest.Y;
 				draw.Width = clipped.Width;
 				draw.Height = clipped.Rows;
 				draw.FrameX = clipped.SourceX;
@@ -349,8 +220,8 @@ namespace OverlaySnapshot
 				draw.LightRow = TerrainImage::LightRow(call.Brightness);
 				draw.Gradient = gradients[call.Gradient];
 				draw.Rows = compressed
-					? ShapeDepth::RLE(draw.Gradient, MaxValue, BoundsY, Clip.Y, dest, clipped.Dest, call.ZAdjust, zshaped)
-					: ShapeDepth::Plain(draw.Gradient, MaxValue, BoundsY, Clip.Y, clipped.Dest, call.ZAdjust);
+					? ShapeDepth::RLE(draw.Gradient, MaxValue, BoundsY, clip.Y, dest, clipped.Dest, call.ZAdjust, zshaped)
+					: ShapeDepth::Plain(draw.Gradient, MaxValue, BoundsY, clip.Y, clipped.Dest, call.ZAdjust);
 				draw.Compressed = compressed;
 				draw.Shadow = shadow;
 				draw.Mask = call.Convert->HalfTranslucencyMask;
@@ -489,17 +360,15 @@ namespace OverlaySnapshot
 			}
 
 			// 6D97D0, 71CC50 and 71C1B0 (with Phobos' 71C1FE and 71C2BC) for an object of the ground
-			// layer: the body, then its own shadow. Dynamic for an object 6D8DB0 selected, which 71C1B0
-			// draws with its animation's frame and without writing Z (2E00, 2E01).
-			void Terrain(TerrainClass* terrain, bool dynamic)
+			// layer: the body, then its own shadow.
+			void Terrain(TerrainClass* terrain)
 			{
 				auto& count = *Count;
 				const auto* type = terrain->Type;
 				if (!CursorSnapshot::Readable(type, sizeof(TerrainTypeClass))) { ++count.Frame; return; }
 				++count.Terrains;
 				// An animated or crumbling object draws on Composite (6D8DB0), and only there.
-				const bool animated = type->IsAnimated, crumbling = terrain->IsCrumbling;
-				if ((animated || crumbling) != dynamic) { ++count.Dynamic; return; }
+				if (type->IsAnimated || terrain->IsCrumbling) { ++count.Dynamic; return; }
 				if (!terrain->IsOnMap || terrain->InLimbo) return;
 				// 6D97D0 and 71CC50: the object's rectangle (71D160) must meet the clip.
 				RectangleStruct dimensions {};
@@ -522,17 +391,6 @@ namespace OverlaySnapshot
 				Call call;
 				call.Image = type->Image;
 				call.Frame = TerrainObjectImage::StaticFrame(damaged);
-				if (dynamic)
-				{
-					// 71C1FE reads the frames of the type's image as they are.
-					const auto* image = type->Image;
-					const bool damagedFrames = ext && ext->HasDamagedFrames;
-					const int length = CursorSnapshot::Readable(image, sizeof(SHPStruct)) ? TerrainObjectImage::AnimationLength(ext && ext->AnimationLength.isset(),
-						ext ? ext->AnimationLength.Get(0) : 0, image->Frames, damagedFrames) : 0;
-					call.Frame = TerrainObjectImage::DynamicFrame(animated, crumbling, ext && ext->HasCrumblingFrames, damagedFrames, damaged,
-						terrain->Animation.Value, length);
-					call.WritesDepth = false;
-				}
 				call.Convert = cell->LightConvert;
 				call.Brightness = std::int16_t(cell->Intensity_Terrain);
 				call.ZAdjust = TerrainObjectImage::Depth(height, false);
@@ -569,34 +427,27 @@ namespace OverlaySnapshot
 				Place(cell->MapCoords.X, cell->MapCoords.Y, Layer::Terrain, index, call, center, true);
 			}
 
-			// 705E00's choices for a Techno it draws (gamemd-reverse #22 §5, §7, #26 §4): the palette, the
-			// tint and intensity with Phobos' 70632E and 706389, the visual's translucency, the shadow, and the
-			// caller's point.
+			// 705E00's choices for a building that draws its normal visual (gamemd-reverse #22 §5, §7): the
+			// palette, the tint and intensity with Phobos' 70632E and 706389, the shadow, and 43CEA0's point.
 			struct Wrapper
 			{
-				TechnoClass* Techno = nullptr;
-				// The type's index and the layer the trace files the draws under.
-				int Index = -1;
-				Layer Source = Layer::Building;
-				// A building's TerrainPalette takes the center cell's terrain intensity.
-				bool TerrainPalette = false;
+				BuildingClass* Building = nullptr;
+				BuildingTypeClass* Type = nullptr;
 				CellStruct MapCoords {};
 				const CellClass* Cell = nullptr;
 				const CellClass* CenterCell = nullptr;
 				const ConvertClass* Convert = nullptr;
 				int Height = 0;
 				bool DrawShadow = false;
-				std::uint8_t Translucency = 0;
 				Point Position {};
 
-				// Phobos' 706389 adds the custom intensity to what is not an infantry, whose 51946D added it.
 				int Intensity(int brightness) const
 				{
-					if (TerrainPalette) brightness = std::int16_t(CenterCell->Intensity_Terrain);
-					int value = Techno->GetFlashingIntensity(brightness);
-					if (Techno->IsIronCurtained()) value = Techno->GetInvulnerabilityTintIntensity(value);
-					if (TechnoExt::Fetch(Techno)->AirstrikeTargetingMe) value = Techno->GetAirstrikeTintIntensity(value);
-					return Techno->WhatAmI() == AbstractType::Infantry ? value : value + TechnoExt::GetCustomTintIntensity(Techno);
+					if (Type->TerrainPalette) brightness = std::int16_t(CenterCell->Intensity_Terrain);
+					int value = Building->GetFlashingIntensity(brightness);
+					if (Building->IsIronCurtained()) value = Building->GetInvulnerabilityTintIntensity(value);
+					if (TechnoExt::Fetch(Building)->AirstrikeTargetingMe) value = Building->GetAirstrikeTintIntensity(value);
+					return value + TechnoExt::GetCustomTintIntensity(Building);
 				}
 			};
 
@@ -624,9 +475,8 @@ namespace OverlaySnapshot
 					++count.BuildingsUnsupported;
 					return false;
 				}
-				wrapper.Techno = building;
-				wrapper.Index = type->ArrayIndex;
-				wrapper.TerrainPalette = type->TerrainPalette;
+				wrapper.Building = building;
+				wrapper.Type = type;
 				wrapper.MapCoords = building->GetMapCoords();
 				wrapper.Cell = MapClass::Instance.GetCellAt(wrapper.MapCoords);
 				// 705E00 reads the tint's shroud and the TerrainPalette from the center's cell.
@@ -644,11 +494,10 @@ namespace OverlaySnapshot
 				return true;
 			}
 
-			// A part 705E00 draws, then its own shadow at half the frames: both test Z and write it unless
-			// the part only reads it (2E00, 2E01); the wrapper's tint is shroud-cleared, and its visual's
-			// translucency only applies to the part.
+			// A part 705E00 draws, then its own shadow at half the frames, both testing Z and writing it; the
+			// wrapper's tint is shroud-cleared.
 			void WrapperPart(const Wrapper& wrapper, const SHPStruct* shape, int frame, int depth, int gradient, int brightness, int tint,
-				bool writes, const SHPStruct* zshape = nullptr, BuildingImage::Offset offset = {})
+				const SHPStruct* zshape = nullptr, BuildingImage::Offset offset = {})
 			{
 				auto& count = *Count;
 				Call call;
@@ -660,25 +509,22 @@ namespace OverlaySnapshot
 				call.Gradient = gradient;
 				call.Bounded = false;
 				call.Tint = wrapper.CenterCell->IsShrouded() ? 0 : tint;
-				call.WritesDepth = writes;
 				call.ZShape = zshape;
 				call.ZShapeX = offset.X;
 				call.ZShapeY = offset.Y;
-				call.Translucency = wrapper.Translucency;
-				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, wrapper.Source, wrapper.Index, call, wrapper.Position, false);
+				const int index = wrapper.Type->ArrayIndex;
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, false);
 				if (!wrapper.DrawShadow) return;
 				const int frames = FrameCount(shape);
 				if (frames == UnloadedShape) { ++count.Unloaded; return; }
 				if (frames < 0) { ++count.Frame; return; }
 				call.Frame = BuildingImage::Add32(std::int16_t(frames) / 2, frame);
 				call.Brightness = BuildingImage::FullBrightness;
-				call.ZAdjust = UnitImage::ShadowDepth(wrapper.Height);
+				call.ZAdjust = BuildingImage::ShadowDepth(wrapper.Height);
 				call.Gradient = int(ZGradient::Ground);
 				call.Tint = 0;
 				call.ZShape = nullptr;
-				auto position = wrapper.Position;
-				if (wrapper.Techno->IsOnCarryall) position.Y -= UnitImage::CarryallLift;
-				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, wrapper.Source, wrapper.Index, call, position, true);
+				Place(wrapper.MapCoords.X, wrapper.MapCoords.Y, Layer::Building, index, call, wrapper.Position, true);
 			}
 
 			// 6D9920 and 43CEA0 (force 1, the clip ViewBounds) and 43D290 for a building of the ground
@@ -691,7 +537,7 @@ namespace OverlaySnapshot
 				if (building->IsFogged && !Unsorted::ArmageddonMode) { ++count.BuildingsFogged; return; }
 				Wrapper wrapper;
 				if (!Wrap(building, wrapper)) return;
-				auto* type = building->Type;
+				auto* type = wrapper.Type;
 				auto* image = building->GetImage();
 				if (!image) { ++count.NoImage; return; }
 				const auto mission = building->GetCurrentMission();
@@ -701,7 +547,7 @@ namespace OverlaySnapshot
 				const int height = wrapper.Height;
 				const auto part = [&](const SHPStruct* shape, int frame, int depth, int gradient, int brightness, const SHPStruct* zshape, BuildingImage::Offset offset)
 				{
-					WrapperPart(wrapper, shape, frame, depth, gradient, brightness, tint, true, zshape, offset);
+					WrapperPart(wrapper, shape, frame, depth, gradient, brightness, tint, zshape, offset);
 				};
 				const auto healthy = building->GetHealthPercentage() > RulesClass::Instance->ConditionYellow;
 				auto& timer = building->UnloadTimer;
@@ -754,214 +600,6 @@ namespace OverlaySnapshot
 					++count.Doors;
 					part(door, BuildingImage::DoorFrame(healthy), BuildingImage::DoorDepth(height), int(ZGradient::Ground), light, nullptr, {});
 				}
-			}
-
-			// 43CEA0's mode 2 call (force 1, the ViewBounds, dynamic) of 43DA80 for a building that is not
-			// fogged (gamemd-reverse #27 §3.2): of its parts only DoorAnim, through 705E00 with Z read only and
-			// no tint. The linked objects and the voxel turret and barrel are #26's, as is the tint Phobos'
-			// 43DC1C builds for them.
-			void BuildingDynamic(BuildingClass* building)
-			{
-				auto& count = *Count;
-				++count.Buildings;
-				if (building->IsFogged) { ++count.BuildingsFogged; return; }
-				const auto* type = building->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(BuildingTypeClass))) { ++count.Frame; return; }
-				auto& timer = building->UnloadTimer;
-				if (building->GetCurrentMission() != Mission::Unload) return;
-				++count.Unloading;
-				if (!type->DoorAnim
-					|| !(timer.AreStates00() || timer.AreStates11() || timer.AreStates10() || timer.AreStates01())) return;
-				Wrapper wrapper;
-				if (!Wrap(building, wrapper)) return;
-				++count.Doors;
-				const bool damaged = !(building->GetHealthPercentage() > RulesClass::Instance->ConditionYellow) && type->DamagedDoor;
-				const int frame = BuildingImage::DoorAnimFrame(int(timer.PercentageDone() * type->DoorStages), type->DoorStages, timer.AreStates10(),
-					timer.AreStates00(), damaged);
-				WrapperPart(wrapper, type->DoorAnim, frame, BuildingImage::DoorAnimDepth(wrapper.Height), int(ZGradient::Ground),
-					std::int16_t(wrapper.Cell->Intensity_Normal), 0, false);
-			}
-
-			// 6D8DB0's Foot branch, 5F4B10 (forced) and 518F90 with Phobos' 518FC8, 51933B, 51946D and 5194EF
-			// for an infantry on its normal image (gamemd-reverse #26 §4.4): INFSHDW above the ground, then the
-			// body through 705E00 with its own shadow. In a tube nothing draws; a DropPod, a disguise and an
-			// infantry not clearly visible (705E00's other flags and palette) are not modeled.
-			void Infantry(InfantryClass* infantry, bool inRange)
-			{
-				auto& count = *Count;
-				++count.Infantry;
-				if (!inRange) { ++count.InfantryOutside; return; }
-				const auto location = infantry->Location;
-				if (ScenarioClass::Instance->SpecialFlags.FogOfWar && MapClass::Instance.IsLocationFogged(location)) { ++count.InfantryFogged; return; }
-				if (!TacticalClass::Instance->CoordsToClient(infantry->GetCoords()).second) { ++count.InfantryOutside; return; }
-				if (!Unsorted::ArmageddonMode && Game::hWnd && infantry->InLimbo) { ++count.InfantryOutside; return; }
-				Point2D client {};
-				if (!Project(infantry->GetRenderCoords(), client)) { ++count.InfantryOutside; return; }
-				if (infantry->TubeIndex != -1) return;
-				auto* type = infantry->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(InfantryTypeClass)) || !infantry->Locomotor) { ++count.Frame; return; }
-				if (infantry->GetHeight() > 0 && locomotion_cast<DropPodLocomotionClass*>(infantry->Locomotor)) { ++count.InfantryUnsupported; return; }
-				auto* image = infantry->GetImage();
-				if (!image) return;
-
-				CellStruct mapCoords {};
-				infantry->GetMapCoordsAgain(&mapCoords);
-				const auto* cell = MapClass::Instance.GetCellAt(mapCoords);
-				const auto center = infantry->GetCoords();
-				const auto* centerCell = MapClass::Instance.GetCellAt(CellStruct {std::int16_t(center.X / 256), std::int16_t(center.Y / 256)});
-				Point2D xy {location.X, location.Y};
-				const auto* target = MapClass::Instance.GetTargetCell(xy);
-				if (!cell || !centerCell || !target) { ++count.Palette; return; }
-				// Phobos' 518FC8: the effect and custom tint, which the shroud at GetCoords clears.
-				const int tint = TechnoExt::GetTintColor(infantry, true, true, true) | TechnoExt::GetCustomTintColor(infantry);
-
-				// The light: Phobos' 51933B for a jumpjet, else the height or the ground path, with
-				// ExtraInfantryLight; then Phobos' 51946D.
-				const auto* scenario = ScenarioClass::Instance;
-				int level = scenario->NormalLighting.Level;
-				if (reinterpret_cast<bool(__cdecl*)()>(IonActive)()) level = scenario->IonLighting.Level;
-				else if (PsyDom::Active()) level = scenario->DominatorLighting.Level;
-				else if (NukeFlash::IsFadingIn()) level = scenario->NukeLighting.Level;
-				const int bridgeHeight = *reinterpret_cast<const int*>(InfantryBridgeHeight);
-				const auto targetFlags = std::uint32_t(target->Flags);
-				const auto intensity = std::int16_t(cell->Intensity_Normal);
-				int light = 0;
-				if (locomotion_cast<JumpjetLocomotionClass*>(infantry->Locomotor))
-				{
-					int levelIntensity = 0, cellIntensity = FullBrightness;
-					TechnoExt::GetLevelIntensity(infantry, level, levelIntensity, cellIntensity, RulesExt::Global()->JumpjetLevelLightMultiplier,
-						TechnoExt::IsOnBridge(infantry));
-					light = levelIntensity + cellIntensity;
-				}
-				else
-				{
-					const bool raised = targetFlags & UnitImage::RaisedCellFlag;
-					if (UnitImage::HeightLight(infantry->OnBridge, raised, location.Z, MapClass::Instance.GetCellFloorHeight(location), bridgeHeight))
-					{
-						const int step = *reinterpret_cast<const int*>(InfantryLevelStep);
-						if (!UnitImage::Add32(step, step)) { ++count.InfantryUnsupported; return; }
-						light = UnitImage::LevelLight(infantry->GetHeight(), step, level, intensity);
-					}
-					else light = UnitImage::GroundLight(raised, intensity);
-				}
-				light = UnitImage::Add32(light, *reinterpret_cast<const int*>(&RulesClass::Instance->ExtraInfantryLight));
-				if (infantry->IsIronCurtained()) light = infantry->GetInvulnerabilityTintIntensity(light);
-				if (TechnoExt::Fetch(infantry)->AirstrikeTargetingMe) light = infantry->GetAirstrikeTintIntensity(light);
-				light += TechnoExt::GetCustomTintIntensity(infantry);
-
-				const auto offset = *reinterpret_cast<const std::int8_t*>(&infantry->unknown_bool_6B4);
-				const auto at = [&](int x, int y) { return Point {std::int64_t(x) + ViewX, std::int64_t(y) + ViewY}; };
-				// INFSHDW, which Phobos' 5194EF skips for an infantry that is not uncloaked.
-				const bool bridgeCell = targetFlags & UnitImage::BridgeCellFlag, direction = targetFlags & UnitImage::BridgeDirectionFlag;
-				const auto bridgeAt = [target](FacingType facing)
-				{
-					const auto* neighbour = target->GetNeighbourCell(facing);
-					return neighbour && (std::uint32_t(neighbour->Flags) & UnitImage::BridgeCellFlag);
-				};
-				const int shadowHeight = UnitImage::ShadowHeight(infantry->GetHeight(), bridgeHeight, bridgeCell, direction,
-					bridgeCell && direction && bridgeAt(FacingType::North), bridgeCell && !direction && bridgeAt(FacingType::West));
-				if (shadowHeight > 0 && infantry->CloakState == CloakState::Uncloaked)
-				{
-					Call call;
-					call.Image = *reinterpret_cast<SHPStruct* const*>(InfantryShadowShape);
-					call.Frame = UnitImage::InfantryShadowFrame;
-					call.Convert = FileSystem::PALETTE_PAL;
-					call.Brightness = FullBrightness;
-					call.ZAdjust = UnitImage::InfantryShadowDepth(AdjustZ(UnitImage::Sub32(location.Z, shadowHeight)));
-					call.Gradient = int(ZGradient::Ground);
-					call.Bounded = false;
-					call.WritesDepth = false;
-					const auto drawn = Target->size();
-					Place(mapCoords.X, mapCoords.Y, Layer::Infantry, type->ArrayIndex, call,
-						at(client.X, UnitImage::InfantryShadowY(client.Y, offset, AdjustZ(shadowHeight))), true);
-					count.InfantryShadows += Target->size() != drawn;
-				}
-
-				// 705E00 with the nominal flags 256, ZAdjust [825500], gradient 2 and no Z write.
-				const auto visual = UnitImage::Wrapped(int(infantry->VisualCharacter(VARIANT_FALSE, nullptr)), infantry->CloakProgress.Value != 0,
-					infantry->IsBeingWarpedOut() || infantry->IsWarpingIn(), false);
-				if (!visual.Drawn) { ++count.InfantryHidden; return; }
-				if (infantry->IsDisguised() || !infantry->IsClearlyVisibleTo(HouseClass::CurrentPlayer)) { ++count.InfantryUnsupported; return; }
-				Wrapper wrapper;
-				wrapper.Techno = infantry;
-				wrapper.Index = type->ArrayIndex;
-				wrapper.Source = Layer::Infantry;
-				wrapper.MapCoords = mapCoords;
-				wrapper.Cell = cell;
-				wrapper.CenterCell = centerCell;
-				wrapper.Convert = infantry->GetRemapColour();
-				if (!wrapper.Convert) { ++count.Palette; return; }
-				const bool airborne = infantry->GetHeight() != 0;
-				wrapper.Height = AdjustZ(infantry->GetZ());
-				wrapper.DrawShadow = Game::bDrawShadow && visual.Shadow && !airborne && !type->NoShadow;
-				wrapper.Translucency = visual.Bits;
-				wrapper.Position = at(client.X, UnitImage::InfantryY(client.Y, offset));
-				const int depth = UnitImage::FootDepth(*reinterpret_cast<const int*>(InfantryZAdjust), airborne, wrapper.Height,
-					airborne ? 0 : infantry->GetZAdjustment());
-				const int frame = reinterpret_cast<int(__thiscall*)(InfantryClass*)>(InfantryFrame)(infantry);
-				WrapperPart(wrapper, image, frame, depth, int(ZGradient::Deg90), light, tint, false);
-			}
-
-			// Ares' 468379: the palette its helper finds for the bullet type, else none.
-			static const ConvertClass* AresBulletConvert(const BulletTypeClass* type)
-			{
-				static const bool ares = AresExport("BulletClass_Draw_SetAnimPalette", AresBulletPalette);
-				if (!ares) return nullptr;
-				auto* ext = *reinterpret_cast<void* const*>(reinterpret_cast<const std::uint8_t*>(type) + AresBulletTypeExt);
-				return ext ? reinterpret_cast<const ConvertClass*(__thiscall*)(void*)>(AresHelper::AresBaseAddress + AresBulletPaletteHelper)(ext) : nullptr;
-			}
-
-			// 6D8DB0's plain branch, 5F4B10 (forced) and 468090 with Ares' 468379 and Phobos' 4683F2 for an SHP
-			// bullet (gamemd-reverse #26 §4.6): its shadow, then its body. A voxel bullet is not modeled.
-			void Bullet(BulletClass* bullet, bool inRange)
-			{
-				auto& count = *Count;
-				++count.Bullets;
-				if (!inRange || !TacticalClass::Instance->CoordsToClient(bullet->GetCoords()).second) { ++count.BulletsOutside; return; }
-				if (!Unsorted::ArmageddonMode && Game::hWnd && bullet->InLimbo) { ++count.BulletsOutside; return; }
-				Point2D client {};
-				if (!Project(bullet->GetRenderCoords(), client)) { ++count.BulletsOutside; return; }
-				const auto location = bullet->Location;
-				if (ScenarioClass::Instance->SpecialFlags.FogOfWar && MapClass::Instance.IsLocationFogged(location)) { ++count.BulletsHidden; return; }
-				auto* type = bullet->Type;
-				if (!CursorSnapshot::Readable(type, sizeof(BulletTypeClass))) { ++count.Frame; return; }
-				if (type->Inviso || bullet->SpawnNextAnim) { ++count.BulletsHidden; return; }
-				if (type->Voxel) { ++count.BulletsVoxel; return; }
-				auto* image = bullet->GetImage();
-				if (!image) return;
-				const int frame = reinterpret_cast<int(__thiscall*)(BulletClass*)>((*reinterpret_cast<void* const* const*>(bullet))[BulletFrameSlot / 4])(bullet);
-				Point2D xy {location.X, location.Y};
-				const auto* target = MapClass::Instance.GetTargetCell(xy);
-				if (!target) { ++count.Palette; return; }
-				const auto level = UnitImage::BulletLevel(bullet->OnBridge, std::uint32_t(target->Flags) & UnitImage::BridgeCellFlag, bullet->GetHeight(),
-					MapClass::Instance.GetCellFloorHeight(location), *reinterpret_cast<const int*>(BulletBridgeHeight));
-				const auto at = [&](int x, int y) { return Point {std::int64_t(x) + ViewX, std::int64_t(y) + ViewY}; };
-				Call call;
-				call.Image = image;
-				call.Frame = frame;
-				call.Brightness = FullBrightness;
-				call.Gradient = int(ZGradient::Ground);
-				call.Bounded = false;
-				call.WritesDepth = false;
-				if (level.Height > 0 && type->Shadow)
-				{
-					call.Convert = FileSystem::PALETTE_PAL;
-					call.ZAdjust = UnitImage::BulletShadowDepth(AdjustZ(level.Floor));
-					Place(target->MapCoords.X, target->MapCoords.Y, Layer::Bullet, type->GetArrayIndex(), call,
-						at(client.X, UnitImage::Add32(client.Y, AdjustZ(level.Height))), true);
-				}
-				call.Convert = AresBulletConvert(type);
-				if (!call.Convert)
-				{
-					call.Convert = FileSystem::PALETTE_PAL;
-					if (type->AnimPalette) call.Convert = FileSystem::ANIM_PAL;
-					else if (type->FirersPalette)
-						call.Convert = SchemeConvert(bullet->InheritedColor == -1 ? HouseClass::CurrentPlayer->ColorSchemeIndex : bullet->InheritedColor);
-				}
-				if (!call.Convert) { ++count.Palette; return; }
-				const auto* typeExt = BulletTypeExt::Fetch(type);
-				call.ZAdjust = UnitImage::BulletDepth(AdjustZ(bullet->GetZ()), typeExt ? typeExt->ZAdjust.Get() : 0);
-				Place(target->MapCoords.X, target->MapCoords.Y, Layer::Bullet, type->GetArrayIndex(), call, at(client.X, client.Y), false);
 			}
 
 			// 4D1890's building branch (kind 6) for an enabled record whose saved rectangle meets the
@@ -1073,182 +711,6 @@ namespace OverlaySnapshot
 				}
 			}
 
-			// 422C70 -> 5F4B10 -> 422CA0 for an anim RenderLayers dispatched (gamemd-reverse #27 §4), with
-			// Phobos' 423061, 423122, 423183, 4232BF, 4232E2, 423365, 423420, 423654, 423660, 4236F0 and 423855
-			// and Ares' 422FCC and 4232CE: the HasExtras shadow, then a tiled, flat or plain body, the plain one
-			// followed by its Type.Shadow shadow.
-			void Anim(AnimClass* anim)
-			{
-				auto& count = *Count;
-				// 422C70 draws once the loop delay has run out; 5F4B10 (forced) skips limbo in a normal window
-				// and needs the render coords projected.
-				if (anim->LoopDelay) { ++count.AnimsDelayed; return; }
-				if (!Unsorted::ArmageddonMode && Game::hWnd && anim->InLimbo) { ++count.AnimsLimbo; return; }
-				const auto coords = anim->GetRenderCoords();
-				Point2D client {};
-				if (!Project(coords, client)) { ++count.AnimsUnprojected; return; }
-				auto* type = anim->Type;
-				// 422CA0 draws RING1 as two Direct3D triangles, which the capture does not model.
-				if (*reinterpret_cast<const bool*>(Direct3DUsable) && ZBuffer::Instance && !_strcmpi(type->ID, "RING1")) { ++count.AnimsRing; return; }
-				if (!FrameRateAllows(type->DetailLevel) || anim->Invisible || type->DetailLevel > GameOptionsClass::Instance.DetailLevel
-					|| (anim->IsFogged && type->ShouldFogRemove)) { ++count.AnimsHidden; return; }
-				auto* image = anim->GetImage();
-				if (!image) { ++count.AnimsNoImage; return; }
-				const auto* typeExt = AnimTypeExt::Fetch(type);
-				const auto* ext = AnimExt::Fetch(anim);
-				if (!typeExt || !ext) { ++count.AnimsUnsupported; return; }
-				if (!VisibleToPlayer(anim, typeExt, ext)) { ++count.AnimsHidden; return; }
-				const int frame = AnimImage::Frame(type->Start, anim->Animation.Value);
-				std::uint32_t flags = std::uint32_t(anim->AnimFlags);
-				if (anim->UnderTemporal) flags |= AnimImage::TemporalBits(type->DoubleThick);
-				if (type->TranslucencyDetailLevel <= GameOptionsClass::Instance.DetailLevel)
-				{
-					const auto translucency = type->Translucent ? AnimImage::Staged(std::int8_t(anim->TranslucencyLevel), anim->Animation.Value, type->End)
-						: AnimImage::Curve(anim->TranslucencyLevel, CurveLevel(anim, type, typeExt));
-					if (translucency.Skip) { ++count.AnimsHidden; return; }
-					flags |= translucency.Bits;
-				}
-				flags = AnimImage::ColorFlags(flags);
-				Point2D point = client;
-				ApplyDrawOffset(anim, typeExt, ext, point);
-
-				// #27 §4.3: the palette and brightness.
-				auto* renderCell = MapClass::Instance.TryGetCellAt(coords);
-				if (!renderCell) { ++count.Palette; return; }
-				const bool normalLight = type->UseNormalLight;
-				const ConvertClass* convert = nullptr;
-				int brightness = FullBrightness;
-				if (type->IsVeins)
-				{
-					convert = HouseClass::CurrentPlayer ? SchemeConvert(HouseClass::CurrentPlayer->ColorSchemeIndex) : nullptr;
-					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Terrain);
-				}
-				else if (anim->UseCellLightConvert)
-				{
-					// The native draw ran first and made the cell's LightConvert where it was missing.
-					convert = renderCell->LightConvert;
-					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Terrain);
-				}
-				else if (anim->LightConvert)
-				{
-					// The building's drawer and intensity a slot anim keeps; Phobos' 4232BF lights a MakeInfantry
-					// anim by its own cell.
-					convert = anim->LightConvert;
-					if (!normalLight) brightness = type->MakeInfantry != -1 ? int(anim->GetCell()->Intensity_Normal) : anim->TintColor;
-				}
-				else
-				{
-					convert = FileSystem::ANIM_PAL;
-					if (const auto* custom = AresPalette(type)) convert = custom;
-					if (type->AltPalette) convert = AltPalette(anim, typeExt, ext);
-					if (!normalLight) brightness = std::int16_t(renderCell->Intensity_Normal);
-				}
-				if (!convert) { ++count.Palette; return; }
-
-				// Phobos' 423420 replaces the tint of a building anim: the building on its cell, else the one it
-				// belongs to, with the custom tint and intensity; a shrouded cell clears it.
-				const auto center = anim->GetCoords();
-				auto* centerCell = MapClass::Instance.TryGetCellAt(center);
-				if (!centerCell) { ++count.Palette; return; }
-				int tint = 0;
-				if (anim->IsBuildingAnim)
-				{
-					// For a unit's deploying anim it takes the unit's own intensity, which the capture does not model.
-					const auto* unit = abstract_cast<UnitClass*>(anim->OwnerObject);
-					if (unit && unit->DeployAnim == anim) { ++count.AnimsUnsupported; return; }
-					TechnoClass* techno = centerCell->GetBuilding();
-					if (!techno) techno = ext->ParentBuilding;
-					if (techno)
-					{
-						tint |= TechnoExt::GetTintColor(techno, true, true, false);
-						int discard = 0;
-						TechnoExt::ApplyCustomTintValues(techno, tint, normalLight ? discard : brightness);
-					}
-				}
-				if (centerCell->IsShrouded()) tint = 0;
-
-				const int height = AdjustZ(anim->GetZ()), y = type->YDrawOffset, index = type->ArrayIndex;
-				const auto at = [&](int x, int row) { return Point {std::int64_t(x) + ViewX, std::int64_t(row) + ViewY}; };
-				const auto submit = [&](const ConvertClass* palette, int shapeFrame, Point position, std::uint32_t partFlags, int zAdjust, ZGradient gradient,
-					int light, int partTint)
-				{
-					Call call;
-					call.Image = image;
-					call.Frame = shapeFrame;
-					call.Convert = palette;
-					call.Brightness = light;
-					call.ZAdjust = zAdjust;
-					call.Gradient = int(gradient);
-					call.Bounded = false;
-					call.Tint = partTint;
-					const auto mode = AnimImage::DepthMode(partFlags);
-					call.TestsDepth = mode.Test;
-					call.WritesDepth = mode.Write;
-					const bool shadow = partFlags & AnimImage::ShadowFlag;
-					call.Translucency = std::uint8_t(partFlags & AnimImage::TranslucencyMask);
-					const auto drawn = Target->size();
-					Place(renderCell->MapCoords.X, renderCell->MapCoords.Y, Layer::Anim, index, call, position, shadow);
-					if (Target->size() == drawn) return;
-					const auto& draw = Target->back();
-					count.AnimsTranslucent += draw.Translucency != 0;
-					count.AnimsWriting += draw.WritesDepth;
-					count.AnimsTinted += draw.Tint != 0;
-				};
-				// Phobos' 423365 draws the HasExtras shadow only with ExtraShadow: at the ground below, over the
-				// current frame.
-				if (anim->HasExtras && typeExt->ExtraShadow)
-				{
-					++count.AnimsExtras;
-					submit(convert, frame, at(point.X, AnimImage::Add32(AnimImage::Add32(point.Y, AdjustZ(anim->GetHeight())), y)), AnimImage::ExtrasShadowFlags,
-						AnimImage::ExtrasZAdjust(y, height), ZGradient::Ground, FullBrightness, 0);
-				}
-				const auto body = AnimImage::BodyFlags(flags);
-				if (type->Tiled)
-				{
-					// 69E7E0's frame 0 height, or Phobos' Tiled.Interval (423654), steps the tiles; Phobos'
-					// 423660 may start them at the point itself, and its 4236F0 gives them the type's palette.
-					const auto* data = ShapeData(image);
-					const auto base = reinterpret_cast<std::uintptr_t>(data);
-					if (!data || data->Frames <= 0 || !CursorSnapshot::Readable(reinterpret_cast<const void*>(base + sizeof(SHPStruct)), sizeof(SHPFrame)))
-					{
-						++count.Frame;
-						return;
-					}
-					const int step = typeExt->Tiled_Interval > 0 ? int(typeExt->Tiled_Interval) : int(data->AsFile()->GetFrameHeader(0).Height);
-					std::vector<AnimImage::TiledStep> steps;
-					if (!AnimImage::TiledSteps(point.Y, step, typeExt->Tiled_AlignToCenter ? 0 : step / 2,
-						AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::TiledDepth), steps, MaxTiles)) { ++count.AnimsUnsupported; return; }
-					const auto* palette = typeExt->Palette.GetOrDefaultConvert(FileSystem::ANIM_PAL);
-					for (const auto& tile : steps)
-					{
-						++count.AnimsTiled;
-						submit(palette, frame, at(point.X, AnimImage::Add32(tile.Y, y)), body, tile.ZAdjust, ZGradient::Deg90, brightness, tint);
-					}
-					return;
-				}
-				const auto position = at(point.X, AnimImage::Add32(point.Y, y));
-				if (type->Flat)
-				{
-					submit(convert, frame, position, body, AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::FlatDepth), ZGradient::Ground, brightness, tint);
-					return;
-				}
-				submit(convert, frame, position, body, AnimImage::Depth(y, anim->ZAdjust, height, AnimImage::BodyDepth), ZGradient::Deg90, brightness, tint);
-				if (!type->Shadow) return;
-				const int frames = FrameCount(image);
-				if (frames == UnloadedShape) { ++count.Unloaded; return; }
-				if (frames < 0) { ++count.Frame; return; }
-				// Phobos' 423855 casts the shadow of a deploying anim in the air onto its unit's cell.
-				int z = anim->GetZ();
-				if (auto* unit = abstract_cast<UnitClass*>(anim->OwnerObject); unit && unit->DeployAnim == anim && unit->GetHeight() > 0)
-				{
-					const auto ground = unit->GetCell()->GetCenterCoords();
-					point = TacticalClass::Instance->CoordsToClient(ground).first;
-					z = ground.Z;
-				}
-				submit(convert, AnimImage::ShadowFrame(frame, std::int16_t(frames)), at(point.X, point.Y), AnimImage::ShadowOf(flags),
-					AnimImage::ShadowZAdjust(AdjustZ(z)), ZGradient::Ground, FullBrightness, 0);
-			}
-
 			// 4802A0 and 547230 for a cell of 6D7C00's scan: the C_SHADOW.SHP frame its tile casts.
 			void Cliff(const CellClass* cell, int cellX, int cellY)
 			{
@@ -1282,34 +744,49 @@ namespace OverlaySnapshot
 			}
 		};
 
-		// 6D8DB0's view range: IsoTransformMatrix applied by 5AFB80 to its probes, truncated toward
-		// zero as 7C5F00 does.
-		TerrainObjectImage::ViewRange ComputeViewRange(const TacticalClass& tactical)
-		{
-			using Apply = Vector3D<float>*(__fastcall*)(Vector3D<float>*, const Matrix3D*, const Vector3D<float>*);
-			const auto apply = reinterpret_cast<Apply>(MatrixApply);
-			const auto& view = DSurface::ViewBounds;
-			const auto probes = TerrainObjectImage::RangeProbes(tactical.TacticalPos.X, tactical.TacticalPos.Y, view.Width, view.Height);
-			const auto project = [&](TerrainObjectImage::ViewProbe probe)
-			{
-				const Vector3D<float> input {float(probe.X), float(probe.Y), 0.f};
-				Vector3D<float> output {};
-				return *apply(&output, &tactical.IsoTransformMatrix, &input);
-			};
-			const auto top = project(probes.Top), right = project(probes.Right), left = project(probes.Left);
-			return TerrainObjectImage::MakeViewRange(int(top.X), int(top.Y), int(right.X), int(left.Y));
-		}
-
-		// 6D8DB0: every layer in order and each of its objects in place. Its Terrain branch (6D9224)
-		// draws an animated or crumbling object whose Location is in the view range and not fogged
-		// (5865E0); its anim branch (6D9187) draws an anim whose GetCoords are in the range and, unless it
-		// is a building's or keeps out of fog, not fogged. The other objects only count, for the trace.
-		void CaptureComposite(Capture& capture, const TacticalClass& tactical)
+		// 6D8DB0's draws on Composite: each recorded 4AED70 call in its order, placed as 4AED70 places it
+		// within its clip; and the rectangles of the objects it marked IsVisible, for the trace.
+		void CaptureComposite(Capture& capture)
 		{
 			capture.Target = &Current.CompositeDraws;
 			capture.Count = &Current.CompositeCount;
 			auto& count = Current.CompositeCount;
-			const auto range = ComputeViewRange(tactical);
+			for (const auto& recorded : Recorded)
+			{
+				if (!recorded.OnTarget) { ++count.CallsElsewhere; continue; }
+				++count.Calls;
+				if (!(recorded.Flags & CenteredFlag) || (recorded.Flags & ~ModeledFlags) || recorded.Remap || (recorded.ZShape && recorded.ZShapeFrame))
+				{
+					if (!count.CallsUnmodeled++) FirstUnmodeled = recorded;
+					continue;
+				}
+				Call call;
+				call.Image = recorded.Image;
+				call.Frame = recorded.Frame;
+				call.Convert = recorded.Convert;
+				call.Brightness = recorded.Brightness;
+				call.ZAdjust = recorded.ZAdjust;
+				call.Gradient = recorded.Gradient;
+				call.ZShape = recorded.ZShape;
+				call.ZShapeX = recorded.ZShapeX;
+				call.ZShapeY = recorded.ZShapeY;
+				call.Bounded = false;
+				call.WritesDepth = recorded.Flags & ZWriteFlag;
+				call.TestsDepth = call.WritesDepth || (recorded.Flags & ZReadMask);
+				call.Translucency = std::uint8_t(recorded.Flags & TranslucencyMask);
+				call.Tint = recorded.Tint;
+				call.Bounds = &recorded.Bounds;
+				if (!call.Convert) { ++count.Palette; continue; }
+				const auto& bounds = recorded.Bounds;
+				const auto drawn = capture.Target->size();
+				capture.Place(0, 0, Layer::Composite, int(recorded.Caller), call,
+					{std::int64_t(bounds.X) + recorded.Point.X, std::int64_t(bounds.Y) + recorded.Point.Y}, recorded.Flags & ShadowFlag);
+				if (capture.Target->size() == drawn) continue;
+				const auto& draw = capture.Target->back();
+				count.CallsTranslucent += draw.Translucency != 0;
+				count.CallsWriting += draw.WritesDepth;
+				count.CallsTinted += draw.Tint != 0;
+			}
 			for (int layer = 0; layer < LayerCount; ++layer)
 			{
 				const auto& items = MapClass::ObjectsInLayers[layer];
@@ -1318,59 +795,15 @@ namespace OverlaySnapshot
 					auto* object = items.Items[i];
 					if (!CursorSnapshot::Readable(object, sizeof(ObjectClass))) continue;
 					++count.LayerObjects;
-					const auto location = object->Location;
-					const bool inRange = TerrainObjectImage::InViewRange(range, location.X, location.Y);
-					if (object->WhatAmI() == AbstractType::Anim)
-					{
-						auto* anim = static_cast<AnimClass*>(object);
-						if (!CursorSnapshot::Readable(anim, sizeof(AnimClass)) || !CursorSnapshot::Readable(anim->Type, sizeof(AnimTypeClass)))
-						{
-							++count.Frame;
-							continue;
-						}
-						++count.Anims;
-						const auto coords = anim->GetCoords();
-						if (!TerrainObjectImage::InViewRange(range, coords.X, coords.Y)) { ++count.AnimsOutOfRange; continue; }
-						if (!anim->IsBuildingAnim && anim->Type->ShouldFogRemove && MapClass::Instance.IsLocationFogged(coords)) { ++count.AnimsFogged; continue; }
-						capture.Anim(anim);
-						continue;
-					}
-					if (object->WhatAmI() != AbstractType::Terrain)
-					{
-						// The Techno branch calls DrawIfVisible whether its point projects or not.
-						const auto what = object->WhatAmI();
-						if (what == AbstractType::Building && inRange && CursorSnapshot::Readable(object, sizeof(BuildingClass)))
-							capture.BuildingDynamic(static_cast<BuildingClass*>(object));
-						else if (what == AbstractType::Infantry && CursorSnapshot::Readable(object, sizeof(InfantryClass)))
-							capture.Infantry(static_cast<InfantryClass*>(object), inRange);
-						else if (what == AbstractType::Bullet && CursorSnapshot::Readable(object, sizeof(BulletClass)))
-							capture.Bullet(static_cast<BulletClass*>(object), inRange);
-						++count.Others;
-						count.OthersInRange += inRange;
-						if (object->IsVisible)
-						{
-							++count.OthersVisible;
-							RectangleStruct dimensions {};
-							object->GetRenderDimensions(&dimensions);
-							// A voxel unit gives an empty rectangle: what it drew stays unexplained.
-							if (dimensions.Width <= 0 || dimensions.Height <= 0) ++count.OthersUnbounded;
-							dimensions.X += capture.ViewX;
-							dimensions.Y += capture.ViewY;
-							Current.OtherBounds.push_back(dimensions);
-						}
-						continue;
-					}
-					auto* terrain = static_cast<TerrainClass*>(object);
-					if (!CursorSnapshot::Readable(terrain, sizeof(TerrainClass)) || !CursorSnapshot::Readable(terrain->Type, sizeof(TerrainTypeClass)))
-					{
-						++count.Frame;
-						continue;
-					}
-					if (!terrain->Type->IsAnimated && !terrain->IsCrumbling) continue;
-					++count.Animated;
-					if (!inRange) { ++count.OutOfRange; continue; }
-					if (MapClass::Instance.IsLocationFogged(location)) { ++count.LocationFogged; continue; }
-					capture.Terrain(terrain, true);
+					if (!object->IsVisible || object->WhatAmI() == AbstractType::Terrain || object->WhatAmI() == AbstractType::Anim) continue;
+					++count.OthersVisible;
+					RectangleStruct dimensions {};
+					object->GetRenderDimensions(&dimensions);
+					// A voxel unit gives an empty rectangle: what it drew stays unexplained.
+					if (dimensions.Width <= 0 || dimensions.Height <= 0) ++count.OthersUnbounded;
+					dimensions.X += capture.ViewX;
+					dimensions.Y += capture.ViewY;
+					Current.OtherBounds.push_back(dimensions);
 				}
 			}
 			capture.Target = &Current.Draws;
@@ -1677,9 +1110,7 @@ namespace OverlaySnapshot
 			case Layer::Cliff: return 'c';
 			case Layer::Building: return 'b';
 			case Layer::Fogged: return 'f';
-			case Layer::Anim: return 'n';
-			case Layer::Infantry: return 'i';
-			case Layer::Bullet: return 'p';
+			case Layer::Composite: return 'r';
 			default: return 'a';
 			}
 		}
@@ -1737,7 +1168,10 @@ namespace OverlaySnapshot
 				else
 				{
 					const auto& draw = draws[size_t(owner)];
-					std::snprintf(text, sizeof(text), "%s:%d,%d:%c%d:f%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d", draw.Shadow ? "shadow" : "body",
+					// A recorded call's index is its caller's address.
+					std::snprintf(text, sizeof(text), draw.Source == Layer::Composite
+						? "%s:%d,%d:%c%X:f%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d"
+						: "%s:%d,%d:%c%d:f%d:z=%d:g=%d:rle=%d:zshape=%d:rect=%d,%d,%d,%d:frame=%d,%d", draw.Shadow ? "shadow" : "body",
 						draw.CellX, draw.CellY, LayerLetter(draw.Source), draw.Index, draw.ShapeFrame, draw.ZAdjust, draw.GradientIndex, draw.Compressed, draw.ZShaped,
 						draw.X, draw.Y, draw.Width, draw.Height, draw.FrameX, draw.FrameY);
 				}
@@ -1760,48 +1194,27 @@ namespace OverlaySnapshot
 			Debug::Log("[TerrainGPU] tiledepth sample=%u first=%d,%d:native=%d:model=%d:%s\n", TraceCount, check.DepthX, check.DepthY,
 				check.NativeDepth, check.ModelDepth, describe(check.DepthOwner));
 
-			// D2: 6D8DB0's animated or crumbling Terrain on Composite, each draw in order (type@cell:frame,
-			// s for a shadow), and its replay over the copies around the layers.
+			// D3: RenderLayers' recorded 4AED70 calls on Composite, each draw in order (caller:frame, s for a
+			// shadow, t translucent, w writing Z, n not testing it, @ its rectangle), and their replay over the
+			// copies around the layers.
 			const auto& composite = Current.CompositeCount;
-			Debug::Log("[TerrainGPU] composite sample=%u layerObjects=%d others=%d othersInRange=%d othersVisible=%d unbounded=%d animated=%d outOfRange=%d locationFogged=%d "
-				"terrainOutside=%d bodies=%d shadows=%d compressed=%d palette=%d frame=%d noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d damaged=%d copyFailed=%u\n",
-				TraceCount, composite.LayerObjects, composite.Others, composite.OthersInRange, composite.OthersVisible, composite.OthersUnbounded, composite.Animated, composite.OutOfRange, composite.LocationFogged,
-				composite.TerrainOutside, composite.Bodies, composite.Shadows, composite.Compressed, composite.Palette, composite.Frame, composite.NoImage,
-				composite.Unloaded, composite.Empty, composite.Outside, composite.Unsupported, composite.Damaged, CompositeSnapshot::Failed);
-			// D3b: the anims of the layers.
-			Debug::Log("[TerrainGPU] compositeanims sample=%u anims=%d outOfRange=%d fogged=%d delayed=%d limbo=%d unprojected=%d ring=%d hidden=%d noImage=%d "
-				"unsupported=%d translucent=%d writing=%d tiled=%d extras=%d tinted=%d\n", TraceCount, composite.Anims, composite.AnimsOutOfRange,
-				composite.AnimsFogged, composite.AnimsDelayed, composite.AnimsLimbo, composite.AnimsUnprojected, composite.AnimsRing, composite.AnimsHidden,
-				composite.AnimsNoImage, composite.AnimsUnsupported, composite.AnimsTranslucent, composite.AnimsWriting, composite.AnimsTiled,
-				composite.AnimsExtras, composite.AnimsTinted);
-			// D3b-2: 43DA80's buildings in range and the DoorAnims drawn.
-			Debug::Log("[TerrainGPU] compositebuildings sample=%u buildings=%d fogged=%d unloading=%d outside=%d unsupported=%d doors=%d\n", TraceCount,
-				composite.Buildings, composite.BuildingsFogged, composite.Unloading, composite.BuildingsOutside, composite.BuildingsUnsupported, composite.Doors);
-			// D3a-1: the infantry and bullets of the layers.
-			Debug::Log("[TerrainGPU] compositeunits sample=%u infantry=%d outside=%d fogged=%d unsupported=%d hidden=%d infshdw=%d bullets=%d bulletsOutside=%d "
-				"bulletsHidden=%d bulletsVoxel=%d\n", TraceCount, composite.Infantry, composite.InfantryOutside, composite.InfantryFogged, composite.InfantryUnsupported,
-				composite.InfantryHidden, composite.InfantryShadows, composite.Bullets, composite.BulletsOutside, composite.BulletsHidden, composite.BulletsVoxel);
+			Debug::Log("[TerrainGPU] composite sample=%u layerObjects=%d othersVisible=%d unbounded=%d calls=%d elsewhere=%d unmodeled=%d "
+				"firstUnmodeled=%X:flags=%X:remap=%d:zshapeFrame=%d bodies=%d shadows=%d compressed=%d translucent=%d writing=%d tinted=%d palette=%d frame=%d "
+				"noImage=%d unloaded=%d empty=%d outside=%d unsupported=%d zshape=%d copyFailed=%u\n",
+				TraceCount, composite.LayerObjects, composite.OthersVisible, composite.OthersUnbounded, composite.Calls, composite.CallsElsewhere,
+				composite.CallsUnmodeled, unsigned(FirstUnmodeled.Caller), FirstUnmodeled.Flags, FirstUnmodeled.Remap, FirstUnmodeled.ZShapeFrame,
+				composite.Bodies, composite.Shadows, composite.Compressed, composite.CallsTranslucent, composite.CallsWriting, composite.CallsTinted,
+				composite.Palette, composite.Frame, composite.NoImage, composite.Unloaded, composite.Empty, composite.Outside, composite.Unsupported,
+				composite.ZShape, CompositeSnapshot::Failed);
 			std::string draws;
 			for (const auto& draw : Current.CompositeDraws)
 			{
-				char item[64];
-				std::snprintf(item, sizeof(item), " %c%d@%d,%d:%d%s%s%s", LayerLetter(draw.Source), draw.Index, draw.CellX, draw.CellY, draw.ShapeFrame,
-					draw.Shadow ? "s" : "", draw.Translucency ? "t" : "", draw.WritesDepth ? "w" : (draw.TestsDepth ? "" : "n"));
+				char item[80];
+				std::snprintf(item, sizeof(item), " %X:%d%s%s%s@%d,%d,%dx%d", unsigned(draw.Index), draw.ShapeFrame, draw.Shadow ? "s" : "",
+					draw.Translucency ? "t" : "", draw.WritesDepth ? "w" : (draw.TestsDepth ? "" : "n"), draw.X, draw.Y, draw.Width, draw.Height);
 				draws += item;
 			}
 			if (!draws.empty()) Debug::Log("[TerrainGPU] compositedraws sample=%u%s\n", TraceCount, draws.c_str());
-			// D3b: each anim draw's type, frame, flags, Tile rectangle, ZAdjust and light row.
-			std::string anims;
-			for (const auto& draw : Current.CompositeDraws)
-			{
-				if (draw.Source != Layer::Anim) continue;
-				const auto* type = draw.Index >= 0 && draw.Index < AnimTypeClass::Array.Count ? AnimTypeClass::Array.Items[draw.Index] : nullptr;
-				char item[96];
-				std::snprintf(item, sizeof(item), " %s:%d%s%s@%d,%d,%dx%d:z=%d:q=%d", type ? type->ID : "?", draw.ShapeFrame, draw.Shadow ? "s" : "",
-					draw.Translucency ? "t" : "", draw.X, draw.Y, draw.Width, draw.Height, draw.ZAdjust, draw.LightRow);
-				anims += item;
-			}
-			if (!anims.empty()) Debug::Log("[TerrainGPU] compositeanimdraws sample=%u%s\n", TraceCount, anims.c_str());
 			const auto compositeCheck = CompositeReplay(TerrainSnapshot::Current.Clip);
 			Debug::Log("[TerrainGPU] compositecheck sample=%u input=%s output=%s inputCompared=%d inputMismatched=%d inputFirst=%d,%d:tile=%04X:copy=%04X "
 				"compared=%d drawn=%d mismatched=%d untouched=%d others=%d unexplained=%d body=%d shadow=%d rejected=%d missing=%d box=%d,%d,%d,%d first=%d,%d:native=%04X:model=%04X:%s\n",
@@ -1902,7 +1315,7 @@ namespace OverlaySnapshot
 			{
 				auto* object = ground.Items[i];
 				if (!CursorSnapshot::Readable(object, sizeof(TerrainClass)) || object->WhatAmI() != AbstractType::Terrain || !object->IsAlive) continue;
-				capture.Terrain(static_cast<TerrainClass*>(object), false);
+				capture.Terrain(static_cast<TerrainClass*>(object));
 			}
 			// 6D7C00: the cliff shadows, rows from far to near.
 			const int cliffRows = TerrainObjectImage::CliffRows(clip.Height), cliffColumns = TerrainObjectImage::CliffColumns(clip.Width);
@@ -1922,7 +1335,7 @@ namespace OverlaySnapshot
 				if (!CursorSnapshot::Readable(object, sizeof(BuildingClass)) || object->WhatAmI() != AbstractType::Building) continue;
 				capture.Building(static_cast<BuildingClass*>(object));
 			}
-			CaptureComposite(capture, *tactical);
+			CaptureComposite(capture);
 			Current.Visible = true;
 		}
 		// The native Tile keeps what scrolling redrew in strips, and a Z-shaped draw's depth depends
@@ -1939,5 +1352,25 @@ namespace OverlaySnapshot
 			Trace();
 		}
 		else if (trace) Trace();
+	}
+
+	void BeginRecording(DSurface* target)
+	{
+		Recorded.clear();
+		RecordingTarget = target;
+	}
+
+	void EndRecording() { RecordingTarget = nullptr; }
+
+	void RecordCall(RecordedCall call, DSurface* surface)
+	{
+		// 4AED70 cuts the clip to the surface (421B60) and draws nothing where they do not meet.
+		auto& bounds = call.Bounds;
+		const std::int64_t left = std::max(bounds.X, 0), top = std::max(bounds.Y, 0);
+		const std::int64_t right = std::min(std::int64_t(bounds.X) + bounds.Width, std::int64_t(surface->Width));
+		const std::int64_t bottom = std::min(std::int64_t(bounds.Y) + bounds.Height, std::int64_t(surface->Height));
+		bounds = {int(left), int(top), int(std::max<std::int64_t>(right - left, 0)), int(std::max<std::int64_t>(bottom - top, 0))};
+		call.OnTarget = surface == RecordingTarget;
+		Recorded.push_back(call);
 	}
 }

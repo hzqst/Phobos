@@ -1,12 +1,10 @@
 #pragma once
 
-#include "AnimImage.h"
 #include "BuildingImage.h"
 #include "OverlayImage.h"
 #include "ShapeDepth.h"
 #include "TerrainObjectImage.h"
 #include "TerrainSnapshot.h"
-#include "UnitImage.h"
 #include <BuildingClass.h>
 #include <ColorScheme.h>
 #include <FileSystem.h>
@@ -25,13 +23,12 @@
 // and the cliff shadows (6D7C00, 547230) of gamemd-reverse #19 follow in the same list, in the native
 // order (C6). TerrainPass draws the list after the tiles (C5.2c); the trace replays the captured
 // tiles, smudges and draws in software and compares the result with the native Tile and ZBuffer
-// (C5.2b). Rubble and the deferred records of 6D3470 other than buildings are absent. The animated or crumbling Terrain
-// objects RenderLayers (6D8DB0) draws on Composite in mode 2 (gamemd-reverse #23) are captured in the
-// same callback into a list of their own, which the trace replays over CompositeSnapshot's copies (D2).
-// The live buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1);
-// the building records of 4D1890 (step 4) come first, before the overlays (D1c). The AnimClass objects
-// RenderLayers draws (gamemd-reverse #27) join the animated Terrain in the Composite list (D3b), and
-// so do its infantry and SHP bullets (gamemd-reverse #26, D3a-1).
+// (C5.2b). Rubble and the deferred records of 6D3470 other than buildings are absent. The live
+// buildings of step 8 (gamemd-reverse #22) follow the cliff shadows in the Tile list (D1); the building
+// records of 4D1890 (step 4) come first, before the overlays (D1c). What RenderLayers (6D8DB0) draws on
+// Composite in mode 2 through 4AED70 (animated Terrain, anims, units, bullets and their extras,
+// gamemd-reverse #23, #26, #27) is recorded call by call as it draws, and turned into a list of its own
+// in the same callback, which the trace replays over CompositeSnapshot's copies (D3).
 namespace OverlaySnapshot
 {
 	// 817710: the Z gradient records; AA105C: the slope Z shapes; 81CC30: the bridge pattern.
@@ -74,36 +71,22 @@ namespace OverlaySnapshot
 		int ZAdjust;
 	};
 	static_assert(sizeof(FoggedPart) == 0x10 && offsetof(FoggedPart, ZAdjust) == 0xC);
-	// 6D8DB0 walks the layers at 8A0360 and bounds the Terrain objects it draws by Locations that
-	// 5AFB80 (the matrix applied to a vector) gives for its corners.
+	// 6D8DB0 walks the layers at 8A0360.
 	constexpr int LayerCount = 5;
-	constexpr std::uintptr_t MatrixApply = 0x5AFB80;
 	// 43D290's BUILDNGZ.SHA (frame 0, already less 41h), the projection of a Foundation corner
 	// (6D1FE0), and the Foundation width and height (45EC90, 45ECA0, which Ares takes over), read
 	// as the whole EAX.
 	constexpr std::uintptr_t BuildingZShape = 0x89DDBC, ZShapeMove = 0x6D1FE0, FoundationWidth = 0x45EC90, FoundationHeight = 0x45ECA0;
-	// 422CA0 draws RING1 through Direct3D (4A3840) when this byte is set and a ZBuffer exists.
-	constexpr std::uintptr_t Direct3DUsable = 0x8A0DF0;
-	// Ares 3.0p1's 4232CE (AnimClass_Draw_SetPalette) looks the type up in its extension map (Find,
-	// thiscall) and takes the ConvertClass at +10h; its 422FCC (AnimClass_Draw_Details) asks a helper
-	// whether the frame rate lets low detail anims draw. Offsets from the DLL's base.
-	constexpr std::uintptr_t AresSetPalette = 0xAD20, AresAnimTypeMap = 0xC2994, AresMapFind = 0x58900, AresAnimPalette = 0x10,
-		AresDrawDetails = 0x5EE10, AresFrameRateHelper = 0x2B1C0;
-	// Ares 3.0p1's 468379 (BulletClass_Draw_SetAnimPalette) asks a helper (thiscall) of the bullet type's
-	// extension, kept at +2C4h of the type, for the palette of the anim type the image belongs to.
-	constexpr std::uintptr_t AresBulletPalette = 0x1AEA0, AresBulletPaletteHelper = 0x19A50;
-	constexpr size_t AresBulletTypeExt = 0x2C4;
-	// 518F90: the bridge height ([A8F234]), the height of a level ([A8F240]), INFSHDW.SHP once loaded,
-	// the body's ZAdjust ([825500]), the frame (518D80) and the lighting states (Ion 53A100, Dominator
-	// 53B400, Nuke 53A110); 468090: its own bridge height ([89DE64]) and the bullet's frame (+1E8h).
-	constexpr std::uintptr_t InfantryBridgeHeight = 0xA8F234, InfantryLevelStep = 0xA8F240, InfantryShadowShape = 0xA8F244,
-		InfantryZAdjust = 0x825500, InfantryFrame = 0x518D80, IonActive = 0x53A100, BulletBridgeHeight = 0x89DE64;
-	constexpr size_t BulletFrameSlot = 0x1E8;
+	// 4AED70's flags: Darken (a shadow), the translucency bits, Centered, 400h (which every caller sets),
+	// Alpha, the Z test and the Z write. A recorded call with any other flag, a remap, a Z shape frame
+	// other than 0 or without Centered is not modeled.
+	constexpr std::uint32_t ShadowFlag = 0x1, TranslucencyMask = 0x6, CenteredFlag = 0x200, ZReadMask = 0x3000, ZWriteFlag = 0x4000,
+		ModeledFlags = ShadowFlag | TranslucencyMask | CenteredFlag | 0x400 | 0x800 | ZReadMask | ZWriteFlag;
 
 	// What a draw belongs to: an overlay (6D6D10), a Terrain object (6D97D0), a cliff (6D7C00), a
-	// building (6D9920), a fogged building record's building or anim part (4D1890), an anim (422CA0),
-	// an infantry (518F90) or a bullet (468090).
-	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Anim, Infantry, Bullet };
+	// building (6D9920), a fogged building record's building or anim part (4D1890), or a call recorded
+	// during RenderLayers (its Index the return address).
+	enum class Layer : std::uint8_t { Overlay, Terrain, Cliff, Building, Fogged, FoggedAnim, Composite };
 
 	// One 4AED70 call: a frame of ShapeFrameSource's cache with the blitter's parameters, clipped
 	// against the clip of the capture as 4373B0 / 437A10 do.
@@ -151,30 +134,16 @@ namespace OverlaySnapshot
 		// records of an InvisibleInGame type, and the captures where the records were not sorted.
 		int Fogged = 0, FoggedBuildings = 0, FoggedBuildingsInView = 0, FoggedOthersInView = 0, FoggedAnims = 0, FoggedDetail = 0,
 			FoggedInvisible = 0, FoggedUnsorted = 0;
-		// 6D8DB0: the objects of its layers, the Terrain ones it selects (animated or crumbling), those
-		// outside its view range or at a fogged Location, and the other objects with those in the range.
-		int LayerObjects = 0, Animated = 0, OutOfRange = 0, LocationFogged = 0, Others = 0, OthersInRange = 0;
-		// The other objects 6D8DB0 marked IsVisible (it clears the flag of each and sets it where it draws),
-		// and those of them whose rectangle (GetRenderDimensions) is empty.
-		int OthersVisible = 0, OthersUnbounded = 0;
-		// 6D8DB0's anims: those it walks, those outside the view range or at a fogged Location, then
-		// 422C70 / 5F4B10 / 422CA0: delayed (LoopDelay), in limbo, not projected, drawn by Direct3D (RING1),
-		// hidden (frame rate, Invisible, detail, fog, Phobos' visibility, a level of 15), without an image,
-		// in a state the capture does not draw; and the draws: translucent, writing Z, tiled rounds,
-		// HasExtras shadows and tinted.
-		int Anims = 0, AnimsOutOfRange = 0, AnimsFogged = 0, AnimsDelayed = 0, AnimsLimbo = 0, AnimsUnprojected = 0, AnimsRing = 0,
-			AnimsHidden = 0, AnimsNoImage = 0, AnimsUnsupported = 0, AnimsTranslucent = 0, AnimsWriting = 0, AnimsTiled = 0, AnimsExtras = 0,
-			AnimsTinted = 0;
+		// 6D8DB0: the objects of its layers, and those it marked IsVisible (it clears the flag of each and
+		// sets it where it draws) with those of them whose rectangle (GetRenderDimensions) is empty.
+		int LayerObjects = 0, OthersVisible = 0, OthersUnbounded = 0;
+		// The 4AED70 calls of RenderLayers: on its target, on another surface (a vehicle's scratch), not
+		// modeled, and those translucent, writing Z and tinted among the draws made of them.
+		int Calls = 0, CallsElsewhere = 0, CallsUnmodeled = 0, CallsTranslucent = 0, CallsWriting = 0, CallsTinted = 0;
 		// 6D9920: the buildings of the ground layer, those fogged, off the clip, in a state the capture
 		// does not draw (another visual, warping, disguised), gates moving, buildings unloading and the bibs
 		// and doors drawn.
 		int Buildings = 0, BuildingsFogged = 0, BuildingsOutside = 0, BuildingsUnsupported = 0, Gates = 0, Unloading = 0, Bibs = 0, Doors = 0;
-		// 6D8DB0's infantry: those it walks, those outside its view range, fogged or beyond the margins, in
-		// limbo or not projected (5F4B10), in a state the capture does not draw (a DropPod, a disguise, not
-		// clearly visible), hidden by their visual, and the INFSHDW drawn; its bullets: those it walks,
-		// outside, hidden (fogged, Inviso, SpawnNextAnim) and voxels.
-		int Infantry = 0, InfantryOutside = 0, InfantryFogged = 0, InfantryUnsupported = 0, InfantryHidden = 0, InfantryShadows = 0,
-			Bullets = 0, BulletsOutside = 0, BulletsHidden = 0, BulletsVoxel = 0;
 	};
 	struct Frame
 	{
@@ -185,12 +154,35 @@ namespace OverlaySnapshot
 		std::vector<Draw> CompositeDraws;
 		Counters CompositeCount;
 		// For the trace: the rectangles of those other objects on the clip's surface, where the layers
-		// drew what the D2 replay does not.
+		// drew what the replay does not (voxels, lines).
 		std::vector<RectangleStruct> OtherBounds;
 	};
 	extern Frame Current;
 	extern unsigned TraceCount;
 	extern bool RedrawRequested;
+
+	// One 4AED70 call made during RenderLayers, as passed, with its clip already cut to the surface
+	// (421B60), the caller's return address and whether it drew on RenderLayers' target.
+	struct RecordedCall
+	{
+		const ConvertClass* Convert = nullptr;
+		const SHPStruct* Image = nullptr;
+		int Frame = 0;
+		Point2D Point {};
+		RectangleStruct Bounds {};
+		std::uint32_t Flags = 0;
+		int Remap = 0, ZAdjust = 0, Gradient = 0, Brightness = 0, Tint = 0;
+		const SHPStruct* ZShape = nullptr;
+		int ZShapeFrame = 0, ZShapeX = 0, ZShapeY = 0;
+		std::uintptr_t Caller = 0;
+		bool OnTarget = true;
+	};
+	// The surface RenderLayers draws on while its calls are recorded (between 6D465F and 6D4664 of a
+	// capturing render), else null; the hook at 4AED70 records through RecordCall.
+	extern DSurface* RecordingTarget;
+	void BeginRecording(DSurface* target);
+	void EndRecording();
+	void RecordCall(RecordedCall call, DSurface* surface);
 
 	inline void Invalidate() { Current = {}; }
 

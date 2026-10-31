@@ -10,7 +10,7 @@ rem Sources that define the state a test's header declares.
 set "EXTRA_Atlas=src\Render\PaletteCache.cpp"
 set "EXTRA_ShapeFrameSource=src\Render\ShapeFrameSource.cpp"
 set "EXTRA_CursorTrace=src\Render\CursorTrace.cpp"
-for %%T in (Atlas ButtonImage CameoLayout CursorImage FrameCache GlyphCache ShapeImage ShapeFrameSource CursorTrace Tooltip TerrainImage TerrainBatch ABufferImage ShapeDepth OverlayImage TerrainObjectImage BuildingImage AnimImage UnitImage) do (
+for %%T in (Atlas ButtonImage CameoLayout CursorImage FrameCache GlyphCache ShapeImage ShapeFrameSource CursorTrace Tooltip TerrainImage TerrainBatch ABufferImage ShapeDepth OverlayImage TerrainObjectImage BuildingImage) do (
     call :unit %%T
     if errorlevel 1 exit /b 1
 )
